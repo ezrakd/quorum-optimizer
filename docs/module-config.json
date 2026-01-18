@@ -1,0 +1,487 @@
+{
+  "_meta": {
+    "version": "1.2",
+    "last_updated": "2026-01-18",
+    "description": "Quorum Optimizer module configurations by agency and PT"
+  },
+  
+  "standard_page_template": [
+    "MOD-LIFT",
+    "MOD-CAMP",
+    "MOD-CTX",
+    "MOD-GEO",
+    "MOD-TRF"
+  ],
+  
+  "modules": {
+    "MOD-LIFT": {
+      "name": "Lift vs Control",
+      "status": "in_progress",
+      "standard_columns": ["visitRate", "liftVsControl", "totalImpressions", "totalVisits"],
+      "display_order": 1
+    },
+    "MOD-CAMP": {
+      "name": "Campaign Performance",
+      "status": "complete",
+      "standard_columns": ["name", "impressions", "visits", "visitRate", "index"],
+      "display_order": 2
+    },
+    "MOD-LI": {
+      "name": "Line Item Performance",
+      "status": "not_started",
+      "standard_columns": ["name", "impressions", "visits", "visitRate", "index"],
+      "display_order": null,
+      "notes": "Optional - between MOD-CAMP and MOD-CTX if needed"
+    },
+    "MOD-CRE": {
+      "name": "Creative Performance",
+      "status": "not_started",
+      "standard_columns": ["name", "impressions", "visits", "visitRate", "index"],
+      "display_order": null,
+      "notes": "Optional - between MOD-CAMP and MOD-CTX if needed"
+    },
+    "MOD-CTX": {
+      "name": "Context Optimization",
+      "status": "partial",
+      "standard_columns": ["code", "impressions", "visits", "visitRate", "reallocationPriority"],
+      "display_order": 3
+    },
+    "MOD-GEO": {
+      "name": "Geographic Optimization",
+      "status": "complete",
+      "standard_columns": ["zip", "dma", "impressions", "visits", "visitRate", "reallocationPriority"],
+      "display_order": 4
+    },
+    "MOD-TRF": {
+      "name": "Traffic Source Optimization",
+      "status": "partial",
+      "prerequisite": "Requires Quorum web pixel on advertiser website (WEBPIXEL_IMPRESSION_LOG data)",
+      "standard_columns": ["source", "impressions", "visits", "visitRate", "reallocationPriority"],
+      "display_order": 5
+    }
+  },
+  
+  "advertisers": {
+    "45143": {
+      "name": "Noodles & Company",
+      "agency_id": 2514,
+      "agency_name": "MNTN",
+      "attribution_type": "store_visits",
+      "impressions": 7562975,
+      "visits": 30328,
+      "visit_rate": 0.0040,
+      "status": "active"
+    },
+    "40514": {
+      "name": "Lean RX",
+      "agency_id": 1480,
+      "agency_name": "ViacomCBS WhoSay",
+      "attribution_type": "web_visits",
+      "impressions": 1432999,
+      "visits": 23896,
+      "visit_rate": 0.0167,
+      "status": "active"
+    },
+    "27828": {
+      "name": "First Watch",
+      "agency_id": 2514,
+      "agency_name": "MNTN",
+      "attribution_type": "store_visits",
+      "impressions": 53673743,
+      "visits": 122231,
+      "visit_rate": 0.0023,
+      "status": "available"
+    },
+    "45346": {
+      "name": "Northern Tool",
+      "agency_id": 2514,
+      "agency_name": "MNTN",
+      "attribution_type": "store_visits",
+      "impressions": 44421118,
+      "visits": 33971,
+      "visit_rate": 0.0008,
+      "status": "available"
+    },
+    "37704": {
+      "name": "Sky Zone",
+      "agency_id": 2514,
+      "agency_name": "MNTN",
+      "attribution_type": "store_visits",
+      "impressions": 30723733,
+      "visits": 89377,
+      "visit_rate": 0.0029,
+      "status": "available"
+    },
+    "45141": {
+      "name": "Lowes TTD",
+      "agency_id": 1813,
+      "agency_name": "Causal iQ",
+      "attribution_type": "store_visits",
+      "pt": 6,
+      "impressions": 6991269,
+      "visits": 404283,
+      "visit_rate": 0.0578,
+      "status": "active",
+      "context_source": "SITE"
+    },
+    "7389": {
+      "name": "Space Coast Tourism",
+      "agency_id": 1813,
+      "agency_name": "Causal iQ",
+      "attribution_type": "store_visits",
+      "pt": 8,
+      "impressions": 147142878,
+      "visits": 5702339,
+      "visit_rate": 0.0388,
+      "status": "available",
+      "limitations": ["no_context_pt8"]
+    },
+    "8123": {
+      "name": "AutoZone",
+      "agency_id": 1813,
+      "agency_name": "Causal iQ",
+      "attribution_type": "store_visits",
+      "pt": 6,
+      "impressions": 25371271,
+      "visits": 869868,
+      "visit_rate": 0.0343,
+      "status": "active",
+      "context_source": "SITE",
+      "limitations": ["no_campaign_names"]
+    },
+    "27588": {
+      "name": "Golden Nugget Casino",
+      "agency_id": 1813,
+      "agency_name": "Causal iQ",
+      "attribution_type": "store_visits",
+      "pt": 6,
+      "impressions": 11800000,
+      "visits": 633152,
+      "visit_rate": 0.0537,
+      "status": "active",
+      "context_source": "SITE"
+    },
+    "40143": {
+      "name": "Mountain West Bank",
+      "agency_id": 2234,
+      "agency_name": "Magnite",
+      "attribution_type": "store_visits",
+      "impressions": 3442122,
+      "visits": 11220,
+      "visit_rate": 0.0033,
+      "status": "active"
+    },
+    "39323": {
+      "name": "Visit Pensacola",
+      "agency_id": 2234,
+      "agency_name": "Magnite",
+      "attribution_type": "store_visits",
+      "impressions": 1475798,
+      "visits": 10516,
+      "visit_rate": 0.0071,
+      "status": "active"
+    }
+  },
+  
+  "agencies": {
+    "1480": {
+      "name": "ViacomCBS WhoSay",
+      "attribution_type": "web_visits",
+      "primary_pt": 21,
+      "modules": {
+        "MOD-LIFT": {
+          "exposed_source": "XANDR + WEBPIXEL join",
+          "control_methodology": "TBD",
+          "locked": false
+        },
+        "MOD-CAMP": {
+          "source_table": "XANDR_IMPRESSION_LOG",
+          "campaign_column": "IO_NAME or LI_NAME",
+          "locked": false,
+          "notes": "Needs work"
+        },
+        "MOD-LI": {
+          "source_table": "XANDR_IMPRESSION_LOG",
+          "line_item_column": "LI_NAME",
+          "locked": false
+        },
+        "MOD-CRE": {
+          "source_table": "XANDR_IMPRESSION_LOG",
+          "creative_column": "CREATIVE_NAME",
+          "locked": false
+        },
+        "MOD-CTX": {
+          "source_table": "XANDR_IMPRESSION_LOG",
+          "context_column": "SITE",
+          "context_filter": "SITE LIKE 'g%'",
+          "context_label": "Context Code",
+          "pt_filter": "PT = 21",
+          "attribution_table": "WEBPIXEL_IMPRESSION_LOG",
+          "attribution_join_column": "CLIENT_IP",
+          "locked": true,
+          "locked_date": "2026-01-18"
+        },
+        "MOD-GEO": {
+          "source_table": "XANDR_IMPRESSION_LOG + IP_MAID_MAPPING + MAID_CENTROID_ASSOCIATION",
+          "zip_derivation": "IP -> MAID -> Home ZIP",
+          "has_dma": false,
+          "population_weighting": false,
+          "guardrails": {
+            "min_impressions": 1000,
+            "max_reallocation_pct": 0.35
+          },
+          "locked": true,
+          "locked_date": "2026-01-18"
+        },
+        "MOD-TRF": {
+          "source_table": "XANDR_IMPRESSION_LOG",
+          "source_column": "REFERER_URL",
+          "source_label": "Traffic Source",
+          "transform": "CASE_STATEMENT",
+          "groups": {
+            "Paramount+": "%paramountplus%",
+            "Pluto TV": "%pluto.tv%",
+            "Telly": "%telly.com%",
+            "Amazon": "%amazon%",
+            "Google/DV360": "%doubleclick%",
+            "Google IMA SDK": "%imasdk.googleapis%",
+            "Taboola": "%taboola%",
+            "InMobi": "%inmobi%",
+            "OneTag": "%onetag%",
+            "Localhost/Test": "%localhost%"
+          },
+          "locked": true,
+          "locked_date": "2026-01-18"
+        }
+      }
+    },
+    "2514": {
+      "name": "MNTN",
+      "attribution_type": "store_visits",
+      "primary_pt": 22,
+      "modules": {
+        "MOD-LIFT": {
+          "exposed_source": "QUORUM_ADV_STORE_VISITS WHERE IS_STORE_VISIT = true",
+          "control_methodology": "DMA baseline",
+          "locked": false
+        },
+        "MOD-CAMP": {
+          "source_table": "CAMPAIGN_POSTAL_REPORTING",
+          "campaign_column": "CAMPAIGN_NAME",
+          "locked": true,
+          "locked_date": "2026-01-18"
+        },
+        "MOD-LI": {
+          "source_table": "QUORUM_ADV_STORE_VISITS",
+          "line_item_column": "LINEITEM_NAME",
+          "locked": false
+        },
+        "MOD-CRE": {
+          "source_table": "QUORUM_ADV_STORE_VISITS",
+          "creative_column": "CREATIVE_NAME",
+          "locked": false
+        },
+        "MOD-CTX": {
+          "source_table": "QUORUM_ADV_STORE_VISITS or XANDR_IMPRESSION_LOG",
+          "context_column": "PUBLISHER_CODE",
+          "context_label": "Publisher",
+          "needs_exploration": true,
+          "locked": false
+        },
+        "MOD-GEO": {
+          "source_table": "CAMPAIGN_POSTAL_REPORTING or QUORUM_ADV_STORE_VISITS",
+          "zip_column": "ZIP_CODE or POSTAL_CODE_IMP",
+          "has_dma": true,
+          "dma_source": "ZIP_DMA_MAPPING",
+          "population_weighting": true,
+          "population_source": "MAID_CENTROID_ASSOCIATION.ZIP_POPULATION",
+          "guardrails": {
+            "min_impressions": 3500,
+            "max_reallocation_pct": 0.35,
+            "min_zips_per_dma": 5
+          },
+          "locked": true,
+          "locked_date": "2026-01-18"
+        },
+        "MOD-TRF": {
+          "status": "not_applicable",
+          "reason": "Requires web pixel - most MNTN advertisers are store-visit only",
+          "notes": "Only available if advertiser has Quorum pixel on their website",
+          "locked": false
+        }
+      }
+    },
+    "1813": {
+      "name": "Causal iQ",
+      "attribution_type": "store_visits",
+      "primary_pt": "6/8",
+      "limitations": ["no_campaign_names"],
+      "notes": "PT=6 TTD has SITE field for context; PT=8 DV360 has no context",
+      "modules": {
+        "MOD-CAMP": {
+          "source_table": "CAMPAIGN_POSTAL_REPORTING",
+          "campaign_column": "CAMPAIGN_NAME",
+          "status": "not_available",
+          "reason": "Campaign names are empty in data",
+          "locked": true,
+          "locked_date": "2026-01-18"
+        },
+        "MOD-CTX": {
+          "status": "partial",
+          "source_table": "XANDR_IMPRESSION_LOG",
+          "context_column": "SITE",
+          "join_via": "CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW.IMP_ID = XANDR_IMPRESSION_LOG.ID",
+          "pt_filter": "PT = '6'",
+          "notes": "Only available for PT=6 TTD advertisers (Lowes, AutoZone, Golden Nugget). PT=8 DV360 has no SITE data.",
+          "locked": true,
+          "locked_date": "2026-01-18"
+        },
+        "MOD-GEO": {
+          "source_table": "CAMPAIGN_POSTAL_REPORTING",
+          "zip_column": "USER_HOME_POSTAL_CODE",
+          "has_dma": true,
+          "population_weighting": true,
+          "guardrails": {
+            "min_impressions": 50000,
+            "max_reallocation_pct": 0.35
+          },
+          "locked": true,
+          "locked_date": "2026-01-18"
+        }
+      }
+    },
+    "2234": {
+      "name": "Magnite",
+      "attribution_type": "store_visits",
+      "primary_pt": 20,
+      "modules": {
+        "MOD-CAMP": {
+          "source_table": "CAMPAIGN_POSTAL_REPORTING",
+          "campaign_column": "CAMPAIGN_NAME",
+          "locked": true,
+          "locked_date": "2026-01-18"
+        },
+        "MOD-CTX": {
+          "source_table": "XANDR_IMPRESSION_LOG",
+          "context_column": "PUBLISHER_CODE",
+          "context_label": "Publisher",
+          "pt_filter": "PT = 20",
+          "match_by": "ADV_NAME ILIKE pattern",
+          "notes": "Publisher names directly in PUBLISHER_CODE (Samsung Ads, DIRECTV, etc.)",
+          "locked": true,
+          "locked_date": "2026-01-18"
+        },
+        "MOD-GEO": {
+          "source_table": "CAMPAIGN_POSTAL_REPORTING",
+          "zip_column": "USER_HOME_POSTAL_CODE",
+          "has_dma": true,
+          "population_weighting": true,
+          "guardrails": {
+            "min_impressions": 5000,
+            "max_reallocation_pct": 0.35,
+            "min_zips_per_dma": 5
+          },
+          "locked": true,
+          "locked_date": "2026-01-18"
+        },
+        "MOD-TRF": {
+          "status": "not_applicable",
+          "reason": "Store visit advertisers - no web pixel"
+        }
+      }
+    }
+  },
+  
+  "pt_overrides": {
+    "6": {
+      "name": "Trade Desk",
+      "MOD-CTX": {
+        "context_column": "PUBLISHER_ID",
+        "context_label": "Publisher",
+        "lookup_table": "PUBLISHERS_ID_NAME_MAPPING",
+        "lookup_join": "PUBLISHER_ID = ID",
+        "lookup_display": "PUBLISHER_NAME"
+      }
+    },
+    "20": {
+      "name": "SpringServe",
+      "MOD-CTX": {
+        "context_column": "PUBLISHER_CODE",
+        "context_label": "Publisher",
+        "notes": "Publisher names directly in field (Warner+Bros.+Discovery, DIRECTV, etc.)"
+      }
+    },
+    "21": {
+      "name": "FreeWheel",
+      "MOD-CTX": {
+        "context_column": "SITE",
+        "context_filter": "SITE LIKE 'g%'",
+        "context_label": "Context Code",
+        "notes": "g#### codes are opaque show/content IDs"
+      }
+    },
+    "22": {
+      "name": "MNTN",
+      "MOD-CTX": {
+        "context_column": "PUBLISHER_CODE",
+        "context_label": "Publisher",
+        "source_table": "QUORUM_ADV_STORE_VISITS",
+        "notes": "Publisher names directly in field (HBO Max, NBC, Paramount Streaming, etc.)"
+      }
+    }
+  },
+  
+  "standard_calculations": {
+    "visit_rate": {
+      "formula": "visits / impressions",
+      "display": "(rate * 100).toFixed(2) + '%'"
+    },
+    "performance_index": {
+      "formula": "(item_visit_rate / baseline_visit_rate) * 100",
+      "description": "100 = baseline, >100 = outperforming",
+      "applies_to": ["MOD-CAMP", "MOD-LI", "MOD-CRE"]
+    },
+    "reallocation_priority": {
+      "formula": "(imp_share * 1000) - (perf_ratio * 100)",
+      "imp_share": "item_impressions / total_impressions",
+      "perf_ratio": "item_visit_rate / baseline_visit_rate",
+      "applies_to": ["MOD-CTX", "MOD-GEO", "MOD-TRF"],
+      "color_scale": {
+        ">100": "#ff4444",
+        ">50": "#ff8844",
+        ">0": "#ffbb44",
+        ">-50": "#88dd88",
+        "else": "#44cc44"
+      }
+    },
+    "lift_vs_control": {
+      "formula": "((exposed_rate - control_rate) / control_rate) * 100",
+      "significance": "z-test, p < 0.05",
+      "applies_to": ["MOD-LIFT"]
+    },
+    "projected_improvement": {
+      "formula": "((new_rate / baseline_rate) - 1) * 100",
+      "new_rate": "(total_visits - exc_visits) / (total_imps - exc_imps)"
+    }
+  },
+  
+  "ux_style": {
+    "colors": {
+      "background": "#0b1220",
+      "primary": "#7aa2ff",
+      "success": "#3ddc97",
+      "warning": "#ffbb44",
+      "danger": "#ff4444",
+      "text_primary": "#e7eefc",
+      "text_secondary": "#a8b6d8",
+      "text_muted": "#606875"
+    },
+    "formatting": {
+      "visit_rate": "2 decimals + %",
+      "numbers": "toLocaleString() for commas",
+      "priority": "color-coded background"
+    },
+    "locked": true,
+    "locked_date": "2026-01-18"
+  }
+}
