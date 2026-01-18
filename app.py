@@ -975,3 +975,282 @@ def get_web_zip_performance():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=True)
+
+
+# ============================================================================
+# WEB CAMPAIGN PERFORMANCE (Last-Touch Attribution)
+# Uses PARAMOUNT_AD_FULL_ATTRIBUTION_V2 which has campaign/lineitem/publisher data
+# ============================================================================
+
+@app.route('/api/web/campaign-performance', methods=['GET'])
+def get_web_campaign_performance():
+    """Get campaign (IO) level web performance with last-touch attribution.
+    
+    Uses PARAMOUNT_AD_FULL_ATTRIBUTION_V2 which has full campaign/lineitem data.
+    Last-touch is determined by MAX(IMP_DATE) per device per visit.
+    """
+    advertiser_id = request.args.get('advertiser_id')
+    start_date = request.args.get('start_date', '2020-01-01')
+    end_date = request.args.get('end_date', '2030-12-31')
+    
+    if not advertiser_id:
+        return jsonify({'success': False, 'error': 'advertiser_id parameter required'}), 400
+    
+    try:
+        query = """
+            WITH last_touch AS (
+                SELECT *,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY IMP_MAID, SITE_VISIT_ID 
+                        ORDER BY IMP_DATE DESC
+                    ) as rn
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_AD_FULL_ATTRIBUTION_V2
+                WHERE QUORUM_ADVERTISER_ID = %s
+                  AND IS_SITE_VISIT = 'TRUE'
+                  AND SITE_VISIT_TIMESTAMP >= %s
+                  AND SITE_VISIT_TIMESTAMP < %s
+            ),
+            impressions_by_campaign AS (
+                SELECT 
+                    IO_ID as CAMPAIGN_ID,
+                    MAX(IO_NAME) as CAMPAIGN_NAME,
+                    MAX(PT) as PT,
+                    COUNT(*) as IMPRESSIONS
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_AD_FULL_ATTRIBUTION_V2
+                WHERE QUORUM_ADVERTISER_ID = %s
+                  AND SITE_VISIT_TIMESTAMP >= %s
+                  AND SITE_VISIT_TIMESTAMP < %s
+                GROUP BY IO_ID
+            ),
+            visits_by_campaign AS (
+                SELECT 
+                    IO_ID as CAMPAIGN_ID,
+                    COUNT(*) as W_VISITS
+                FROM last_touch
+                WHERE rn = 1
+                GROUP BY IO_ID
+            )
+            SELECT 
+                i.PT,
+                i.CAMPAIGN_ID,
+                i.CAMPAIGN_NAME,
+                i.IMPRESSIONS,
+                COALESCE(v.W_VISITS, 0) as W_VISITS
+            FROM impressions_by_campaign i
+            LEFT JOIN visits_by_campaign v ON i.CAMPAIGN_ID = v.CAMPAIGN_ID
+            ORDER BY i.IMPRESSIONS DESC
+            LIMIT 50
+        """
+        results = execute_query(query, (advertiser_id, start_date, end_date, advertiser_id, start_date, end_date))
+        
+        # Add PT names
+        for row in results:
+            pt = str(row.get('PT', ''))
+            row['PT_NAME'] = PT_CONFIG.get(pt, DEFAULT_PT_CONFIG).get('name', 'Unknown')
+        
+        return jsonify({'success': True, 'data': results})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/web/lineitem-performance', methods=['GET'])
+def get_web_lineitem_performance():
+    """Get line item level web performance with last-touch attribution."""
+    advertiser_id = request.args.get('advertiser_id')
+    campaign_id = request.args.get('campaign_id')
+    start_date = request.args.get('start_date', '2020-01-01')
+    end_date = request.args.get('end_date', '2030-12-31')
+    
+    if not advertiser_id:
+        return jsonify({'success': False, 'error': 'advertiser_id parameter required'}), 400
+    
+    try:
+        campaign_filter = "AND IO_ID = %s" if campaign_id else ""
+        params = [advertiser_id, start_date, end_date]
+        if campaign_id:
+            params.append(campaign_id)
+        params.extend([advertiser_id, start_date, end_date])
+        if campaign_id:
+            params.append(campaign_id)
+        
+        query = f"""
+            WITH last_touch AS (
+                SELECT *,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY IMP_MAID, SITE_VISIT_ID 
+                        ORDER BY IMP_DATE DESC
+                    ) as rn
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_AD_FULL_ATTRIBUTION_V2
+                WHERE QUORUM_ADVERTISER_ID = %s
+                  AND IS_SITE_VISIT = 'TRUE'
+                  AND SITE_VISIT_TIMESTAMP >= %s
+                  AND SITE_VISIT_TIMESTAMP < %s
+                  {campaign_filter}
+            ),
+            impressions_by_lineitem AS (
+                SELECT 
+                    IO_ID as CAMPAIGN_ID,
+                    MAX(IO_NAME) as CAMPAIGN_NAME,
+                    LINEITEM_ID,
+                    MAX(LINEITEM_NAME) as LINEITEM_NAME,
+                    MAX(PT) as PT,
+                    COUNT(*) as IMPRESSIONS
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_AD_FULL_ATTRIBUTION_V2
+                WHERE QUORUM_ADVERTISER_ID = %s
+                  AND LINEITEM_ID IS NOT NULL
+                  AND SITE_VISIT_TIMESTAMP >= %s
+                  AND SITE_VISIT_TIMESTAMP < %s
+                  {campaign_filter}
+                GROUP BY IO_ID, LINEITEM_ID
+            ),
+            visits_by_lineitem AS (
+                SELECT 
+                    LINEITEM_ID,
+                    COUNT(*) as W_VISITS
+                FROM last_touch
+                WHERE rn = 1
+                GROUP BY LINEITEM_ID
+            )
+            SELECT 
+                i.PT,
+                i.CAMPAIGN_ID,
+                i.CAMPAIGN_NAME,
+                i.LINEITEM_ID,
+                i.LINEITEM_NAME,
+                i.IMPRESSIONS,
+                COALESCE(v.W_VISITS, 0) as W_VISITS
+            FROM impressions_by_lineitem i
+            LEFT JOIN visits_by_lineitem v ON i.LINEITEM_ID = v.LINEITEM_ID
+            ORDER BY i.IMPRESSIONS DESC
+            LIMIT 100
+        """
+        results = execute_query(query, tuple(params))
+        
+        # Add PT names
+        for row in results:
+            pt = str(row.get('PT', ''))
+            row['PT_NAME'] = PT_CONFIG.get(pt, DEFAULT_PT_CONFIG).get('name', 'Unknown')
+        
+        return jsonify({'success': True, 'data': results})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/web/publisher-performance', methods=['GET'])
+def get_web_publisher_performance():
+    """Get publisher-level web performance with last-touch attribution.
+    
+    Uses SITE column from PARAMOUNT_AD_FULL_ATTRIBUTION_V2.
+    """
+    advertiser_id = request.args.get('advertiser_id')
+    start_date = request.args.get('start_date', '2020-01-01')
+    end_date = request.args.get('end_date', '2030-12-31')
+    
+    if not advertiser_id:
+        return jsonify({'success': False, 'error': 'advertiser_id parameter required'}), 400
+    
+    try:
+        query = """
+            WITH last_touch AS (
+                SELECT *,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY IMP_MAID, SITE_VISIT_ID 
+                        ORDER BY IMP_DATE DESC
+                    ) as rn
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_AD_FULL_ATTRIBUTION_V2
+                WHERE QUORUM_ADVERTISER_ID = %s
+                  AND IS_SITE_VISIT = 'TRUE'
+                  AND SITE_VISIT_TIMESTAMP >= %s
+                  AND SITE_VISIT_TIMESTAMP < %s
+            ),
+            impressions_by_publisher AS (
+                SELECT 
+                    PT,
+                    SITE as PUBLISHER_NAME,
+                    COUNT(*) as IMPRESSIONS
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_AD_FULL_ATTRIBUTION_V2
+                WHERE QUORUM_ADVERTISER_ID = %s
+                  AND SITE_VISIT_TIMESTAMP >= %s
+                  AND SITE_VISIT_TIMESTAMP < %s
+                GROUP BY PT, SITE
+            ),
+            visits_by_publisher AS (
+                SELECT 
+                    PT,
+                    SITE as PUBLISHER_NAME,
+                    COUNT(*) as W_VISITS
+                FROM last_touch
+                WHERE rn = 1
+                GROUP BY PT, SITE
+            )
+            SELECT 
+                i.PT,
+                i.PUBLISHER_NAME,
+                i.IMPRESSIONS,
+                COALESCE(v.W_VISITS, 0) as W_VISITS
+            FROM impressions_by_publisher i
+            LEFT JOIN visits_by_publisher v 
+                ON COALESCE(i.PT, '') = COALESCE(v.PT, '')
+                AND COALESCE(i.PUBLISHER_NAME, '') = COALESCE(v.PUBLISHER_NAME, '')
+            WHERE i.IMPRESSIONS >= 100
+            ORDER BY i.IMPRESSIONS DESC
+            LIMIT 200
+        """
+        results = execute_query(query, (advertiser_id, start_date, end_date, advertiser_id, start_date, end_date))
+        
+        # Add PT names
+        for row in results:
+            pt = str(row.get('PT', ''))
+            row['PT_NAME'] = PT_CONFIG.get(pt, DEFAULT_PT_CONFIG).get('name', 'Unknown')
+        
+        return jsonify({'success': True, 'data': results})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================================================
+# WEB ADVERTISERS (Updated to use PARAMOUNT table for better data)
+# ============================================================================
+
+@app.route('/api/web/advertisers-v2', methods=['GET'])
+def get_web_advertisers_v2():
+    """Get advertisers with web event data from PARAMOUNT attribution table.
+    
+    This provides more complete data including campaign/lineitem counts.
+    """
+    try:
+        query = """
+            WITH last_touch AS (
+                SELECT *,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY IMP_MAID, SITE_VISIT_ID 
+                        ORDER BY IMP_DATE DESC
+                    ) as rn
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_AD_FULL_ATTRIBUTION_V2
+                WHERE IS_SITE_VISIT = 'TRUE'
+            )
+            SELECT 
+                QUORUM_ADVERTISER_ID as ADVERTISER_ID,
+                MAX(ADVERTISER_NAME) as ADVERTISER_NAME,
+                MAX(PT) as PT,
+                COUNT(*) as TOTAL_IMPRESSIONS,
+                SUM(CASE WHEN IS_SITE_VISIT = 'TRUE' THEN 1 ELSE 0 END) as ATTRIBUTED_IMPRESSIONS,
+                SUM(CASE WHEN rn = 1 THEN 1 ELSE 0 END) as W_VISITS,
+                COUNT(DISTINCT IO_ID) as CAMPAIGN_COUNT,
+                COUNT(DISTINCT LINEITEM_ID) as LINEITEM_COUNT
+            FROM last_touch
+            GROUP BY QUORUM_ADVERTISER_ID
+            HAVING SUM(CASE WHEN rn = 1 THEN 1 ELSE 0 END) > 0
+            ORDER BY W_VISITS DESC
+            LIMIT 100
+        """
+        results = execute_query(query)
+        
+        # Add PT names
+        for row in results:
+            pt = str(row.get('PT', ''))
+            row['PT_NAME'] = PT_CONFIG.get(pt, DEFAULT_PT_CONFIG).get('name', 'Unknown')
+        
+        return jsonify({'success': True, 'data': results})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
