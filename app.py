@@ -5,7 +5,7 @@ A simple Flask backend that connects to Snowflake and serves data to the fronten
 Data Sources:
 - AGENCY_ADVERTISER: Agency/advertiser names and metadata
 - QUORUM_ADV_STORE_VISITS: Pre-calculated impression-to-visit attribution (gold table)
-- MAID_CENTROID_ASSOCIATION: User home ZIP from census block
+- MAID_CENTROID_ASSOCIATION: User home ZIP from device ID
 """
 
 from flask import Flask, jsonify, request
@@ -64,7 +64,6 @@ def health_check():
 def get_agencies():
     """Get list of all agencies with their advertiser counts and total impressions."""
     try:
-        # Get agencies that have data in the store visits table
         query = """
             SELECT 
                 sv.AGENCY_ID,
@@ -129,8 +128,7 @@ def get_advertiser_summary():
                 MAX(aa.COMP_NAME) as ADVERTISER_NAME,
                 COUNT(*) as TOTAL_IMPRESSIONS,
                 SUM(CASE WHEN sv.IS_STORE_VISIT THEN 1 ELSE 0 END) as TOTAL_VISITS,
-                COUNT(DISTINCT sv.IO_ID) as CAMPAIGN_COUNT,
-                COUNT(DISTINCT sv.CENSUS_BLOCK_ID) as CENSUS_BLOCK_COUNT
+                COUNT(DISTINCT sv.IO_ID) as CAMPAIGN_COUNT
             FROM QUORUMDB.SEGMENT_DATA.QUORUM_ADV_STORE_VISITS sv
             LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa 
                 ON sv.QUORUM_ADVERTISER_ID = aa.ID
@@ -148,7 +146,10 @@ def get_advertiser_summary():
 
 @app.route('/api/zip-performance', methods=['GET'])
 def get_zip_performance():
-    """Get ZIP-level impression and visit data for an advertiser."""
+    """Get ZIP-level impression and visit data for an advertiser.
+    
+    Joins on IMP_MAID (device ID) to get user's home ZIP code.
+    """
     advertiser_id = request.args.get('advertiser_id')
     if not advertiser_id:
         return jsonify({'success': False, 'error': 'advertiser_id parameter required'}), 400
@@ -161,7 +162,7 @@ def get_zip_performance():
                 SUM(CASE WHEN sv.IS_STORE_VISIT THEN 1 ELSE 0 END) as VISITS
             FROM QUORUMDB.SEGMENT_DATA.QUORUM_ADV_STORE_VISITS sv
             JOIN QUORUM_CROSS_CLOUD.ATTAIN_FEED.MAID_CENTROID_ASSOCIATION mca 
-                ON sv.CENSUS_BLOCK_ID = mca.CENSUS_BLOCK_ID
+                ON LOWER(sv.IMP_MAID) = LOWER(mca.DEVICE_ID)
             WHERE sv.QUORUM_ADVERTISER_ID = %s
               AND mca.ZIP_CODE IS NOT NULL
               AND mca.ZIP_CODE != ''
