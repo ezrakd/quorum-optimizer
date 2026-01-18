@@ -1161,7 +1161,7 @@ def get_zip_analysis_postal():
         """
         
         dma_counts = execute_query(dma_counts_query, tuple(params_dma))
-        dma_zip_counts = {row['dma']: row['zipCount'] for row in dma_counts}
+        dma_zip_counts = {row['DMA']: row['zipCount'] for row in dma_counts}
         
         return jsonify({
             'success': True,
@@ -1452,3 +1452,7 @@ def get_web_advertisers_v2():
         return jsonify({'success': True, 'data': results})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+    
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=True)
