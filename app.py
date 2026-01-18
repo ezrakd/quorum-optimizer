@@ -971,9 +971,8 @@ def get_web_zip_performance():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 # ============================================================================
-# STORE ZIP OPTIMIZATION MODULE (Uses CAMPAIGN_POSTAL_REPORTING)
-# These endpoints support the ZIP reallocation React artifact
-# PASTE THIS CODE AT THE BOTTOM OF app.py, BEFORE "if __name__ == '__main__':"
+# STORE ZIP OPTIMIZATION MODULE - CORRECTED VERSION
+# Replace your existing endpoints with this version
 # ============================================================================
 
 @app.route('/api/store/agencies-postal', methods=['GET'])
@@ -1048,9 +1047,9 @@ def get_campaign_performance_postal():
                 CAMPAIGN_ID,
                 CAMPAIGN_NAME,
                 SUM(IMPRESSIONS) as IMPRESSIONS,
-                SUM(VISITS) as VISITS,
+                SUM(STORE_VISITS) as VISITS,
                 CASE 
-                    WHEN SUM(IMPRESSIONS) > 0 THEN SUM(VISITS)::FLOAT / SUM(IMPRESSIONS)::FLOAT
+                    WHEN SUM(IMPRESSIONS) > 0 THEN SUM(STORE_VISITS)::FLOAT / SUM(IMPRESSIONS)::FLOAT
                     ELSE 0 
                 END as visitRate
             FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING
@@ -1103,15 +1102,13 @@ def get_zip_analysis_postal():
         baseline_query = f"""
             SELECT 
                 SUM(IMPRESSIONS) as totalImpressions,
-                SUM(VISITS) as totalVisits,
+                SUM(STORE_VISITS) as totalVisits,
                 CASE 
-                    WHEN SUM(IMPRESSIONS) > 0 THEN SUM(VISITS)::FLOAT / SUM(IMPRESSIONS)::FLOAT
+                    WHEN SUM(IMPRESSIONS) > 0 THEN SUM(STORE_VISITS)::FLOAT / SUM(IMPRESSIONS)::FLOAT
                     ELSE 0 
                 END as overallVisitRate,
-                SUM(POPULATION) as totalPopulation
-            FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING cpr
-            LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING zdm 
-                ON cpr.ZIP_CODE = zdm.ZIP_CODE
+                SUM(USER_HOME_POSTAL_CODE_POPULATION) as totalPopulation
+            FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING
             WHERE ADVERTISER_ID = %s
                 {date_filter}
         """
@@ -1128,18 +1125,18 @@ def get_zip_analysis_postal():
         zip_query = f"""
             SELECT 
                 zdm.DMA_NAME as dma,
-                cpr.ZIP_CODE as zip,
-                zdm.POPULATION as population,
+                cpr.USER_HOME_POSTAL_CODE as zip,
+                MAX(cpr.USER_HOME_POSTAL_CODE_POPULATION) as population,
                 SUM(cpr.IMPRESSIONS) as impressions,
-                SUM(cpr.VISITS) as visits
+                SUM(cpr.STORE_VISITS) as visits
             FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING cpr
             LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING zdm 
-                ON cpr.ZIP_CODE = zdm.ZIP_CODE
+                ON cpr.USER_HOME_POSTAL_CODE = zdm.ZIP_CODE
             WHERE cpr.ADVERTISER_ID = %s
                 {date_filter}
-                AND cpr.ZIP_CODE IS NOT NULL
-                AND cpr.ZIP_CODE != 'UNKNOWN'
-            GROUP BY zdm.DMA_NAME, cpr.ZIP_CODE, zdm.POPULATION
+                AND cpr.USER_HOME_POSTAL_CODE IS NOT NULL
+                AND cpr.USER_HOME_POSTAL_CODE != 'UNKNOWN'
+            GROUP BY zdm.DMA_NAME, cpr.USER_HOME_POSTAL_CODE
             HAVING SUM(cpr.IMPRESSIONS) >= 3500
             ORDER BY impressions DESC
             LIMIT 500
@@ -1151,16 +1148,16 @@ def get_zip_analysis_postal():
         dma_counts_query = f"""
             SELECT 
                 zdm.DMA_NAME as dma,
-                COUNT(DISTINCT cpr.ZIP_CODE) as zipCount
+                COUNT(DISTINCT cpr.USER_HOME_POSTAL_CODE) as zipCount
             FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING cpr
             LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING zdm 
-                ON cpr.ZIP_CODE = zdm.ZIP_CODE
+                ON cpr.USER_HOME_POSTAL_CODE = zdm.ZIP_CODE
             WHERE cpr.ADVERTISER_ID = %s
                 {date_filter}
-                AND cpr.ZIP_CODE IS NOT NULL
-                AND cpr.ZIP_CODE != 'UNKNOWN'
+                AND cpr.USER_HOME_POSTAL_CODE IS NOT NULL
+                AND cpr.USER_HOME_POSTAL_CODE != 'UNKNOWN'
             GROUP BY zdm.DMA_NAME
-            HAVING COUNT(DISTINCT cpr.ZIP_CODE) > 0
+            HAVING COUNT(DISTINCT cpr.USER_HOME_POSTAL_CODE) > 0
         """
         
         dma_counts = execute_query(dma_counts_query, tuple(params_dma))
@@ -1176,11 +1173,6 @@ def get_zip_analysis_postal():
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
-
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=True)
 
 
 # ============================================================================
