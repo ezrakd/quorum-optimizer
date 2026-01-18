@@ -1082,13 +1082,11 @@ def get_zip_analysis_postal():
         if not advertiser_id:
             return jsonify({'success': False, 'error': 'advertiser_id is required'}), 400
         
-        # Build params lists
+        date_filter = ""
         params_baseline = [advertiser_id]
         params_zip = [advertiser_id]
         params_dma = [advertiser_id]
         
-        # Build date filters
-        date_filter = ""
         if start_date:
             date_filter += " AND DATE >= %s"
             params_baseline.append(start_date)
@@ -1149,75 +1147,6 @@ def get_zip_analysis_postal():
         # Get DMA ZIP counts
         dma_counts_query = f"""
             SELECT 
-                zdm.DMA_NAME,
-                COUNT(DISTINCT cpr.USER_HOME_POSTAL_CODE) as ZIP_COUNT
-            FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING cpr
-            LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING zdm 
-                ON cpr.USER_HOME_POSTAL_CODE = zdm.ZIP_CODE
-            WHERE cpr.ADVERTISER_ID = %s
-                {date_filter}
-                AND cpr.USER_HOME_POSTAL_CODE IS NOT NULL
-                AND cpr.USER_HOME_POSTAL_CODE != 'UNKNOWN'
-            GROUP BY zdm.DMA_NAME
-            HAVING COUNT(DISTINCT cpr.USER_HOME_POSTAL_CODE) > 0
-        """
-        
-        dma_counts = execute_query(dma_counts_query, tuple(params_dma))
-        
-        # Build dma_zip_counts dict - handle any case variation
-        dma_zip_counts = {}
-        for row in dma_counts:
-            dma_name = row.get('DMA_NAME') or row.get('dma_name') or row.get('dma')
-            zip_count = row.get('ZIP_COUNT') or row.get('zip_count') or row.get('zipCount') or row.get('ZIPCOUNT')
-            if dma_name:
-                dma_zip_counts[dma_name] = zip_count
-        
-        return jsonify({
-            'success': True,
-            'data': {
-                'baseline': baseline,
-                'zipCodes': zip_codes,
-                'dmaZipCounts': dma_zip_counts
-            }
-        })
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-        """
-        
-        baseline_result = execute_query(baseline_query, tuple(params_baseline))
-        baseline = baseline_result[0] if baseline_result else {
-            'totalImpressions': 0,
-            'totalVisits': 0,
-            'overallVisitRate': 0,
-            'totalPopulation': 0
-        }
-        
-        # Get ZIP code data (only ZIPs with 3500+ impressions)
-        zip_query = f"""
-            SELECT 
-                zdm.DMA_NAME as dma,
-                cpr.USER_HOME_POSTAL_CODE as zip,
-                MAX(cpr.USER_HOME_POSTAL_CODE_POPULATION) as population,
-                SUM(cpr.IMPRESSIONS) as impressions,
-                SUM(cpr.STORE_VISITS) as visits
-            FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING cpr
-            LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING zdm 
-                ON cpr.USER_HOME_POSTAL_CODE = zdm.ZIP_CODE
-            WHERE cpr.ADVERTISER_ID = %s
-                {date_filter}
-                AND cpr.USER_HOME_POSTAL_CODE IS NOT NULL
-                AND cpr.USER_HOME_POSTAL_CODE != 'UNKNOWN'
-            GROUP BY zdm.DMA_NAME, cpr.USER_HOME_POSTAL_CODE
-            HAVING SUM(cpr.IMPRESSIONS) >= 3500
-            ORDER BY impressions DESC
-            LIMIT 500
-        """
-        
-        zip_codes = execute_query(zip_query, tuple(params_zip))
-        
-        # Get DMA ZIP counts
-        dma_counts_query = f"""
-            SELECT 
                 zdm.DMA_NAME as dma,
                 COUNT(DISTINCT cpr.USER_HOME_POSTAL_CODE) as zipCount
             FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING cpr
@@ -1232,7 +1161,7 @@ def get_zip_analysis_postal():
         """
         
         dma_counts = execute_query(dma_counts_query, tuple(params_dma))
-        dma_zip_counts = {row.get('DMA') or row.get('dma'): row.get('ZIPCOUNT') or row.get('zipCount') for row in dma_counts}
+        dma_zip_counts = {row['DMA']: row['zipCount'] for row in dma_counts}
         
         return jsonify({
             'success': True,
