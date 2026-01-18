@@ -1161,7 +1161,13 @@ def get_zip_analysis_postal():
         """
         
         dma_counts = execute_query(dma_counts_query, tuple(params_dma))
-        dma_zip_counts = {row['DMA']: row['zipCount'] for row in dma_counts}
+        dma_zip_counts = {}
+        for row in dma_counts:
+            dma_name = row.get('DMA') or row.get('dma') or row.get('DMA_NAME')
+            zip_count = row.get('ZIPCOUNT') or row.get('zipCount') or row.get('ZIP_COUNT')
+            if dma_name:
+                dma_zip_counts[dma_name] = zip_count
+
         
         return jsonify({
             'success': True,
