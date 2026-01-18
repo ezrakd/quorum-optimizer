@@ -970,6 +970,212 @@ def get_web_zip_performance():
         return jsonify({'success': True, 'data': results})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+# ============================================================================
+# STORE ZIP OPTIMIZATION MODULE (Uses CAMPAIGN_POSTAL_REPORTING)
+# These endpoints support the ZIP reallocation React artifact
+# PASTE THIS CODE AT THE BOTTOM OF app.py, BEFORE "if __name__ == '__main__':"
+# ============================================================================
+
+@app.route('/api/store/agencies-postal', methods=['GET'])
+def get_agencies_postal():
+    """Get agencies from CAMPAIGN_POSTAL_REPORTING for ZIP optimization."""
+    try:
+        query = """
+            SELECT DISTINCT 
+                AGENCY_ID as id,
+                AGENCY_NAME as name,
+                COUNT(DISTINCT ADVERTISER_ID) as advertiserCount
+            FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING
+            WHERE AGENCY_ID IS NOT NULL 
+                AND AGENCY_NAME IS NOT NULL
+            GROUP BY AGENCY_ID, AGENCY_NAME
+            ORDER BY AGENCY_NAME
+        """
+        results = execute_query(query)
+        return jsonify({'success': True, 'data': results})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/store/advertisers-postal', methods=['GET'])
+def get_advertisers_postal():
+    """Get advertisers from CAMPAIGN_POSTAL_REPORTING for ZIP optimization."""
+    try:
+        agency_id = request.args.get('agency_id')
+        
+        if not agency_id:
+            return jsonify({'success': False, 'error': 'agency_id is required'}), 400
+        
+        query = """
+            SELECT DISTINCT 
+                ADVERTISER_ID as id,
+                ADVERTISER_NAME as name
+            FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING
+            WHERE AGENCY_ID = %s
+                AND ADVERTISER_NAME IS NOT NULL
+            ORDER BY ADVERTISER_NAME
+            LIMIT 100
+        """
+        results = execute_query(query, (agency_id,))
+        return jsonify({'success': True, 'data': results})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/store/campaign-performance-postal', methods=['GET'])
+def get_campaign_performance_postal():
+    """Get campaign performance from CAMPAIGN_POSTAL_REPORTING."""
+    try:
+        advertiser_id = request.args.get('advertiser_id')
+        start_date = request.args.get('start_date', '')
+        end_date = request.args.get('end_date', '')
+        
+        if not advertiser_id:
+            return jsonify({'success': False, 'error': 'advertiser_id is required'}), 400
+        
+        date_filter = ""
+        params = [advertiser_id]
+        
+        if start_date:
+            date_filter += " AND DATE >= %s"
+            params.append(start_date)
+        if end_date:
+            date_filter += " AND DATE <= %s"
+            params.append(end_date)
+        
+        query = f"""
+            SELECT 
+                CAMPAIGN_ID,
+                CAMPAIGN_NAME,
+                SUM(IMPRESSIONS) as IMPRESSIONS,
+                SUM(VISITS) as VISITS,
+                CASE 
+                    WHEN SUM(IMPRESSIONS) > 0 THEN SUM(VISITS)::FLOAT / SUM(IMPRESSIONS)::FLOAT
+                    ELSE 0 
+                END as visitRate
+            FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING
+            WHERE ADVERTISER_ID = %s
+                {date_filter}
+            GROUP BY CAMPAIGN_ID, CAMPAIGN_NAME
+            HAVING SUM(IMPRESSIONS) > 0
+            ORDER BY IMPRESSIONS DESC
+            LIMIT 50
+        """
+        
+        campaigns = execute_query(query, tuple(params))
+        
+        return jsonify({
+            'success': True,
+            'data': {'campaigns': campaigns}
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/store/zip-analysis-postal', methods=['GET'])
+def get_zip_analysis_postal():
+    """Get ZIP code analysis from CAMPAIGN_POSTAL_REPORTING for reallocation."""
+    try:
+        advertiser_id = request.args.get('advertiser_id')
+        start_date = request.args.get('start_date', '')
+        end_date = request.args.get('end_date', '')
+        
+        if not advertiser_id:
+            return jsonify({'success': False, 'error': 'advertiser_id is required'}), 400
+        
+        date_filter = ""
+        params_baseline = [advertiser_id]
+        params_zip = [advertiser_id]
+        params_dma = [advertiser_id]
+        
+        if start_date:
+            date_filter += " AND DATE >= %s"
+            params_baseline.append(start_date)
+            params_zip.append(start_date)
+            params_dma.append(start_date)
+        if end_date:
+            date_filter += " AND DATE <= %s"
+            params_baseline.append(end_date)
+            params_zip.append(end_date)
+            params_dma.append(end_date)
+        
+        # Get baseline metrics
+        baseline_query = f"""
+            SELECT 
+                SUM(IMPRESSIONS) as totalImpressions,
+                SUM(VISITS) as totalVisits,
+                CASE 
+                    WHEN SUM(IMPRESSIONS) > 0 THEN SUM(VISITS)::FLOAT / SUM(IMPRESSIONS)::FLOAT
+                    ELSE 0 
+                END as overallVisitRate,
+                SUM(POPULATION) as totalPopulation
+            FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING cpr
+            LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING zdm 
+                ON cpr.ZIP_CODE = zdm.ZIP_CODE
+            WHERE ADVERTISER_ID = %s
+                {date_filter}
+        """
+        
+        baseline_result = execute_query(baseline_query, tuple(params_baseline))
+        baseline = baseline_result[0] if baseline_result else {
+            'totalImpressions': 0,
+            'totalVisits': 0,
+            'overallVisitRate': 0,
+            'totalPopulation': 0
+        }
+        
+        # Get ZIP code data (only ZIPs with 3500+ impressions)
+        zip_query = f"""
+            SELECT 
+                zdm.DMA_NAME as dma,
+                cpr.ZIP_CODE as zip,
+                zdm.POPULATION as population,
+                SUM(cpr.IMPRESSIONS) as impressions,
+                SUM(cpr.VISITS) as visits
+            FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING cpr
+            LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING zdm 
+                ON cpr.ZIP_CODE = zdm.ZIP_CODE
+            WHERE cpr.ADVERTISER_ID = %s
+                {date_filter}
+                AND cpr.ZIP_CODE IS NOT NULL
+                AND cpr.ZIP_CODE != 'UNKNOWN'
+            GROUP BY zdm.DMA_NAME, cpr.ZIP_CODE, zdm.POPULATION
+            HAVING SUM(cpr.IMPRESSIONS) >= 3500
+            ORDER BY impressions DESC
+            LIMIT 500
+        """
+        
+        zip_codes = execute_query(zip_query, tuple(params_zip))
+        
+        # Get DMA ZIP counts
+        dma_counts_query = f"""
+            SELECT 
+                zdm.DMA_NAME as dma,
+                COUNT(DISTINCT cpr.ZIP_CODE) as zipCount
+            FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING cpr
+            LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING zdm 
+                ON cpr.ZIP_CODE = zdm.ZIP_CODE
+            WHERE cpr.ADVERTISER_ID = %s
+                {date_filter}
+                AND cpr.ZIP_CODE IS NOT NULL
+                AND cpr.ZIP_CODE != 'UNKNOWN'
+            GROUP BY zdm.DMA_NAME
+            HAVING COUNT(DISTINCT cpr.ZIP_CODE) > 0
+        """
+        
+        dma_counts = execute_query(dma_counts_query, tuple(params_dma))
+        dma_zip_counts = {row['dma']: row['zipCount'] for row in dma_counts}
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'baseline': baseline,
+                'zipCodes': zip_codes,
+                'dmaZipCounts': dma_zip_counts
+            }
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 if __name__ == '__main__':
