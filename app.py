@@ -153,7 +153,7 @@ def get_advertisers_v3():
                 ORDER BY TOTAL_VISITS DESC
             """
         else:
-            # Class B: CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW
+            # Class B: CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW (with date filter)
             query = """
                 WITH deduplicated AS (
                     SELECT 
@@ -167,6 +167,7 @@ def get_advertisers_v3():
                         ) as rn
                     FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW cp
                     WHERE cp.AGENCY_ID = %s
+                      AND cp.DRIVE_BY_DATE >= DATEADD(day, -60, CURRENT_DATE())
                 )
                 SELECT 
                     d.ADVERTISER_ID,
