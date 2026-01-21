@@ -1,378 +1,133 @@
 """
-Quorum Optimizer API v2
+Quorum Optimizer API v3.1
+==========================
 
-Attribution Logic:
-- Last-touch attribution: Only the most recent impression before a conversion gets credit
-- S_VISITS: Physical store visits (from QUORUM_ADV_STORE_VISITS)
-- W_VISITS: Website visits (from WEB_VISITORS_TO_LOG)
-- W_LEADS: Lead form submissions
-- W_PURCHASES: Purchase conversions
-- W_AMOUNT: Total purchase dollar amount
+Version: 3.1 (Production Ready)
+Updated: January 20, 2026
 
-Platform (PT) Configuration:
-- Each platform stores publisher info in different columns
-- Config determines which column to use and how to resolve names
-- Hierarchy: Advertiser Override > Agency Override > PT Default
+Architecture: Two-table system
+- QRM_ALL_VISITS_V3: Conversions (numerator)
+- XANDR_IMPRESSION_LOG: Impressions (denominator)
+
+Deployment: Railway (github.com/ezrakd/quorum-optimizer)
 """
 
-from flask import Flask, jsonify, request
+import os
+import json
+from urllib.parse import unquote
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 import snowflake.connector
-import os
-from urllib.parse import unquote
+from datetime import datetime, timedelta
+
+# =============================================================================
+# FLASK APP INITIALIZATION
+# =============================================================================
 
 app = Flask(__name__)
 CORS(app)
 
-SNOWFLAKE_CONFIG = {
-    'account': os.environ.get('SNOWFLAKE_ACCOUNT', 'FZB05958.us-east-1'),
-    'user': os.environ.get('SNOWFLAKE_USER', 'OPTIMIZER_SERVICE_USER'),
-    'password': os.environ.get('SNOWFLAKE_PASSWORD', ''),
-    'warehouse': os.environ.get('SNOWFLAKE_WAREHOUSE', 'COMPUTE_WH'),
-    'database': 'QUORUMDB',
-    'schema': 'SEGMENT_DATA'
-}
 
-# ============================================================================
-# PLATFORM (PT) CONFIGURATION - Based on actual data population analysis
-# ============================================================================
-PT_CONFIG = {
-    "6": {
-        "name": "Trade Desk",
-        "publisher_column": "SITE",  # 100% coverage
-        "fallback_column": "PUBLISHER_ID",  # 71% coverage
-        "name_lookup_table": "PUBLISHERS_ID_NAME_MAPPING",  # For PUBLISHER_CODE lookups
-        "url_decode": False,
-        "coverage_pct": 100.0
-    },
-    "8": {
-        "name": "DV 360",
-        "publisher_column": "PUBLISHER_ID",  # 99% coverage
-        "fallback_column": None,
-        "name_lookup_table": None,
-        "url_decode": False,
-        "coverage_pct": 99.0
-    },
-    "9": {
-        "name": "DCM/GAM",
-        "publisher_column": "PUBLISHER_ID",  # 99.9% coverage
-        "fallback_column": None,
-        "name_lookup_table": None,
-        "url_decode": False,
-        "coverage_pct": 99.9
-    },
-    "11": {
-        "name": "Xandr",
-        "publisher_column": "PUBLISHER_ID",  # 100% coverage
-        "fallback_column": "PUBLISHER_CODE",  # 25% coverage
-        "name_lookup_table": None,
-        "url_decode": False,
-        "coverage_pct": 100.0
-    },
-    "12": {
-        "name": "Simpli.fi",
-        "publisher_column": "PUBLISHER_ID",
-        "fallback_column": None,
-        "name_lookup_table": None,
-        "url_decode": False,
-        "coverage_pct": None
-    },
-    "13": {
-        "name": "Adelphic",
-        "publisher_column": "PUBLISHER_ID",  # 92% coverage
-        "fallback_column": None,
-        "name_lookup_table": None,
-        "url_decode": False,
-        "coverage_pct": 91.9
-    },
-    "14": {
-        "name": "Beeswax",
-        "publisher_column": "PUBLISHER_CODE",
-        "fallback_column": None,
-        "name_lookup_table": None,
-        "url_decode": False,
-        "coverage_pct": None
-    },
-    "15": {
-        "name": "Xtreme Reach",
-        "publisher_column": "PUBLISHER_CODE",
-        "fallback_column": None,
-        "name_lookup_table": None,
-        "url_decode": False,
-        "coverage_pct": None
-    },
-    "16": {
-        "name": "StackAdapt",
-        "publisher_column": "SITE",
-        "fallback_column": None,
-        "name_lookup_table": None,
-        "url_decode": False,
-        "coverage_pct": None
-    },
-    "17": {
-        "name": "Unknown (17)",
-        "publisher_column": "PUBLISHER_CODE",  # 0% coverage - no data
-        "fallback_column": None,
-        "name_lookup_table": None,
-        "url_decode": False,
-        "coverage_pct": 0.0
-    },
-    "20": {
-        "name": "SpringServe",
-        "publisher_column": "PUBLISHER_CODE",  # 97% coverage
-        "fallback_column": "SITE",  # 22% coverage
-        "name_lookup_table": None,
-        "url_decode": False,
-        "coverage_pct": 96.9
-    },
-    "21": {
-        "name": "FreeWheel",
-        "publisher_column": "SITE",  # 94.5% coverage
-        "fallback_column": None,
-        "name_lookup_table": None,
-        "url_decode": False,
-        "coverage_pct": 94.5
-    },
-    "22": {
-        "name": "MNTN",
-        "publisher_column": "PUBLISHER_CODE",  # 91.5% coverage
-        "fallback_column": None,
-        "name_lookup_table": None,
-        "url_decode": True,  # Values are URL encoded (e.g., "Paramount%2520Streaming")
-        "coverage_pct": 91.5
-    },
-    "23": {
-        "name": "Yahoo",
-        "publisher_column": "PUBLISHER_ID",  # 100% coverage
-        "fallback_column": None,
-        "name_lookup_table": None,
-        "url_decode": False,
-        "coverage_pct": 100.0
-    },
-    "25": {
-        "name": "Amazon DSP",
-        "publisher_column": "PUBLISHER_CODE",
-        "fallback_column": None,
-        "name_lookup_table": None,
-        "url_decode": False,
-        "coverage_pct": None
-    },
-    "27": {
-        "name": "Unknown (27)",
-        "publisher_column": "SITE",  # 100% coverage
-        "fallback_column": None,
-        "name_lookup_table": None,
-        "url_decode": False,
-        "coverage_pct": 100.0
-    }
-}
-
-# Default config for unknown PTs
-DEFAULT_PT_CONFIG = {
-    "name": "Unknown",
-    "publisher_column": "PUBLISHER_CODE",
-    "fallback_column": "PUBLISHER_ID",
-    "name_lookup_table": None,
-    "url_decode": False,
-    "coverage_pct": None
-}
-
-# ============================================================================
-# AGENCY-LEVEL OVERRIDES
-# For agencies that need different settings than PT defaults
-# ============================================================================
-AGENCY_CONFIG = {
-    "1813": {  # Causal iQ - uses multiple PTs per advertiser
-        "name": "Causal iQ",
-        "pt_assignment": "BY_ADVERTISER",  # Flag: PT varies by advertiser, not agency-wide
-        "notes": "Uses PT 6, 8, 9, 11, 23 depending on advertiser"
-    },
-    "2514": {  # MNTN
-        "name": "MNTN",
-        "pt_assignment": "BY_AGENCY",
-        "default_pt": "22",
-        "notes": "Primarily PT 22"
-    },
-    "1956": {  # Dealer Spike
-        "name": "Dealer Spike", 
-        "pt_assignment": "BY_AGENCY",
-        "default_pt": "13",
-        "notes": "Uses Adelphic (PT 13)"
-    },
-    "2234": {  # Magnite
-        "name": "Magnite",
-        "pt_assignment": "BY_ADVERTISER",
-        "notes": "Uses PT 0, 11, 20, 23, 25, 33"
-    }
-}
-
-# ============================================================================
-# ADVERTISER-LEVEL OVERRIDES
-# For specific advertisers that need different settings
-# ============================================================================
-ADVERTISER_CONFIG = {
-    # Example structure - populate as needed
-    # "advertiser_id": {
-    #     "publisher_column": "SITE",  # Override the PT default
-    #     "url_decode": True,
-    #     "notes": "Special handling for this advertiser"
-    # }
-}
-
+# =============================================================================
+# DATABASE HELPERS
+# =============================================================================
 
 def get_snowflake_connection():
-    return snowflake.connector.connect(**SNOWFLAKE_CONFIG)
+    """Create Snowflake connection from environment variables"""
+    return snowflake.connector.connect(
+        account=os.environ.get('SNOWFLAKE_ACCOUNT', 'FZB05958.us-east-1'),
+        user=os.environ.get('SNOWFLAKE_USER', 'OPTIMIZER_SERVICE_USER'),
+        password=os.environ.get('SNOWFLAKE_PASSWORD'),
+        warehouse=os.environ.get('SNOWFLAKE_WAREHOUSE', 'COMPUTE_WH'),
+        database='QUORUMDB',
+        schema='SEGMENT_DATA'
+    )
+
 
 def execute_query(query, params=None):
+    """Execute query and return results as list of dicts"""
     conn = get_snowflake_connection()
     try:
         cursor = conn.cursor()
-        if params:
-            cursor.execute(query, params)
-        else:
-            cursor.execute(query)
-        columns = [desc[0] for desc in cursor.description]
+        cursor.execute(query, params or {})
+        columns = [col[0] for col in cursor.description]
         results = []
         for row in cursor.fetchall():
-            results.append(dict(zip(columns, row)))
+            row_dict = {}
+            for i, val in enumerate(row):
+                # Convert to JSON-serializable types
+                if hasattr(val, 'isoformat'):
+                    row_dict[columns[i]] = val.isoformat()
+                elif val is None:
+                    row_dict[columns[i]] = None
+                else:
+                    row_dict[columns[i]] = val
+            results.append(row_dict)
         return results
     finally:
         conn.close()
 
-def decode_publisher_name(name, url_decode=False):
-    """Decode URL-encoded publisher names if needed."""
-    if name and url_decode:
-        try:
-            # Double decode for values like "Paramount%2520Streaming"
-            return unquote(unquote(str(name)))
-        except:
-            return name
-    return name
 
-def get_publisher_config(pt, agency_id=None, advertiser_id=None):
-    """
-    Get publisher column configuration with override hierarchy:
-    1. Advertiser override (if exists)
-    2. Agency override (if exists) 
-    3. PT default
-    4. Global default
-    """
-    config = DEFAULT_PT_CONFIG.copy()
+def get_date_params(request):
+    """Extract and validate date parameters (default: last 30 days)"""
+    default_end = datetime.now().strftime('%Y-%m-%d')
+    default_start = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
     
-    # Start with PT default
-    pt_str = str(pt) if pt else None
-    if pt_str and pt_str in PT_CONFIG:
-        config.update(PT_CONFIG[pt_str])
+    start_date = request.args.get('start_date', default_start)
+    end_date = request.args.get('end_date', default_end)
     
-    # Check agency override
-    agency_str = str(agency_id) if agency_id else None
-    if agency_str and agency_str in AGENCY_CONFIG:
-        agency_cfg = AGENCY_CONFIG[agency_str]
-        # Agency config can override specific fields
-        for key in ['publisher_column', 'fallback_column', 'url_decode', 'name_lookup_table']:
-            if key in agency_cfg:
-                config[key] = agency_cfg[key]
-        config['agency_override'] = True
-        config['agency_name'] = agency_cfg.get('name')
-    
-    # Check advertiser override (highest priority)
-    adv_str = str(advertiser_id) if advertiser_id else None
-    if adv_str and adv_str in ADVERTISER_CONFIG:
-        adv_cfg = ADVERTISER_CONFIG[adv_str]
-        for key in ['publisher_column', 'fallback_column', 'url_decode', 'name_lookup_table']:
-            if key in adv_cfg:
-                config[key] = adv_cfg[key]
-        config['advertiser_override'] = True
-    
-    return config
+    return start_date, end_date
 
+
+# =============================================================================
+# HEALTH CHECK
+# =============================================================================
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
+    """Health check endpoint"""
     try:
         conn = get_snowflake_connection()
         conn.close()
-        return jsonify({'status': 'healthy', 'snowflake': 'connected'})
+        return jsonify({
+            'success': True, 
+            'status': 'healthy', 
+            'version': '3.1',
+            'architecture': 'QRM_ALL_VISITS_V3 + XANDR_IMPRESSION_LOG'
+        })
     except Exception as e:
-        return jsonify({'status': 'unhealthy', 'error': str(e)}), 500
+        return jsonify({'success': False, 'status': 'unhealthy', 'error': str(e)}), 500
 
 
-# ============================================================================
-# CONFIGURATION ENDPOINTS
-# ============================================================================
-
-@app.route('/api/config/platforms', methods=['GET'])
-def get_platform_config():
-    """Get all platform configurations."""
-    return jsonify({
-        'success': True, 
-        'data': PT_CONFIG,
-        'default': DEFAULT_PT_CONFIG
-    })
-
-@app.route('/api/config/agencies', methods=['GET'])
-def get_agency_config():
-    """Get all agency-level configurations."""
-    return jsonify({
-        'success': True,
-        'data': AGENCY_CONFIG
-    })
-
-@app.route('/api/config/advertisers', methods=['GET'])
-def get_advertiser_config():
-    """Get all advertiser-level configurations."""
-    return jsonify({
-        'success': True,
-        'data': ADVERTISER_CONFIG
-    })
-
-@app.route('/api/config/resolve', methods=['GET'])
-def resolve_config():
-    """Resolve the effective configuration for a given PT/Agency/Advertiser combination."""
-    pt = request.args.get('pt')
-    agency_id = request.args.get('agency_id')
-    advertiser_id = request.args.get('advertiser_id')
-    
-    config = get_publisher_config(pt, agency_id, advertiser_id)
-    
-    return jsonify({
-        'success': True,
-        'input': {'pt': pt, 'agency_id': agency_id, 'advertiser_id': advertiser_id},
-        'resolved_config': config
-    })
-
-
-# ============================================================================
-# AGENCY / ADVERTISER ENDPOINTS
-# ============================================================================
+# =============================================================================
+# V2 ENDPOINTS (Backward Compatible - Store Visits Only)
+# =============================================================================
 
 @app.route('/api/agencies', methods=['GET'])
 def get_agencies():
-    """Get list of all agencies with store visit data."""
+    """List agencies with store visit counts"""
+    start_date, end_date = get_date_params(request)
+    
+    query = """
+    SELECT 
+        v.AGENCY_ID,
+        MAX(aa.AGENCY_NAME) as AGENCY_NAME,
+        COUNT(*) as S_VISITS,
+        COUNT(DISTINCT v.QUORUM_ADVERTISER_ID) as ADVERTISER_COUNT
+    FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
+    LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa 
+        ON TRY_CAST(v.QUORUM_ADVERTISER_ID AS NUMBER) = aa.ID
+    WHERE v.CONVERSION_DATE >= %(start_date)s
+      AND v.CONVERSION_DATE <= %(end_date)s
+      AND v.VISIT_TYPE = 'STORE'
+      AND v.AGENCY_ID IS NOT NULL
+    GROUP BY v.AGENCY_ID
+    HAVING COUNT(*) > 0
+    ORDER BY COUNT(*) DESC
+    """
+    
     try:
-        query = """
-            SELECT 
-                sv.AGENCY_ID,
-                MAX(aa.AGENCY_NAME) as AGENCY_NAME,
-                COUNT(DISTINCT sv.QUORUM_ADVERTISER_ID) as ADVERTISER_COUNT,
-                COUNT(*) as TOTAL_IMPRESSIONS,
-                SUM(CASE WHEN sv.IS_STORE_VISIT THEN 1 ELSE 0 END) as TOTAL_S_VISITS
-            FROM QUORUMDB.SEGMENT_DATA.QUORUM_ADV_STORE_VISITS sv
-            LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa 
-                ON sv.QUORUM_ADVERTISER_ID = aa.ID
-            WHERE sv.AGENCY_ID IS NOT NULL
-            GROUP BY sv.AGENCY_ID
-            HAVING COUNT(*) > 1000
-            ORDER BY TOTAL_IMPRESSIONS DESC
-        """
-        results = execute_query(query)
-        
-        # Add config info for each agency
-        for row in results:
-            agency_id = str(row.get('AGENCY_ID', ''))
-            if agency_id in AGENCY_CONFIG:
-                row['CONFIG'] = AGENCY_CONFIG[agency_id]
-        
+        results = execute_query(query, {'start_date': start_date, 'end_date': end_date})
         return jsonify({'success': True, 'data': results})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -380,35 +135,36 @@ def get_agencies():
 
 @app.route('/api/advertisers', methods=['GET'])
 def get_advertisers():
-    """Get advertisers for a specific agency."""
+    """List advertisers for an agency (store visits)"""
     agency_id = request.args.get('agency_id')
+    start_date, end_date = get_date_params(request)
+    
     if not agency_id:
-        return jsonify({'success': False, 'error': 'agency_id parameter required'}), 400
+        return jsonify({'success': False, 'error': 'agency_id required'}), 400
+    
+    query = """
+    SELECT 
+        v.QUORUM_ADVERTISER_ID as ADVERTISER_ID,
+        MAX(aa.COMP_NAME) as ADVERTISER_NAME,
+        COUNT(*) as S_VISITS,
+        COUNT(DISTINCT v.MAID) as UNIQUE_VISITORS
+    FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
+    LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa 
+        ON TRY_CAST(v.QUORUM_ADVERTISER_ID AS NUMBER) = aa.ID
+    WHERE v.AGENCY_ID = %(agency_id)s
+      AND v.CONVERSION_DATE >= %(start_date)s
+      AND v.CONVERSION_DATE <= %(end_date)s
+      AND v.VISIT_TYPE = 'STORE'
+    GROUP BY v.QUORUM_ADVERTISER_ID
+    ORDER BY COUNT(*) DESC
+    """
     
     try:
-        query = """
-            SELECT 
-                sv.QUORUM_ADVERTISER_ID as ADVERTISER_ID,
-                MAX(aa.COMP_NAME) as ADVERTISER_NAME,
-                MAX(sv.PT) as PT,
-                COUNT(*) as TOTAL_IMPRESSIONS,
-                SUM(CASE WHEN sv.IS_STORE_VISIT THEN 1 ELSE 0 END) as TOTAL_S_VISITS
-            FROM QUORUMDB.SEGMENT_DATA.QUORUM_ADV_STORE_VISITS sv
-            LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa 
-                ON sv.QUORUM_ADVERTISER_ID = aa.ID
-            WHERE sv.AGENCY_ID = %s
-            GROUP BY sv.QUORUM_ADVERTISER_ID
-            HAVING COUNT(*) > 0
-            ORDER BY TOTAL_IMPRESSIONS DESC
-            LIMIT 50
-        """
-        results = execute_query(query, (agency_id,))
-        
-        # Add PT config info
-        for row in results:
-            pt = str(row.get('PT', ''))
-            row['PT_NAME'] = PT_CONFIG.get(pt, DEFAULT_PT_CONFIG).get('name', 'Unknown')
-        
+        results = execute_query(query, {
+            'agency_id': int(agency_id),
+            'start_date': start_date,
+            'end_date': end_date
+        })
         return jsonify({'success': True, 'data': results})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -416,439 +172,305 @@ def get_advertisers():
 
 @app.route('/api/advertiser-summary', methods=['GET'])
 def get_advertiser_summary():
-    """Get summary metrics for a specific advertiser (store visits)."""
+    """Get store visit summary WITH IMPRESSIONS (campaign-level join)"""
     advertiser_id = request.args.get('advertiser_id')
-    start_date = request.args.get('start_date', '2020-01-01')
-    end_date = request.args.get('end_date', '2030-12-31')
+    start_date, end_date = get_date_params(request)
     
     if not advertiser_id:
-        return jsonify({'success': False, 'error': 'advertiser_id parameter required'}), 400
+        return jsonify({'success': False, 'error': 'advertiser_id required'}), 400
+    
+    query = """
+    WITH visit_campaigns AS (
+        SELECT 
+            AGENCY_ID,
+            CAMPAIGN_ID,
+            COUNT(*) as S_VISITS,
+            COUNT(DISTINCT MAID) as UNIQUE_VISITORS
+        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
+        WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+          AND CONVERSION_DATE >= %(start_date)s
+          AND CONVERSION_DATE <= %(end_date)s
+          AND VISIT_TYPE = 'STORE'
+          AND CAMPAIGN_ID IS NOT NULL
+        GROUP BY AGENCY_ID, CAMPAIGN_ID
+    ),
+    campaign_impressions AS (
+        SELECT 
+            v.AGENCY_ID,
+            x.IO_ID as CAMPAIGN_ID,
+            COUNT(*) as IMPRESSIONS
+        FROM visit_campaigns v
+        INNER JOIN QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG x 
+            ON x.IO_ID = v.CAMPAIGN_ID AND x.AGENCY_ID = v.AGENCY_ID
+        WHERE CAST(x.TIMESTAMP AS DATE) >= %(start_date)s
+          AND CAST(x.TIMESTAMP AS DATE) <= %(end_date)s
+        GROUP BY v.AGENCY_ID, x.IO_ID
+    )
+    SELECT 
+        COALESCE(SUM(i.IMPRESSIONS), 0) as IMPRESSIONS,
+        SUM(v.S_VISITS) as S_VISITS,
+        COUNT(DISTINCT v.UNIQUE_VISITORS) as UNIQUE_VISITORS,
+        COUNT(DISTINCT v.CAMPAIGN_ID) as UNIQUE_CAMPAIGNS,
+        SUM(v.S_VISITS) as WITH_CAMPAIGN,
+        CASE WHEN COALESCE(SUM(i.IMPRESSIONS), 0) > 0 
+             THEN ROUND((SUM(v.S_VISITS)::FLOAT / SUM(i.IMPRESSIONS)) * 100, 4)
+             ELSE 0 
+        END as VISIT_RATE
+    FROM visit_campaigns v
+    LEFT JOIN campaign_impressions i ON v.CAMPAIGN_ID = i.CAMPAIGN_ID AND v.AGENCY_ID = i.AGENCY_ID
+    """
     
     try:
-        query = """
-            WITH last_touch AS (
-                SELECT *,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY DEVICE_ID_QU, DRIVEBYDATE 
-                        ORDER BY IMP_TIMESTAMP DESC
-                    ) as rn
-                FROM QUORUMDB.SEGMENT_DATA.QUORUM_ADV_STORE_VISITS
-                WHERE QUORUM_ADVERTISER_ID = %s
-                  AND IS_STORE_VISIT = TRUE
-                  AND IMP_TIMESTAMP >= %s
-                  AND IMP_TIMESTAMP < %s
-            )
-            SELECT 
-                %s as ADVERTISER_ID,
-                MAX(aa.COMP_NAME) as ADVERTISER_NAME,
-                MAX(lt.AGENCY_ID) as AGENCY_ID,
-                MAX(lt.PT) as PT,
-                (SELECT COUNT(*) FROM QUORUMDB.SEGMENT_DATA.QUORUM_ADV_STORE_VISITS 
-                 WHERE QUORUM_ADVERTISER_ID = %s AND IMP_TIMESTAMP >= %s AND IMP_TIMESTAMP < %s) as TOTAL_IMPRESSIONS,
-                COUNT(*) as S_VISITS,
-                COUNT(DISTINCT IO_ID) as CAMPAIGN_COUNT,
-                COUNT(DISTINCT LINEITEM_ID) as LINEITEM_COUNT
-            FROM last_touch lt
-            LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa 
-                ON lt.QUORUM_ADVERTISER_ID = aa.ID
-            WHERE lt.rn = 1
-        """
-        results = execute_query(query, (advertiser_id, start_date, end_date, advertiser_id, advertiser_id, start_date, end_date))
-        if results and results[0]:
-            row = results[0]
-            pt = str(row.get('PT', ''))
-            agency_id = str(row.get('AGENCY_ID', ''))
-            row['PT_NAME'] = PT_CONFIG.get(pt, DEFAULT_PT_CONFIG).get('name', 'Unknown')
-            row['PUBLISHER_CONFIG'] = get_publisher_config(pt, agency_id, advertiser_id)
-            return jsonify({'success': True, 'data': row})
-        else:
-            return jsonify({'success': False, 'error': 'Advertiser not found'}), 404
+        results = execute_query(query, {
+            'advertiser_id': advertiser_id,
+            'start_date': start_date,
+            'end_date': end_date
+        })
+        return jsonify({'success': True, 'data': results[0] if results else {}})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
-
-# ============================================================================
-# ZIP PERFORMANCE (Last-Touch Attribution)
-# ============================================================================
-
-@app.route('/api/zip-performance', methods=['GET'])
-def get_zip_performance():
-    """Get ZIP-level performance with last-touch attribution."""
-    advertiser_id = request.args.get('advertiser_id')
-    start_date = request.args.get('start_date', '2020-01-01')
-    end_date = request.args.get('end_date', '2030-12-31')
-    min_impressions = request.args.get('min_impressions', '100')
-    
-    if not advertiser_id:
-        return jsonify({'success': False, 'error': 'advertiser_id parameter required'}), 400
-    
-    try:
-        query = """
-            WITH last_touch_visits AS (
-                SELECT sv.*,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY sv.DEVICE_ID_QU, sv.DRIVEBYDATE 
-                        ORDER BY sv.IMP_TIMESTAMP DESC
-                    ) as rn
-                FROM QUORUMDB.SEGMENT_DATA.QUORUM_ADV_STORE_VISITS sv
-                WHERE sv.QUORUM_ADVERTISER_ID = %s
-                  AND sv.IS_STORE_VISIT = TRUE
-                  AND sv.IMP_TIMESTAMP >= %s
-                  AND sv.IMP_TIMESTAMP < %s
-            ),
-            impressions_by_zip AS (
-                SELECT 
-                    mca.ZIP_CODE,
-                    COUNT(*) as IMPRESSIONS
-                FROM QUORUMDB.SEGMENT_DATA.QUORUM_ADV_STORE_VISITS sv
-                JOIN QUORUM_CROSS_CLOUD.ATTAIN_FEED.MAID_CENTROID_ASSOCIATION mca 
-                    ON LOWER(sv.IMP_MAID) = LOWER(mca.DEVICE_ID)
-                WHERE sv.QUORUM_ADVERTISER_ID = %s
-                  AND mca.ZIP_CODE IS NOT NULL AND mca.ZIP_CODE != ''
-                  AND sv.IMP_TIMESTAMP >= %s
-                  AND sv.IMP_TIMESTAMP < %s
-                GROUP BY mca.ZIP_CODE
-            ),
-            visits_by_zip AS (
-                SELECT 
-                    mca.ZIP_CODE,
-                    COUNT(*) as S_VISITS
-                FROM last_touch_visits ltv
-                JOIN QUORUM_CROSS_CLOUD.ATTAIN_FEED.MAID_CENTROID_ASSOCIATION mca 
-                    ON LOWER(ltv.IMP_MAID) = LOWER(mca.DEVICE_ID)
-                WHERE ltv.rn = 1
-                  AND mca.ZIP_CODE IS NOT NULL AND mca.ZIP_CODE != ''
-                GROUP BY mca.ZIP_CODE
-            )
-            SELECT 
-                i.ZIP_CODE,
-                zdm.DMA_CODE,
-                zdm.DMA_NAME,
-                zpd.POPULATION,
-                i.IMPRESSIONS,
-                COALESCE(v.S_VISITS, 0) as S_VISITS
-            FROM impressions_by_zip i
-            LEFT JOIN visits_by_zip v ON i.ZIP_CODE = v.ZIP_CODE
-            LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING zdm ON i.ZIP_CODE = zdm.ZIP_CODE
-            LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_POPULATION_DATA zpd ON i.ZIP_CODE = zpd.ZIP_CODE
-            WHERE i.IMPRESSIONS >= %s
-            ORDER BY i.IMPRESSIONS DESC
-            LIMIT 1000
-        """
-        results = execute_query(query, (advertiser_id, start_date, end_date, advertiser_id, start_date, end_date, min_impressions))
-        return jsonify({'success': True, 'data': results})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-# ============================================================================
-# CAMPAIGN PERFORMANCE (Last-Touch Attribution)
-# ============================================================================
 
 @app.route('/api/campaign-performance', methods=['GET'])
 def get_campaign_performance():
-    """Get campaign (IO) level performance with last-touch attribution."""
+    """Get campaign breakdown WITH IMPRESSIONS (direct campaign join)"""
     advertiser_id = request.args.get('advertiser_id')
-    start_date = request.args.get('start_date', '2020-01-01')
-    end_date = request.args.get('end_date', '2030-12-31')
+    start_date, end_date = get_date_params(request)
     
     if not advertiser_id:
-        return jsonify({'success': False, 'error': 'advertiser_id parameter required'}), 400
+        return jsonify({'success': False, 'error': 'advertiser_id required'}), 400
+    
+    query = """
+    WITH visit_data AS (
+        SELECT 
+            AGENCY_ID,
+            CAMPAIGN_ID,
+            MAX(CAMPAIGN_NAME) as CAMPAIGN_NAME,
+            COUNT(*) as S_VISITS,
+            COUNT(DISTINCT MAID) as UNIQUE_VISITORS
+        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
+        WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+          AND CONVERSION_DATE >= %(start_date)s
+          AND CONVERSION_DATE <= %(end_date)s
+          AND VISIT_TYPE = 'STORE'
+          AND CAMPAIGN_ID IS NOT NULL
+        GROUP BY AGENCY_ID, CAMPAIGN_ID
+    ),
+    impressions AS (
+        SELECT 
+            v.CAMPAIGN_ID,
+            MAX(x.IO_NAME) as CAMPAIGN_NAME_XANDR,
+            COUNT(*) as IMPRESSIONS
+        FROM visit_data v
+        INNER JOIN QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG x 
+            ON x.IO_ID = v.CAMPAIGN_ID 
+            AND x.AGENCY_ID = v.AGENCY_ID
+        WHERE CAST(x.TIMESTAMP AS DATE) >= %(start_date)s
+          AND CAST(x.TIMESTAMP AS DATE) <= %(end_date)s
+        GROUP BY v.CAMPAIGN_ID
+    )
+    SELECT 
+        v.CAMPAIGN_ID,
+        COALESCE(v.CAMPAIGN_NAME, i.CAMPAIGN_NAME_XANDR) as CAMPAIGN_NAME,
+        COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS,
+        v.S_VISITS,
+        v.UNIQUE_VISITORS,
+        CASE WHEN COALESCE(i.IMPRESSIONS, 0) > 0 
+             THEN ROUND((v.S_VISITS::FLOAT / i.IMPRESSIONS) * 100, 4)
+             ELSE 0 
+        END as VISIT_RATE
+    FROM visit_data v
+    LEFT JOIN impressions i ON v.CAMPAIGN_ID = i.CAMPAIGN_ID
+    ORDER BY IMPRESSIONS DESC NULLS LAST
+    LIMIT 100
+    """
     
     try:
-        query = """
-            WITH last_touch_visits AS (
-                SELECT *,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY DEVICE_ID_QU, DRIVEBYDATE 
-                        ORDER BY IMP_TIMESTAMP DESC
-                    ) as rn
-                FROM QUORUMDB.SEGMENT_DATA.QUORUM_ADV_STORE_VISITS
-                WHERE QUORUM_ADVERTISER_ID = %s
-                  AND IS_STORE_VISIT = TRUE
-                  AND IMP_TIMESTAMP >= %s
-                  AND IMP_TIMESTAMP < %s
-            ),
-            impressions_by_campaign AS (
-                SELECT 
-                    IO_ID as CAMPAIGN_ID,
-                    MAX(IO_NAME) as CAMPAIGN_NAME,
-                    MAX(PT) as PT,
-                    COUNT(*) as IMPRESSIONS
-                FROM QUORUMDB.SEGMENT_DATA.QUORUM_ADV_STORE_VISITS
-                WHERE QUORUM_ADVERTISER_ID = %s
-                  AND IO_ID IS NOT NULL
-                  AND IMP_TIMESTAMP >= %s
-                  AND IMP_TIMESTAMP < %s
-                GROUP BY IO_ID
-            ),
-            visits_by_campaign AS (
-                SELECT 
-                    IO_ID as CAMPAIGN_ID,
-                    COUNT(*) as S_VISITS
-                FROM last_touch_visits
-                WHERE rn = 1
-                GROUP BY IO_ID
-            )
-            SELECT 
-                i.PT,
-                i.CAMPAIGN_ID,
-                i.CAMPAIGN_NAME,
-                i.IMPRESSIONS,
-                COALESCE(v.S_VISITS, 0) as S_VISITS
-            FROM impressions_by_campaign i
-            LEFT JOIN visits_by_campaign v ON i.CAMPAIGN_ID = v.CAMPAIGN_ID
-            ORDER BY i.IMPRESSIONS DESC
-            LIMIT 50
-        """
-        results = execute_query(query, (advertiser_id, start_date, end_date, advertiser_id, start_date, end_date))
-        
-        # Add PT names
-        for row in results:
-            pt = str(row.get('PT', ''))
-            row['PT_NAME'] = PT_CONFIG.get(pt, DEFAULT_PT_CONFIG).get('name', 'Unknown')
-            # Decode campaign name if needed
-            if PT_CONFIG.get(pt, {}).get('url_decode'):
-                row['CAMPAIGN_NAME'] = decode_publisher_name(row.get('CAMPAIGN_NAME'), True)
-        
+        results = execute_query(query, {
+            'advertiser_id': advertiser_id,
+            'start_date': start_date,
+            'end_date': end_date
+        })
         return jsonify({'success': True, 'data': results})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
-
-# ============================================================================
-# LINE ITEM PERFORMANCE (Last-Touch Attribution)
-# ============================================================================
-
-@app.route('/api/lineitem-performance', methods=['GET'])
-def get_lineitem_performance():
-    """Get line item level performance with last-touch attribution."""
-    advertiser_id = request.args.get('advertiser_id')
-    campaign_id = request.args.get('campaign_id')
-    start_date = request.args.get('start_date', '2020-01-01')
-    end_date = request.args.get('end_date', '2030-12-31')
-    
-    if not advertiser_id:
-        return jsonify({'success': False, 'error': 'advertiser_id parameter required'}), 400
-    
-    try:
-        campaign_filter = "AND IO_ID = %s" if campaign_id else ""
-        params = [advertiser_id, start_date, end_date]
-        if campaign_id:
-            params.append(campaign_id)
-        params.extend([advertiser_id, start_date, end_date])
-        if campaign_id:
-            params.append(campaign_id)
-        
-        query = f"""
-            WITH last_touch_visits AS (
-                SELECT *,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY DEVICE_ID_QU, DRIVEBYDATE 
-                        ORDER BY IMP_TIMESTAMP DESC
-                    ) as rn
-                FROM QUORUMDB.SEGMENT_DATA.QUORUM_ADV_STORE_VISITS
-                WHERE QUORUM_ADVERTISER_ID = %s
-                  AND IS_STORE_VISIT = TRUE
-                  AND IMP_TIMESTAMP >= %s
-                  AND IMP_TIMESTAMP < %s
-                  {campaign_filter}
-            ),
-            impressions_by_lineitem AS (
-                SELECT 
-                    IO_ID as CAMPAIGN_ID,
-                    MAX(IO_NAME) as CAMPAIGN_NAME,
-                    LINEITEM_ID,
-                    MAX(LINEITEM_NAME) as LINEITEM_NAME,
-                    MAX(PT) as PT,
-                    COUNT(*) as IMPRESSIONS
-                FROM QUORUMDB.SEGMENT_DATA.QUORUM_ADV_STORE_VISITS
-                WHERE QUORUM_ADVERTISER_ID = %s
-                  AND LINEITEM_ID IS NOT NULL
-                  AND IMP_TIMESTAMP >= %s
-                  AND IMP_TIMESTAMP < %s
-                  {campaign_filter}
-                GROUP BY IO_ID, LINEITEM_ID
-            ),
-            visits_by_lineitem AS (
-                SELECT 
-                    LINEITEM_ID,
-                    COUNT(*) as S_VISITS
-                FROM last_touch_visits
-                WHERE rn = 1
-                GROUP BY LINEITEM_ID
-            )
-            SELECT 
-                i.PT,
-                i.CAMPAIGN_ID,
-                i.CAMPAIGN_NAME,
-                i.LINEITEM_ID,
-                i.LINEITEM_NAME,
-                i.IMPRESSIONS,
-                COALESCE(v.S_VISITS, 0) as S_VISITS
-            FROM impressions_by_lineitem i
-            LEFT JOIN visits_by_lineitem v ON i.LINEITEM_ID = v.LINEITEM_ID
-            ORDER BY i.IMPRESSIONS DESC
-            LIMIT 100
-        """
-        results = execute_query(query, tuple(params))
-        
-        # Add PT names
-        for row in results:
-            pt = str(row.get('PT', ''))
-            row['PT_NAME'] = PT_CONFIG.get(pt, DEFAULT_PT_CONFIG).get('name', 'Unknown')
-        
-        return jsonify({'success': True, 'data': results})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-# ============================================================================
-# PUBLISHER PERFORMANCE (Last-Touch Attribution with PT Config)
-# ============================================================================
 
 @app.route('/api/publisher-performance', methods=['GET'])
 def get_publisher_performance():
-    """Get publisher-level performance with last-touch attribution.
-    
-    Uses PT configuration to determine which column to use for publisher grouping.
-    Respects agency/advertiser overrides.
-    """
+    """Get store visit publisher breakdown WITH IMPRESSIONS"""
     advertiser_id = request.args.get('advertiser_id')
-    start_date = request.args.get('start_date', '2020-01-01')
-    end_date = request.args.get('end_date', '2030-12-31')
+    agency_id = request.args.get('agency_id')  # Required for impression join
+    min_visits = int(request.args.get('min_visits', 10))
+    start_date, end_date = get_date_params(request)
     
     if not advertiser_id:
-        return jsonify({'success': False, 'error': 'advertiser_id parameter required'}), 400
+        return jsonify({'success': False, 'error': 'advertiser_id required'}), 400
+    if not agency_id:
+        return jsonify({'success': False, 'error': 'agency_id required'}), 400
+    
+    query = """
+    WITH visit_publishers AS (
+        SELECT 
+            v.PUBLISHER,
+            MAX(v.PLATFORM_TYPE) as PT,
+            COUNT(*) as S_VISITS,
+            COUNT(DISTINCT v.MAID) as UNIQUE_VISITORS
+        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
+        WHERE v.QUORUM_ADVERTISER_ID = %(advertiser_id)s
+          AND v.CONVERSION_DATE >= %(start_date)s
+          AND v.CONVERSION_DATE <= %(end_date)s
+          AND v.VISIT_TYPE = 'STORE'
+          AND v.PUBLISHER IS NOT NULL
+        GROUP BY v.PUBLISHER
+        HAVING COUNT(*) >= %(min_visits)s
+    ),
+    publisher_impressions AS (
+        SELECT 
+            vp.PUBLISHER,
+            COUNT(*) as IMPRESSIONS
+        FROM visit_publishers vp
+        INNER JOIN QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG x 
+            ON x.AGENCY_ID = %(agency_id)s
+            AND (
+                x.PUBLISHER_CODE = vp.PUBLISHER 
+                OR x.PUBLISHER_CODE = REPLACE(REPLACE(vp.PUBLISHER, '%%2520', ' '), '%%20', ' ')
+            )
+        WHERE CAST(x.TIMESTAMP AS DATE) >= %(start_date)s
+          AND CAST(x.TIMESTAMP AS DATE) <= %(end_date)s
+        GROUP BY vp.PUBLISHER
+    )
+    SELECT 
+        REPLACE(REPLACE(vp.PUBLISHER, '%%2520', ' '), '%%20', ' ') as PUBLISHER,
+        vp.PT,
+        COALESCE(pi.IMPRESSIONS, 0) as IMPRESSIONS,
+        vp.S_VISITS,
+        vp.UNIQUE_VISITORS,
+        CASE WHEN COALESCE(pi.IMPRESSIONS, 0) > 0 
+             THEN ROUND((vp.S_VISITS::FLOAT / pi.IMPRESSIONS) * 100, 4)
+             ELSE 0 
+        END as VISIT_RATE
+    FROM visit_publishers vp
+    LEFT JOIN publisher_impressions pi ON vp.PUBLISHER = pi.PUBLISHER
+    ORDER BY COALESCE(pi.IMPRESSIONS, 0) DESC, vp.S_VISITS DESC
+    """
     
     try:
-        # Query gets all three publisher columns - we resolve which to use in Python
-        query = """
-            WITH last_touch_visits AS (
-                SELECT *,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY DEVICE_ID_QU, DRIVEBYDATE 
-                        ORDER BY IMP_TIMESTAMP DESC
-                    ) as rn
-                FROM QUORUMDB.SEGMENT_DATA.QUORUM_ADV_STORE_VISITS
-                WHERE QUORUM_ADVERTISER_ID = %s
-                  AND IS_STORE_VISIT = TRUE
-                  AND IMP_TIMESTAMP >= %s
-                  AND IMP_TIMESTAMP < %s
-            ),
-            impressions_by_publisher AS (
-                SELECT 
-                    PT,
-                    AGENCY_ID,
-                    PUBLISHER_ID,
-                    PUBLISHER_CODE,
-                    SITE,
-                    COUNT(*) as IMPRESSIONS
-                FROM QUORUMDB.SEGMENT_DATA.QUORUM_ADV_STORE_VISITS
-                WHERE QUORUM_ADVERTISER_ID = %s
-                  AND IMP_TIMESTAMP >= %s
-                  AND IMP_TIMESTAMP < %s
-                GROUP BY PT, AGENCY_ID, PUBLISHER_ID, PUBLISHER_CODE, SITE
-            ),
-            visits_by_publisher AS (
-                SELECT 
-                    PT,
-                    PUBLISHER_ID,
-                    PUBLISHER_CODE,
-                    SITE,
-                    COUNT(*) as S_VISITS
-                FROM last_touch_visits
-                WHERE rn = 1
-                GROUP BY PT, PUBLISHER_ID, PUBLISHER_CODE, SITE
-            )
-            SELECT 
-                i.PT,
-                i.AGENCY_ID,
-                i.PUBLISHER_ID,
-                i.PUBLISHER_CODE,
-                i.SITE,
-                i.IMPRESSIONS,
-                COALESCE(v.S_VISITS, 0) as S_VISITS
-            FROM impressions_by_publisher i
-            LEFT JOIN visits_by_publisher v 
-                ON COALESCE(i.PT, '') = COALESCE(v.PT, '')
-                AND COALESCE(i.PUBLISHER_ID, -1) = COALESCE(v.PUBLISHER_ID, -1)
-                AND COALESCE(i.PUBLISHER_CODE, '') = COALESCE(v.PUBLISHER_CODE, '')
-                AND COALESCE(i.SITE, '') = COALESCE(v.SITE, '')
-            WHERE i.IMPRESSIONS >= 100
-            ORDER BY i.IMPRESSIONS DESC
-            LIMIT 200
-        """
-        results = execute_query(query, (advertiser_id, start_date, end_date, advertiser_id, start_date, end_date))
-        
-        # Post-process results to resolve publisher names based on config hierarchy
-        for row in results:
-            pt = str(row.get('PT', ''))
-            agency_id = str(row.get('AGENCY_ID', ''))
-            
-            # Get resolved config for this PT/Agency/Advertiser
-            config = get_publisher_config(pt, agency_id, advertiser_id)
-            
-            # Determine the primary publisher value based on config
-            pub_col = config['publisher_column']
-            if pub_col == 'PUBLISHER_CODE':
-                raw_value = row.get('PUBLISHER_CODE')
-            elif pub_col == 'PUBLISHER_ID':
-                raw_value = row.get('PUBLISHER_ID')
-            elif pub_col == 'SITE':
-                raw_value = row.get('SITE')
-            else:
-                raw_value = row.get('PUBLISHER_CODE') or row.get('PUBLISHER_ID') or row.get('SITE')
-            
-            # Decode if needed
-            publisher_name = decode_publisher_name(raw_value, config.get('url_decode', False))
-            
-            # Add resolved fields
-            row['PT_NAME'] = config['name']
-            row['PUBLISHER_NAME'] = publisher_name
-            row['PUBLISHER_COLUMN_USED'] = pub_col
-        
+        results = execute_query(query, {
+            'advertiser_id': advertiser_id,
+            'agency_id': int(agency_id),
+            'start_date': start_date,
+            'end_date': end_date,
+            'min_visits': min_visits
+        })
         return jsonify({'success': True, 'data': results})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-# ============================================================================
-# WEB EVENTS MODULE (Last-Touch Attribution)
-# ============================================================================
+@app.route('/api/zip-performance', methods=['GET'])
+def get_zip_performance():
+    """Get store visit ZIP breakdown WITH IMPRESSIONS"""
+    advertiser_id = request.args.get('advertiser_id')
+    agency_id = request.args.get('agency_id')  # Required for impression join
+    min_visits = int(request.args.get('min_visits', 10))
+    start_date, end_date = get_date_params(request)
+    
+    if not advertiser_id:
+        return jsonify({'success': False, 'error': 'advertiser_id required'}), 400
+    if not agency_id:
+        return jsonify({'success': False, 'error': 'agency_id required'}), 400
+    
+    query = """
+    WITH visit_zips AS (
+        SELECT 
+            mca.ZIP_CODE,
+            COUNT(*) as S_VISITS,
+            COUNT(DISTINCT v.MAID) as UNIQUE_VISITORS
+        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
+        JOIN QUORUM_CROSS_CLOUD.ATTAIN_FEED.MAID_CENTROID_ASSOCIATION mca 
+            ON UPPER(REPLACE(v.MAID, '-', '')) = UPPER(REPLACE(mca.DEVICE_ID, '-', ''))
+        WHERE v.QUORUM_ADVERTISER_ID = %(advertiser_id)s
+          AND v.CONVERSION_DATE >= %(start_date)s
+          AND v.CONVERSION_DATE <= %(end_date)s
+          AND v.VISIT_TYPE = 'STORE'
+        GROUP BY mca.ZIP_CODE
+        HAVING COUNT(*) >= %(min_visits)s
+    ),
+    zip_impressions AS (
+        SELECT 
+            x.POSTAL_CODE as ZIP_CODE,
+            COUNT(*) as IMPRESSIONS
+        FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG x
+        WHERE x.AGENCY_ID = %(agency_id)s
+          AND CAST(x.TIMESTAMP AS DATE) >= %(start_date)s
+          AND CAST(x.TIMESTAMP AS DATE) <= %(end_date)s
+          AND x.POSTAL_CODE IS NOT NULL
+        GROUP BY x.POSTAL_CODE
+    )
+    SELECT 
+        vz.ZIP_CODE,
+        zdm.DMA_NAME,
+        zpd.POPULATION as ZIP_POPULATION,
+        COALESCE(zi.IMPRESSIONS, 0) as IMPRESSIONS,
+        vz.S_VISITS,
+        vz.UNIQUE_VISITORS,
+        CASE WHEN COALESCE(zi.IMPRESSIONS, 0) > 0 
+             THEN ROUND((vz.S_VISITS::FLOAT / zi.IMPRESSIONS) * 100, 4)
+             ELSE 0 
+        END as VISIT_RATE
+    FROM visit_zips vz
+    LEFT JOIN zip_impressions zi ON vz.ZIP_CODE = zi.ZIP_CODE
+    LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING zdm ON vz.ZIP_CODE = zdm.ZIP_CODE
+    LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_POPULATION_DATA zpd ON vz.ZIP_CODE = zpd.ZIP_CODE
+    ORDER BY vz.S_VISITS DESC
+    """
+    
+    try:
+        results = execute_query(query, {
+            'advertiser_id': advertiser_id,
+            'agency_id': int(agency_id),
+            'start_date': start_date,
+            'end_date': end_date,
+            'min_visits': min_visits
+        })
+        return jsonify({'success': True, 'data': results})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# =============================================================================
+# WEB ENDPOINTS (Backward Compatible)
+# =============================================================================
 
 @app.route('/api/web/advertisers', methods=['GET'])
 def get_web_advertisers():
-    """Get advertisers with web event data."""
+    """List web advertisers"""
+    start_date, end_date = get_date_params(request)
+    
+    query = """
+    SELECT 
+        v.QUORUM_ADVERTISER_ID as ADVERTISER_ID,
+        MAX(aa.COMP_NAME) as ADVERTISER_NAME,
+        1480 as AGENCY_ID,
+        'ViacomCBS WhoSay' as AGENCY_NAME,
+        COUNT(*) as W_VISITS,
+        SUM(v.IS_LEAD) as W_LEADS,
+        SUM(v.IS_PURCHASE) as W_PURCHASES,
+        SUM(v.PURCHASE_VALUE) as W_AMOUNT
+    FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
+    LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa 
+        ON TRY_CAST(v.QUORUM_ADVERTISER_ID AS NUMBER) = aa.ID
+    WHERE v.CONVERSION_DATE >= %(start_date)s
+      AND v.CONVERSION_DATE <= %(end_date)s
+      AND v.VISIT_TYPE = 'WEB'
+    GROUP BY v.QUORUM_ADVERTISER_ID
+    HAVING COUNT(*) > 0
+    ORDER BY COUNT(*) DESC
+    """
+    
     try:
-        query = """
-            WITH last_touch AS (
-                SELECT *,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY MAID, DATE(SITE_VISIT_TIMESTAMP)
-                        ORDER BY SITE_VISIT_TIMESTAMP DESC
-                    ) as rn
-                FROM QUORUMDB.SEGMENT_DATA.WEB_VISITORS_TO_LOG
-            )
-            SELECT 
-                lt.QUORUM_ADVERTISER_ID as ADVERTISER_ID,
-                MAX(aa.COMP_NAME) as ADVERTISER_NAME,
-                MAX(aa.AGENCY_NAME) as AGENCY_NAME,
-                COUNT(*) as TOTAL_IMPRESSIONS,
-                SUM(CASE WHEN lt.IS_SITE_VISIT = 'TRUE' AND lt.rn = 1 THEN 1 ELSE 0 END) as W_VISITS,
-                SUM(CASE WHEN lt.IS_LEAD = 'TRUE' AND lt.rn = 1 THEN 1 ELSE 0 END) as W_LEADS,
-                SUM(CASE WHEN lt.IS_PURCHASE = 'TRUE' AND lt.rn = 1 THEN 1 ELSE 0 END) as W_PURCHASES,
-                SUM(CASE WHEN lt.IS_PURCHASE = 'TRUE' AND lt.rn = 1 AND lt.PURCHASE_VALUE IS NOT NULL AND lt.PURCHASE_VALUE != '' 
-                    THEN TRY_CAST(lt.PURCHASE_VALUE AS FLOAT) ELSE 0 END) as W_AMOUNT
-            FROM last_touch lt
-            LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa 
-                ON lt.QUORUM_ADVERTISER_ID = aa.ID
-            GROUP BY lt.QUORUM_ADVERTISER_ID
-            HAVING COUNT(*) > 1000
-            ORDER BY TOTAL_IMPRESSIONS DESC
-            LIMIT 100
-        """
-        results = execute_query(query)
+        results = execute_query(query, {'start_date': start_date, 'end_date': end_date})
         return jsonify({'success': True, 'data': results})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -856,485 +478,74 @@ def get_web_advertisers():
 
 @app.route('/api/web/summary', methods=['GET'])
 def get_web_summary():
-    """Get web event summary for a specific advertiser."""
+    """Get web visit summary"""
     advertiser_id = request.args.get('advertiser_id')
-    start_date = request.args.get('start_date', '2020-01-01')
-    end_date = request.args.get('end_date', '2030-12-31')
+    start_date, end_date = get_date_params(request)
     
     if not advertiser_id:
-        return jsonify({'success': False, 'error': 'advertiser_id parameter required'}), 400
+        return jsonify({'success': False, 'error': 'advertiser_id required'}), 400
+    
+    query = """
+    SELECT 
+        COUNT(*) as W_VISITS,
+        COUNT(DISTINCT MAID) as UNIQUE_VISITORS,
+        SUM(PAGE_VIEWS) as W_PAGE_VIEWS,
+        SUM(IS_LEAD) as W_LEADS,
+        SUM(IS_PURCHASE) as W_PURCHASES,
+        SUM(PURCHASE_VALUE) as W_AMOUNT,
+        SUM(CASE WHEN CAMPAIGN_ID IS NOT NULL THEN 1 ELSE 0 END) as WITH_CAMPAIGN
+    FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
+    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+      AND CONVERSION_DATE >= %(start_date)s
+      AND CONVERSION_DATE <= %(end_date)s
+      AND VISIT_TYPE = 'WEB'
+    """
     
     try:
-        query = """
-            WITH last_touch AS (
-                SELECT *,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY MAID, DATE(SITE_VISIT_TIMESTAMP)
-                        ORDER BY SITE_VISIT_TIMESTAMP DESC
-                    ) as rn
-                FROM QUORUMDB.SEGMENT_DATA.WEB_VISITORS_TO_LOG
-                WHERE QUORUM_ADVERTISER_ID = %s
-                  AND SITE_VISIT_TIMESTAMP >= %s
-                  AND SITE_VISIT_TIMESTAMP < %s
-            )
-            SELECT 
-                %s as ADVERTISER_ID,
-                MAX(aa.COMP_NAME) as ADVERTISER_NAME,
-                COUNT(*) as TOTAL_IMPRESSIONS,
-                SUM(CASE WHEN lt.IS_SITE_VISIT = 'TRUE' AND lt.rn = 1 THEN 1 ELSE 0 END) as W_VISITS,
-                SUM(CASE WHEN lt.IS_LEAD = 'TRUE' AND lt.rn = 1 THEN 1 ELSE 0 END) as W_LEADS,
-                SUM(CASE WHEN lt.IS_PURCHASE = 'TRUE' AND lt.rn = 1 THEN 1 ELSE 0 END) as W_PURCHASES,
-                SUM(CASE WHEN lt.IS_PURCHASE = 'TRUE' AND lt.rn = 1 AND lt.PURCHASE_VALUE IS NOT NULL AND lt.PURCHASE_VALUE != '' 
-                    THEN TRY_CAST(lt.PURCHASE_VALUE AS FLOAT) ELSE 0 END) as W_AMOUNT
-            FROM last_touch lt
-            LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa 
-                ON lt.QUORUM_ADVERTISER_ID = aa.ID
-        """
-        results = execute_query(query, (advertiser_id, start_date, end_date, advertiser_id))
-        if results:
-            return jsonify({'success': True, 'data': results[0]})
-        else:
-            return jsonify({'success': False, 'error': 'Advertiser not found'}), 404
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/web/zip-performance', methods=['GET'])
-def get_web_zip_performance():
-    """Get ZIP-level web event data with last-touch attribution."""
-    advertiser_id = request.args.get('advertiser_id')
-    start_date = request.args.get('start_date', '2020-01-01')
-    end_date = request.args.get('end_date', '2030-12-31')
-    min_impressions = request.args.get('min_impressions', '100')
-    
-    if not advertiser_id:
-        return jsonify({'success': False, 'error': 'advertiser_id parameter required'}), 400
-    
-    try:
-        query = """
-            WITH last_touch AS (
-                SELECT wv.*,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY wv.MAID, DATE(wv.SITE_VISIT_TIMESTAMP)
-                        ORDER BY wv.SITE_VISIT_TIMESTAMP DESC
-                    ) as rn
-                FROM QUORUMDB.SEGMENT_DATA.WEB_VISITORS_TO_LOG wv
-                WHERE wv.QUORUM_ADVERTISER_ID = %s
-                  AND wv.SITE_VISIT_TIMESTAMP >= %s
-                  AND wv.SITE_VISIT_TIMESTAMP < %s
-            ),
-            impressions_by_zip AS (
-                SELECT 
-                    mca.ZIP_CODE,
-                    COUNT(*) as IMPRESSIONS
-                FROM last_touch lt
-                JOIN QUORUM_CROSS_CLOUD.ATTAIN_FEED.MAID_CENTROID_ASSOCIATION mca 
-                    ON LOWER(lt.MAID) = LOWER(mca.DEVICE_ID)
-                WHERE mca.ZIP_CODE IS NOT NULL AND mca.ZIP_CODE != ''
-                GROUP BY mca.ZIP_CODE
-            ),
-            conversions_by_zip AS (
-                SELECT 
-                    mca.ZIP_CODE,
-                    SUM(CASE WHEN lt.IS_SITE_VISIT = 'TRUE' THEN 1 ELSE 0 END) as W_VISITS,
-                    SUM(CASE WHEN lt.IS_LEAD = 'TRUE' THEN 1 ELSE 0 END) as W_LEADS,
-                    SUM(CASE WHEN lt.IS_PURCHASE = 'TRUE' THEN 1 ELSE 0 END) as W_PURCHASES,
-                    SUM(CASE WHEN lt.IS_PURCHASE = 'TRUE' AND lt.PURCHASE_VALUE IS NOT NULL AND lt.PURCHASE_VALUE != '' 
-                        THEN TRY_CAST(lt.PURCHASE_VALUE AS FLOAT) ELSE 0 END) as W_AMOUNT
-                FROM last_touch lt
-                JOIN QUORUM_CROSS_CLOUD.ATTAIN_FEED.MAID_CENTROID_ASSOCIATION mca 
-                    ON LOWER(lt.MAID) = LOWER(mca.DEVICE_ID)
-                WHERE lt.rn = 1
-                  AND mca.ZIP_CODE IS NOT NULL AND mca.ZIP_CODE != ''
-                GROUP BY mca.ZIP_CODE
-            )
-            SELECT 
-                i.ZIP_CODE,
-                zdm.DMA_CODE,
-                zdm.DMA_NAME,
-                zpd.POPULATION,
-                i.IMPRESSIONS,
-                COALESCE(c.W_VISITS, 0) as W_VISITS,
-                COALESCE(c.W_LEADS, 0) as W_LEADS,
-                COALESCE(c.W_PURCHASES, 0) as W_PURCHASES,
-                COALESCE(c.W_AMOUNT, 0) as W_AMOUNT
-            FROM impressions_by_zip i
-            LEFT JOIN conversions_by_zip c ON i.ZIP_CODE = c.ZIP_CODE
-            LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING zdm ON i.ZIP_CODE = zdm.ZIP_CODE
-            LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_POPULATION_DATA zpd ON i.ZIP_CODE = zpd.ZIP_CODE
-            WHERE i.IMPRESSIONS >= %s
-            ORDER BY i.IMPRESSIONS DESC
-            LIMIT 1000
-        """
-        results = execute_query(query, (advertiser_id, start_date, end_date, min_impressions))
-        return jsonify({'success': True, 'data': results})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-# ============================================================================
-# STORE ZIP OPTIMIZATION MODULE - CORRECTED VERSION
-# Replace your existing endpoints with this version
-# ============================================================================
-
-@app.route('/api/store/agencies-postal', methods=['GET'])
-def get_agencies_postal():
-    """Get agencies from CAMPAIGN_POSTAL_REPORTING for ZIP optimization."""
-    try:
-        query = """
-            SELECT DISTINCT 
-                AGENCY_ID as id,
-                AGENCY_NAME as name,
-                COUNT(DISTINCT ADVERTISER_ID) as advertiserCount
-            FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING
-            WHERE AGENCY_ID IS NOT NULL 
-                AND AGENCY_NAME IS NOT NULL
-            GROUP BY AGENCY_ID, AGENCY_NAME
-            ORDER BY AGENCY_NAME
-        """
-        results = execute_query(query)
-        return jsonify({'success': True, 'data': results})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/store/advertisers-postal', methods=['GET'])
-def get_advertisers_postal():
-    """Get advertisers from CAMPAIGN_POSTAL_REPORTING for ZIP optimization."""
-    try:
-        agency_id = request.args.get('agency_id')
-        
-        if not agency_id:
-            return jsonify({'success': False, 'error': 'agency_id is required'}), 400
-        
-        query = """
-            SELECT DISTINCT 
-                ADVERTISER_ID as id,
-                ADVERTISER_NAME as name
-            FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING
-            WHERE AGENCY_ID = %s
-                AND ADVERTISER_NAME IS NOT NULL
-            ORDER BY ADVERTISER_NAME
-            LIMIT 100
-        """
-        results = execute_query(query, (agency_id,))
-        return jsonify({'success': True, 'data': results})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/store/campaign-performance-postal', methods=['GET'])
-def get_campaign_performance_postal():
-    """Get campaign performance from CAMPAIGN_POSTAL_REPORTING."""
-    try:
-        advertiser_id = request.args.get('advertiser_id')
-        start_date = request.args.get('start_date', '')
-        end_date = request.args.get('end_date', '')
-        
-        if not advertiser_id:
-            return jsonify({'success': False, 'error': 'advertiser_id is required'}), 400
-        
-        date_filter = ""
-        params = [advertiser_id]
-        
-        if start_date:
-            date_filter += " AND DATE >= %s"
-            params.append(start_date)
-        if end_date:
-            date_filter += " AND DATE <= %s"
-            params.append(end_date)
-        
-        query = f"""
-            SELECT 
-                CAMPAIGN_ID,
-                CAMPAIGN_NAME,
-                SUM(IMPRESSIONS) as IMPRESSIONS,
-                SUM(STORE_VISITS) as VISITS,
-                CASE 
-                    WHEN SUM(IMPRESSIONS) > 0 THEN SUM(STORE_VISITS)::FLOAT / SUM(IMPRESSIONS)::FLOAT
-                    ELSE 0 
-                END as visitRate
-            FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING
-            WHERE ADVERTISER_ID = %s
-                {date_filter}
-            GROUP BY CAMPAIGN_ID, CAMPAIGN_NAME
-            HAVING SUM(IMPRESSIONS) > 0
-            ORDER BY IMPRESSIONS DESC
-            LIMIT 50
-        """
-        
-        campaigns = execute_query(query, tuple(params))
-        
-        return jsonify({
-            'success': True,
-            'data': {'campaigns': campaigns}
+        results = execute_query(query, {
+            'advertiser_id': advertiser_id,
+            'start_date': start_date,
+            'end_date': end_date
         })
+        return jsonify({'success': True, 'data': results[0] if results else {}})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
-
-@app.route('/api/store/zip-analysis-postal', methods=['GET'])
-def get_zip_analysis_postal():
-    """Get ZIP code analysis from CAMPAIGN_POSTAL_REPORTING for reallocation."""
-    try:
-        advertiser_id = request.args.get('advertiser_id')
-        start_date = request.args.get('start_date', '')
-        end_date = request.args.get('end_date', '')
-        
-        if not advertiser_id:
-            return jsonify({'success': False, 'error': 'advertiser_id is required'}), 400
-        
-        date_filter = ""
-        params_baseline = [advertiser_id]
-        params_zip = [advertiser_id]
-        params_dma = [advertiser_id]
-        
-        if start_date:
-            date_filter += " AND DATE >= %s"
-            params_baseline.append(start_date)
-            params_zip.append(start_date)
-            params_dma.append(start_date)
-        if end_date:
-            date_filter += " AND DATE <= %s"
-            params_baseline.append(end_date)
-            params_zip.append(end_date)
-            params_dma.append(end_date)
-        
-        # Get baseline metrics
-        baseline_query = f"""
-            SELECT 
-                SUM(IMPRESSIONS) as totalImpressions,
-                SUM(STORE_VISITS) as totalVisits,
-                CASE 
-                    WHEN SUM(IMPRESSIONS) > 0 THEN SUM(STORE_VISITS)::FLOAT / SUM(IMPRESSIONS)::FLOAT
-                    ELSE 0 
-                END as overallVisitRate,
-                SUM(USER_HOME_POSTAL_CODE_POPULATION) as totalPopulation
-            FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING
-            WHERE ADVERTISER_ID = %s
-                {date_filter}
-        """
-        
-        baseline_result = execute_query(baseline_query, tuple(params_baseline))
-        baseline = baseline_result[0] if baseline_result else {
-            'totalImpressions': 0,
-            'totalVisits': 0,
-            'overallVisitRate': 0,
-            'totalPopulation': 0
-        }
-        
-        # Get ZIP code data (only ZIPs with 3500+ impressions)
-        zip_query = f"""
-            SELECT 
-                zdm.DMA_NAME as dma,
-                cpr.USER_HOME_POSTAL_CODE as zip,
-                MAX(cpr.USER_HOME_POSTAL_CODE_POPULATION) as population,
-                SUM(cpr.IMPRESSIONS) as impressions,
-                SUM(cpr.STORE_VISITS) as visits
-            FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING cpr
-            LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING zdm 
-                ON cpr.USER_HOME_POSTAL_CODE = zdm.ZIP_CODE
-            WHERE cpr.ADVERTISER_ID = %s
-                {date_filter}
-                AND cpr.USER_HOME_POSTAL_CODE IS NOT NULL
-                AND cpr.USER_HOME_POSTAL_CODE != 'UNKNOWN'
-            GROUP BY zdm.DMA_NAME, cpr.USER_HOME_POSTAL_CODE
-            HAVING SUM(cpr.IMPRESSIONS) >= 3500
-            ORDER BY impressions DESC
-            LIMIT 500
-        """
-        
-        zip_codes = execute_query(zip_query, tuple(params_zip))
-        
-        # Get DMA ZIP counts
-        dma_counts_query = f"""
-            SELECT 
-                zdm.DMA_NAME as dma,
-                COUNT(DISTINCT cpr.USER_HOME_POSTAL_CODE) as zipCount
-            FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING cpr
-            LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING zdm 
-                ON cpr.USER_HOME_POSTAL_CODE = zdm.ZIP_CODE
-            WHERE cpr.ADVERTISER_ID = %s
-                {date_filter}
-                AND cpr.USER_HOME_POSTAL_CODE IS NOT NULL
-                AND cpr.USER_HOME_POSTAL_CODE != 'UNKNOWN'
-            GROUP BY zdm.DMA_NAME
-            HAVING COUNT(DISTINCT cpr.USER_HOME_POSTAL_CODE) > 0
-        """
-        
-        dma_counts = execute_query(dma_counts_query, tuple(params_dma))
-        dma_zip_counts = {}
-        for row in dma_counts:
-            dma_name = row.get('DMA') or row.get('dma') or row.get('DMA_NAME')
-            zip_count = row.get('ZIPCOUNT') or row.get('zipCount') or row.get('ZIP_COUNT')
-            if dma_name:
-                dma_zip_counts[dma_name] = zip_count
-
-        
-        return jsonify({
-            'success': True,
-            'data': {
-                'baseline': baseline,
-                'zipCodes': zip_codes,
-                'dmaZipCounts': dma_zip_counts
-            }
-        })
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-# ============================================================================
-# WEB CAMPAIGN PERFORMANCE (Last-Touch Attribution)
-# Uses PARAMOUNT_AD_FULL_ATTRIBUTION_V2 which has campaign/lineitem/publisher data
-# ============================================================================
 
 @app.route('/api/web/campaign-performance', methods=['GET'])
 def get_web_campaign_performance():
-    """Get campaign (IO) level web performance with last-touch attribution.
+    """Get web visit campaign breakdown"""
+    advertiser_id = request.args.get('advertiser_id')
+    start_date, end_date = get_date_params(request)
     
-    Uses PARAMOUNT_AD_FULL_ATTRIBUTION_V2 which has full campaign/lineitem data.
-    Last-touch is determined by MAX(IMP_DATE) per device per visit.
+    if not advertiser_id:
+        return jsonify({'success': False, 'error': 'advertiser_id required'}), 400
+    
+    query = """
+    SELECT 
+        CAMPAIGN_ID,
+        MAX(CAMPAIGN_NAME) as CAMPAIGN_NAME,
+        COUNT(*) as W_VISITS,
+        SUM(IS_LEAD) as W_LEADS,
+        SUM(IS_PURCHASE) as W_PURCHASES,
+        SUM(PURCHASE_VALUE) as W_AMOUNT,
+        COUNT(DISTINCT MAID) as UNIQUE_VISITORS
+    FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
+    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+      AND CONVERSION_DATE >= %(start_date)s
+      AND CONVERSION_DATE <= %(end_date)s
+      AND VISIT_TYPE = 'WEB'
+      AND CAMPAIGN_ID IS NOT NULL
+    GROUP BY CAMPAIGN_ID
+    ORDER BY W_VISITS DESC
     """
-    advertiser_id = request.args.get('advertiser_id')
-    start_date = request.args.get('start_date', '2020-01-01')
-    end_date = request.args.get('end_date', '2030-12-31')
-    
-    if not advertiser_id:
-        return jsonify({'success': False, 'error': 'advertiser_id parameter required'}), 400
     
     try:
-        query = """
-            WITH last_touch AS (
-                SELECT *,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY IMP_MAID, SITE_VISIT_ID 
-                        ORDER BY IMP_DATE DESC
-                    ) as rn
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_AD_FULL_ATTRIBUTION_V2
-                WHERE QUORUM_ADVERTISER_ID = %s
-                  AND IS_SITE_VISIT = 'TRUE'
-                  AND SITE_VISIT_TIMESTAMP >= %s
-                  AND SITE_VISIT_TIMESTAMP < %s
-            ),
-            impressions_by_campaign AS (
-                SELECT 
-                    IO_ID as CAMPAIGN_ID,
-                    MAX(IO_NAME) as CAMPAIGN_NAME,
-                    MAX(PT) as PT,
-                    COUNT(*) as IMPRESSIONS
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_AD_FULL_ATTRIBUTION_V2
-                WHERE QUORUM_ADVERTISER_ID = %s
-                  AND SITE_VISIT_TIMESTAMP >= %s
-                  AND SITE_VISIT_TIMESTAMP < %s
-                GROUP BY IO_ID
-            ),
-            visits_by_campaign AS (
-                SELECT 
-                    IO_ID as CAMPAIGN_ID,
-                    COUNT(*) as W_VISITS
-                FROM last_touch
-                WHERE rn = 1
-                GROUP BY IO_ID
-            )
-            SELECT 
-                i.PT,
-                i.CAMPAIGN_ID,
-                i.CAMPAIGN_NAME,
-                i.IMPRESSIONS,
-                COALESCE(v.W_VISITS, 0) as W_VISITS
-            FROM impressions_by_campaign i
-            LEFT JOIN visits_by_campaign v ON i.CAMPAIGN_ID = v.CAMPAIGN_ID
-            ORDER BY i.IMPRESSIONS DESC
-            LIMIT 50
-        """
-        results = execute_query(query, (advertiser_id, start_date, end_date, advertiser_id, start_date, end_date))
-        
-        # Add PT names
-        for row in results:
-            pt = str(row.get('PT', ''))
-            row['PT_NAME'] = PT_CONFIG.get(pt, DEFAULT_PT_CONFIG).get('name', 'Unknown')
-        
-        return jsonify({'success': True, 'data': results})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/web/lineitem-performance', methods=['GET'])
-def get_web_lineitem_performance():
-    """Get line item level web performance with last-touch attribution."""
-    advertiser_id = request.args.get('advertiser_id')
-    campaign_id = request.args.get('campaign_id')
-    start_date = request.args.get('start_date', '2020-01-01')
-    end_date = request.args.get('end_date', '2030-12-31')
-    
-    if not advertiser_id:
-        return jsonify({'success': False, 'error': 'advertiser_id parameter required'}), 400
-    
-    try:
-        campaign_filter = "AND IO_ID = %s" if campaign_id else ""
-        params = [advertiser_id, start_date, end_date]
-        if campaign_id:
-            params.append(campaign_id)
-        params.extend([advertiser_id, start_date, end_date])
-        if campaign_id:
-            params.append(campaign_id)
-        
-        query = f"""
-            WITH last_touch AS (
-                SELECT *,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY IMP_MAID, SITE_VISIT_ID 
-                        ORDER BY IMP_DATE DESC
-                    ) as rn
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_AD_FULL_ATTRIBUTION_V2
-                WHERE QUORUM_ADVERTISER_ID = %s
-                  AND IS_SITE_VISIT = 'TRUE'
-                  AND SITE_VISIT_TIMESTAMP >= %s
-                  AND SITE_VISIT_TIMESTAMP < %s
-                  {campaign_filter}
-            ),
-            impressions_by_lineitem AS (
-                SELECT 
-                    IO_ID as CAMPAIGN_ID,
-                    MAX(IO_NAME) as CAMPAIGN_NAME,
-                    LINEITEM_ID,
-                    MAX(LINEITEM_NAME) as LINEITEM_NAME,
-                    MAX(PT) as PT,
-                    COUNT(*) as IMPRESSIONS
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_AD_FULL_ATTRIBUTION_V2
-                WHERE QUORUM_ADVERTISER_ID = %s
-                  AND LINEITEM_ID IS NOT NULL
-                  AND SITE_VISIT_TIMESTAMP >= %s
-                  AND SITE_VISIT_TIMESTAMP < %s
-                  {campaign_filter}
-                GROUP BY IO_ID, LINEITEM_ID
-            ),
-            visits_by_lineitem AS (
-                SELECT 
-                    LINEITEM_ID,
-                    COUNT(*) as W_VISITS
-                FROM last_touch
-                WHERE rn = 1
-                GROUP BY LINEITEM_ID
-            )
-            SELECT 
-                i.PT,
-                i.CAMPAIGN_ID,
-                i.CAMPAIGN_NAME,
-                i.LINEITEM_ID,
-                i.LINEITEM_NAME,
-                i.IMPRESSIONS,
-                COALESCE(v.W_VISITS, 0) as W_VISITS
-            FROM impressions_by_lineitem i
-            LEFT JOIN visits_by_lineitem v ON i.LINEITEM_ID = v.LINEITEM_ID
-            ORDER BY i.IMPRESSIONS DESC
-            LIMIT 100
-        """
-        results = execute_query(query, tuple(params))
-        
-        # Add PT names
-        for row in results:
-            pt = str(row.get('PT', ''))
-            row['PT_NAME'] = PT_CONFIG.get(pt, DEFAULT_PT_CONFIG).get('name', 'Unknown')
-        
+        results = execute_query(query, {
+            'advertiser_id': advertiser_id,
+            'start_date': start_date,
+            'end_date': end_date
+        })
         return jsonify({'success': True, 'data': results})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -1342,123 +553,240 @@ def get_web_lineitem_performance():
 
 @app.route('/api/web/publisher-performance', methods=['GET'])
 def get_web_publisher_performance():
-    """Get publisher-level web performance with last-touch attribution.
-    
-    Uses SITE column from PARAMOUNT_AD_FULL_ATTRIBUTION_V2.
-    """
+    """Get web visit publisher breakdown"""
     advertiser_id = request.args.get('advertiser_id')
-    start_date = request.args.get('start_date', '2020-01-01')
-    end_date = request.args.get('end_date', '2030-12-31')
+    min_visits = int(request.args.get('min_visits', 10))
+    start_date, end_date = get_date_params(request)
     
     if not advertiser_id:
-        return jsonify({'success': False, 'error': 'advertiser_id parameter required'}), 400
+        return jsonify({'success': False, 'error': 'advertiser_id required'}), 400
     
-    try:
-        query = """
-            WITH last_touch AS (
-                SELECT *,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY IMP_MAID, SITE_VISIT_ID 
-                        ORDER BY IMP_DATE DESC
-                    ) as rn
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_AD_FULL_ATTRIBUTION_V2
-                WHERE QUORUM_ADVERTISER_ID = %s
-                  AND IS_SITE_VISIT = 'TRUE'
-                  AND SITE_VISIT_TIMESTAMP >= %s
-                  AND SITE_VISIT_TIMESTAMP < %s
-            ),
-            impressions_by_publisher AS (
-                SELECT 
-                    PT,
-                    SITE as PUBLISHER_NAME,
-                    COUNT(*) as IMPRESSIONS
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_AD_FULL_ATTRIBUTION_V2
-                WHERE QUORUM_ADVERTISER_ID = %s
-                  AND SITE_VISIT_TIMESTAMP >= %s
-                  AND SITE_VISIT_TIMESTAMP < %s
-                GROUP BY PT, SITE
-            ),
-            visits_by_publisher AS (
-                SELECT 
-                    PT,
-                    SITE as PUBLISHER_NAME,
-                    COUNT(*) as W_VISITS
-                FROM last_touch
-                WHERE rn = 1
-                GROUP BY PT, SITE
-            )
-            SELECT 
-                i.PT,
-                i.PUBLISHER_NAME,
-                i.IMPRESSIONS,
-                COALESCE(v.W_VISITS, 0) as W_VISITS
-            FROM impressions_by_publisher i
-            LEFT JOIN visits_by_publisher v 
-                ON COALESCE(i.PT, '') = COALESCE(v.PT, '')
-                AND COALESCE(i.PUBLISHER_NAME, '') = COALESCE(v.PUBLISHER_NAME, '')
-            WHERE i.IMPRESSIONS >= 100
-            ORDER BY i.IMPRESSIONS DESC
-            LIMIT 200
-        """
-        results = execute_query(query, (advertiser_id, start_date, end_date, advertiser_id, start_date, end_date))
-        
-        # Add PT names
-        for row in results:
-            pt = str(row.get('PT', ''))
-            row['PT_NAME'] = PT_CONFIG.get(pt, DEFAULT_PT_CONFIG).get('name', 'Unknown')
-        
-        return jsonify({'success': True, 'data': results})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-# ============================================================================
-# WEB ADVERTISERS (Updated to use PARAMOUNT table for better data)
-# ============================================================================
-
-@app.route('/api/web/advertisers-v2', methods=['GET'])
-def get_web_advertisers_v2():
-    """Get advertisers with web event data from PARAMOUNT attribution table.
-    
-    This provides more complete data including campaign/lineitem counts.
+    query = """
+    SELECT 
+        PUBLISHER,
+        MAX(PLATFORM_TYPE) as PT,
+        COUNT(*) as W_VISITS,
+        SUM(IS_LEAD) as W_LEADS,
+        SUM(IS_PURCHASE) as W_PURCHASES,
+        SUM(PURCHASE_VALUE) as W_AMOUNT,
+        COUNT(DISTINCT MAID) as UNIQUE_VISITORS
+    FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
+    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+      AND CONVERSION_DATE >= %(start_date)s
+      AND CONVERSION_DATE <= %(end_date)s
+      AND VISIT_TYPE = 'WEB'
+      AND PUBLISHER IS NOT NULL
+    GROUP BY PUBLISHER
+    HAVING W_VISITS >= %(min_visits)s
+    ORDER BY W_VISITS DESC
     """
+    
     try:
-        query = """
-            WITH last_touch AS (
-                SELECT *,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY IMP_MAID, SITE_VISIT_ID 
-                        ORDER BY IMP_DATE DESC
-                    ) as rn
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_AD_FULL_ATTRIBUTION_V2
-                WHERE IS_SITE_VISIT = 'TRUE'
-            )
-            SELECT 
-                QUORUM_ADVERTISER_ID as ADVERTISER_ID,
-                MAX(ADVERTISER_NAME) as ADVERTISER_NAME,
-                MAX(PT) as PT,
-                COUNT(*) as TOTAL_IMPRESSIONS,
-                SUM(CASE WHEN IS_SITE_VISIT = 'TRUE' THEN 1 ELSE 0 END) as ATTRIBUTED_IMPRESSIONS,
-                SUM(CASE WHEN rn = 1 THEN 1 ELSE 0 END) as W_VISITS,
-                COUNT(DISTINCT IO_ID) as CAMPAIGN_COUNT,
-                COUNT(DISTINCT LINEITEM_ID) as LINEITEM_COUNT
-            FROM last_touch
-            GROUP BY QUORUM_ADVERTISER_ID
-            HAVING SUM(CASE WHEN rn = 1 THEN 1 ELSE 0 END) > 0
-            ORDER BY W_VISITS DESC
-            LIMIT 100
-        """
-        results = execute_query(query)
-        
-        # Add PT names
-        for row in results:
-            pt = str(row.get('PT', ''))
-            row['PT_NAME'] = PT_CONFIG.get(pt, DEFAULT_PT_CONFIG).get('name', 'Unknown')
-        
+        results = execute_query(query, {
+            'advertiser_id': advertiser_id,
+            'start_date': start_date,
+            'end_date': end_date,
+            'min_visits': min_visits
+        })
         return jsonify({'success': True, 'data': results})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/web/zip-performance', methods=['GET'])
+def get_web_zip_performance():
+    """Get web visit ZIP breakdown"""
+    advertiser_id = request.args.get('advertiser_id')
+    min_visits = int(request.args.get('min_visits', 10))
+    start_date, end_date = get_date_params(request)
     
+    if not advertiser_id:
+        return jsonify({'success': False, 'error': 'advertiser_id required'}), 400
+    
+    query = """
+    WITH visit_zips AS (
+        SELECT 
+            mca.ZIP_CODE,
+            COUNT(*) as W_VISITS,
+            SUM(v.IS_LEAD) as W_LEADS,
+            SUM(v.IS_PURCHASE) as W_PURCHASES,
+            SUM(v.PURCHASE_VALUE) as W_AMOUNT,
+            COUNT(DISTINCT v.MAID) as UNIQUE_VISITORS
+        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
+        JOIN QUORUM_CROSS_CLOUD.ATTAIN_FEED.MAID_CENTROID_ASSOCIATION mca 
+            ON UPPER(REPLACE(v.MAID, '-', '')) = UPPER(REPLACE(mca.DEVICE_ID, '-', ''))
+        WHERE v.QUORUM_ADVERTISER_ID = %(advertiser_id)s
+          AND v.CONVERSION_DATE >= %(start_date)s
+          AND v.CONVERSION_DATE <= %(end_date)s
+          AND v.VISIT_TYPE = 'WEB'
+        GROUP BY mca.ZIP_CODE
+    )
+    SELECT 
+        vz.ZIP_CODE,
+        zdm.DMA_NAME,
+        zpd.POPULATION as ZIP_POPULATION,
+        vz.W_VISITS,
+        vz.W_LEADS,
+        vz.W_PURCHASES,
+        vz.W_AMOUNT,
+        vz.UNIQUE_VISITORS
+    FROM visit_zips vz
+    LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING zdm ON vz.ZIP_CODE = zdm.ZIP_CODE
+    LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_POPULATION_DATA zpd ON vz.ZIP_CODE = zpd.ZIP_CODE
+    WHERE vz.W_VISITS >= %(min_visits)s
+    ORDER BY vz.W_VISITS DESC
+    """
+    
+    try:
+        results = execute_query(query, {
+            'advertiser_id': advertiser_id,
+            'start_date': start_date,
+            'end_date': end_date,
+            'min_visits': min_visits
+        })
+        return jsonify({'success': True, 'data': results})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# =============================================================================
+# V3 UNIFIED ENDPOINTS (New - Handles both Store + Web)
+# =============================================================================
+
+@app.route('/api/v3/agencies', methods=['GET'])
+def get_agencies_v3():
+    """List all agencies with both store and web metrics"""
+    start_date, end_date = get_date_params(request)
+    
+    query = """
+    SELECT 
+        v.AGENCY_ID,
+        MAX(aa.AGENCY_NAME) as AGENCY_NAME,
+        SUM(CASE WHEN v.VISIT_TYPE = 'STORE' THEN 1 ELSE 0 END) as S_VISITS,
+        SUM(CASE WHEN v.VISIT_TYPE = 'WEB' THEN 1 ELSE 0 END) as W_VISITS,
+        SUM(v.IS_LEAD) as W_LEADS,
+        SUM(v.IS_PURCHASE) as W_PURCHASES,
+        COUNT(DISTINCT v.QUORUM_ADVERTISER_ID) as ADVERTISER_COUNT,
+        COUNT(DISTINCT v.MAID) as UNIQUE_VISITORS
+    FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
+    LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa 
+        ON v.AGENCY_ID = aa.AGENCY_ID
+    WHERE v.CONVERSION_DATE >= %(start_date)s
+      AND v.CONVERSION_DATE <= %(end_date)s
+      AND v.AGENCY_ID IS NOT NULL
+    GROUP BY v.AGENCY_ID
+    HAVING SUM(CASE WHEN v.VISIT_TYPE = 'STORE' THEN 1 ELSE 0 END) > 0 
+        OR SUM(CASE WHEN v.VISIT_TYPE = 'WEB' THEN 1 ELSE 0 END) > 0
+    ORDER BY (SUM(CASE WHEN v.VISIT_TYPE = 'STORE' THEN 1 ELSE 0 END) + 
+              SUM(CASE WHEN v.VISIT_TYPE = 'WEB' THEN 1 ELSE 0 END)) DESC
+    """
+    
+    try:
+        results = execute_query(query, {'start_date': start_date, 'end_date': end_date})
+        return jsonify({'success': True, 'data': results})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/v3/advertiser-summary', methods=['GET'])
+def get_advertiser_summary_v3():
+    """Get unified summary WITH IMPRESSIONS (store and web)"""
+    advertiser_id = request.args.get('advertiser_id')
+    start_date, end_date = get_date_params(request)
+    
+    if not advertiser_id:
+        return jsonify({'success': False, 'error': 'advertiser_id required'}), 400
+    
+    query = """
+    WITH visits AS (
+        SELECT 
+            VISIT_TYPE,
+            COUNT(*) as TOTAL_VISITS,
+            COUNT(DISTINCT MAID) as UNIQUE_VISITORS,
+            SUM(PAGE_VIEWS) as TOTAL_PAGE_VIEWS,
+            SUM(IS_LEAD) as TOTAL_LEADS,
+            SUM(IS_PURCHASE) as TOTAL_PURCHASES,
+            SUM(PURCHASE_VALUE) as TOTAL_REVENUE,
+            SUM(CASE WHEN CAMPAIGN_ID IS NOT NULL THEN 1 ELSE 0 END) as WITH_CAMPAIGN,
+            COUNT(DISTINCT CAMPAIGN_ID) as UNIQUE_CAMPAIGNS
+        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
+        WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+          AND CONVERSION_DATE >= %(start_date)s
+          AND CONVERSION_DATE <= %(end_date)s
+        GROUP BY VISIT_TYPE
+    ),
+    impressions AS (
+        SELECT COALESCE(COUNT(*), 0) as IMPRESSIONS
+        FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG
+        WHERE CAST(QUORUM_ADVERTISER_ID AS VARCHAR) = %(advertiser_id)s
+          AND CAST(TIMESTAMP AS DATE) >= %(start_date)s
+          AND CAST(TIMESTAMP AS DATE) <= %(end_date)s
+    )
+    SELECT 
+        v.VISIT_TYPE,
+        v.TOTAL_VISITS,
+        v.UNIQUE_VISITORS,
+        v.TOTAL_PAGE_VIEWS,
+        v.TOTAL_LEADS,
+        v.TOTAL_PURCHASES,
+        v.TOTAL_REVENUE,
+        v.WITH_CAMPAIGN,
+        v.UNIQUE_CAMPAIGNS,
+        i.IMPRESSIONS,
+        CASE WHEN i.IMPRESSIONS > 0 AND v.VISIT_TYPE = 'STORE'
+             THEN ROUND((v.TOTAL_VISITS::FLOAT / i.IMPRESSIONS) * 100, 4)
+             ELSE 0 
+        END as VISIT_RATE
+    FROM visits v
+    CROSS JOIN impressions i
+    """
+    
+    try:
+        results = execute_query(query, {
+            'advertiser_id': advertiser_id,
+            'start_date': start_date,
+            'end_date': end_date
+        })
+        
+        # Restructure response
+        response = {
+            'advertiser_id': advertiser_id,
+            'date_range': {'start': start_date, 'end': end_date},
+            'store': None,
+            'web': None
+        }
+        
+        for row in results:
+            if row['VISIT_TYPE'] == 'STORE':
+                response['store'] = {
+                    'impressions': row['IMPRESSIONS'],
+                    'visits': row['TOTAL_VISITS'],
+                    'visit_rate': row['VISIT_RATE'],
+                    'unique_visitors': row['UNIQUE_VISITORS'],
+                    'with_campaign': row['WITH_CAMPAIGN'],
+                    'campaigns': row['UNIQUE_CAMPAIGNS']
+                }
+            elif row['VISIT_TYPE'] == 'WEB':
+                response['web'] = {
+                    'visits': row['TOTAL_VISITS'],
+                    'unique_visitors': row['UNIQUE_VISITORS'],
+                    'page_views': row['TOTAL_PAGE_VIEWS'],
+                    'leads': row['TOTAL_LEADS'],
+                    'purchases': row['TOTAL_PURCHASES'],
+                    'revenue': row['TOTAL_REVENUE'],
+                    'with_campaign': row['WITH_CAMPAIGN'],
+                    'campaigns': row['UNIQUE_CAMPAIGNS']
+                }
+        
+        return jsonify({'success': True, 'data': response})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=True)
+    app.run(host='0.0.0.0', port=port, debug=False)
