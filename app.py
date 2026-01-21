@@ -44,73 +44,34 @@ def get_agency_class(agency_id):
 
 @app.route('/api/v3/agencies', methods=['GET'])
 def get_agencies_v3():
-    """Get all agencies with visit counts (Class A + Class B)"""
+    """Get all agencies (fast - no expensive visit counts)"""
     try:
         conn = get_snowflake_connection()
         cursor = conn.cursor()
         
-        # Class A agencies from QRM_ALL_VISITS_V3
-        query_a = """
-            SELECT 
-                v.AGENCY_ID,
+        # Just get agency names from metadata - instant
+        query = """
+            SELECT DISTINCT
+                aa.ADVERTISER_ID as AGENCY_ID,
                 aa.AGENCY_NAME,
-                'A' as AGENCY_CLASS,
-                COUNT(*) as TOTAL_VISITS,
-                COUNT(DISTINCT v.QUORUM_ADVERTISER_ID) as ADVERTISER_COUNT
-            FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
-            JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa 
-                ON v.AGENCY_ID = aa.ADVERTISER_ID
-            WHERE v.AGENCY_ID IN (1480, 1956, 2298, 1955, 2514, 1950, 2086)
-              AND v.VISIT_TYPE = 'STORE'
-            GROUP BY v.AGENCY_ID, aa.AGENCY_NAME
+                CASE 
+                    WHEN aa.ADVERTISER_ID IN (1480, 1956, 2298, 1955, 2514, 1950, 2086) THEN 'A'
+                    WHEN aa.ADVERTISER_ID IN (1813, 2234, 1972, 2379, 1445, 1880, 2744) THEN 'B'
+                END as AGENCY_CLASS
+            FROM QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa
+            WHERE aa.ADVERTISER_ID IN (1480, 1956, 2298, 1955, 2514, 1950, 2086, 1813, 2234, 1972, 2379, 1445, 1880, 2744)
+            ORDER BY aa.AGENCY_NAME
         """
         
-        # Class B agencies from CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW
-        query_b = """
-            WITH deduplicated AS (
-                SELECT 
-                    cp.AGENCY_ID,
-                    cp.ADVERTISER_ID,
-                    cp.DEVICE_ID,
-                    cp.DRIVE_BY_DATE,
-                    cp.POI_MD5,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY cp.DEVICE_ID, cp.DRIVE_BY_DATE, cp.POI_MD5
-                        ORDER BY cp.IMP_ID DESC
-                    ) as rn
-                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW cp
-                WHERE cp.AGENCY_ID IN (1813, 2234, 1972, 2379, 1445, 1880, 2744)
-                    AND cp.DRIVE_BY_DATE >= DATEADD(day, -60, CURRENT_DATE())
-            )
-            SELECT 
-                d.AGENCY_ID,
-                aa.AGENCY_NAME,
-                'B' as AGENCY_CLASS,
-                COUNT(*) as TOTAL_VISITS,
-                COUNT(DISTINCT d.ADVERTISER_ID) as ADVERTISER_COUNT
-            FROM deduplicated d
-            JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa 
-                ON d.AGENCY_ID = aa.ADVERTISER_ID
-            WHERE d.rn = 1
-            GROUP BY d.AGENCY_ID, aa.AGENCY_NAME
-        """
+        cursor.execute(query)
+        results = cursor.fetchall()
         
-        # Execute both and combine
-        cursor.execute(query_a)
-        results_a = cursor.fetchall()
-        
-        cursor.execute(query_b)
-        results_b = cursor.fetchall()
-        
-        # Combine results
         agencies = []
-        for row in results_a + results_b:
+        for row in results:
             agencies.append({
                 'AGENCY_ID': row[0],
                 'AGENCY_NAME': row[1],
-                'AGENCY_CLASS': row[2],
-                'TOTAL_VISITS': row[3],
-                'ADVERTISER_COUNT': row[4]
+                'AGENCY_CLASS': row[2]
             })
         
         cursor.close()
