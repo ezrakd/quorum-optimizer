@@ -80,6 +80,7 @@ def get_agencies_v3():
                     ) as rn
                 FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW cp
                 WHERE cp.AGENCY_ID IN (1813, 2234, 1972, 2379, 1445, 1880, 2744)
+                    AND cp.DRIVE_BY_DATE >= DATEADD(day, -60, CURRENT_DATE())
             )
             SELECT 
                 d.AGENCY_ID,
