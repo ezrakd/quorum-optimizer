@@ -655,12 +655,15 @@ def get_web_zip_performance():
 
 @app.route('/api/v3/agencies', methods=['GET'])
 def get_agencies_v3():
-    """List all agencies with both store and web metrics"""
+    """List all agencies with both store and web metrics
+    
+    FIX: Web visits have NULL v.AGENCY_ID, so get from AGENCY_ADVERTISER join
+    """
     start_date, end_date = get_date_params(request)
     
     query = """
     SELECT 
-        v.AGENCY_ID,
+        aa.AGENCY_ID,
         MAX(aa.AGENCY_NAME) as AGENCY_NAME,
         SUM(CASE WHEN v.VISIT_TYPE = 'STORE' THEN 1 ELSE 0 END) as S_VISITS,
         SUM(CASE WHEN v.VISIT_TYPE = 'WEB' THEN 1 ELSE 0 END) as W_VISITS,
@@ -670,11 +673,11 @@ def get_agencies_v3():
         COUNT(DISTINCT v.MAID) as UNIQUE_VISITORS
     FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
     LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa 
-        ON v.AGENCY_ID = aa.AGENCY_ID
+        ON TRY_CAST(v.QUORUM_ADVERTISER_ID AS NUMBER) = aa.ID
     WHERE v.CONVERSION_DATE >= %(start_date)s
       AND v.CONVERSION_DATE <= %(end_date)s
-      AND v.AGENCY_ID IS NOT NULL
-    GROUP BY v.AGENCY_ID
+      AND aa.AGENCY_ID IS NOT NULL
+    GROUP BY aa.AGENCY_ID
     HAVING SUM(CASE WHEN v.VISIT_TYPE = 'STORE' THEN 1 ELSE 0 END) > 0 
         OR SUM(CASE WHEN v.VISIT_TYPE = 'WEB' THEN 1 ELSE 0 END) > 0
     ORDER BY (SUM(CASE WHEN v.VISIT_TYPE = 'STORE' THEN 1 ELSE 0 END) + 
