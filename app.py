@@ -1,13 +1,18 @@
 """
-Quorum Optimizer API v3.2 - UNIFIED
-====================================
-Version: 3.2 (All 13 Agencies)
+Quorum Optimizer API v3.3 - FIXED
+==================================
+Version: 3.3 (Permission Fix)
 Updated: January 22, 2026
+
+Changes from v3.2:
+- Removed PARAMOUNT_IMP_STORE_VISITS references (Railway permission issue)
+- ViacomCBS store visits are now omitted (web visits still work fine)
+- All 13 agencies now load correctly
 
 Architecture:
 - Class A (MNTN, Dealer Spike, InteractRV, ARI, ByRider, Level5): QRM_ALL_VISITS_V3
 - Class B (Causal iQ, Hearst, Magnite, TeamSnap, Shipyard, Parallel Path): CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW
-- ViacomCBS: QRM_ALL_VISITS_V3 (web) + PARAMOUNT_IMP_STORE_VISITS (store)
+- ViacomCBS: QRM_ALL_VISITS_V3 (web only - store visits omitted due to table access)
 - Impressions: XANDR_IMPRESSION_LOG (all agencies)
 
 Deployment: Railway (github.com/ezrakd/quorum-optimizer)
@@ -101,24 +106,30 @@ def health_check():
         return jsonify({
             'success': True, 
             'status': 'healthy', 
-            'version': '3.2-UNIFIED',
+            'version': '3.3-FIXED',
             'agencies_supported': 13,
             'class_a': CLASS_A_AGENCIES,
             'class_b': CLASS_B_AGENCIES,
-            'viacom': VIACOM_AGENCY
+            'viacom': VIACOM_AGENCY,
+            'note': 'ViacomCBS store visits omitted (permission issue with PARAMOUNT_IMP_STORE_VISITS)'
         })
     except Exception as e:
         return jsonify({'success': False, 'status': 'unhealthy', 'error': str(e)}), 500
 
 # =============================================================================
-# UNIFIED AGENCIES ENDPOINT - ALL 13 AGENCIES
+# UNIFIED AGENCIES ENDPOINT - ALL 13 AGENCIES (FIXED)
 # =============================================================================
 
 @app.route('/api/v3/agencies', methods=['GET'])
 def get_all_agencies():
-    """List ALL 13 agencies with S_VISITS and W_VISITS"""
+    """List ALL 13 agencies with S_VISITS and W_VISITS
+    
+    NOTE: ViacomCBS store visits are omitted due to PARAMOUNT_IMP_STORE_VISITS
+    table access issues. Web visits still work fine (62M+ visits).
+    """
     start_date, end_date = get_date_params(request)
     
+    # FIXED: Removed PARAMOUNT_IMP_STORE_VISITS reference that was causing 500 error
     query = """
     SELECT AGENCY_ID, SUM(SV) as S_VISITS, SUM(WV) as W_VISITS, MAX(ADV_CNT) as ADVERTISER_COUNT
     FROM (
@@ -140,19 +151,12 @@ def get_all_agencies():
         
         UNION ALL
         
-        -- ViacomCBS Web
+        -- ViacomCBS Web ONLY (store visits omitted - PARAMOUNT_IMP_STORE_VISITS not accessible)
         SELECT 1480, 0, COUNT(*), COUNT(DISTINCT v.QUORUM_ADVERTISER_ID)
         FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
         JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa ON TRY_CAST(v.QUORUM_ADVERTISER_ID AS NUMBER) = aa.ID
         WHERE v.CONVERSION_DATE >= %(start_date)s AND v.CONVERSION_DATE <= %(end_date)s
           AND v.VISIT_TYPE = 'WEB' AND aa.ADVERTISER_ID = 1480
-        
-        UNION ALL
-        
-        -- ViacomCBS Store
-        SELECT 1480, COUNT(DISTINCT CONCAT(IMP_MAID, DRIVEBYDATE, SEGMENT_MD5)), 0, COUNT(DISTINCT QUORUM_ADVERTISER_ID)
-        FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMP_STORE_VISITS
-        WHERE DRIVEBYDATE >= %(start_date)s AND DRIVEBYDATE <= %(end_date)s AND IS_STORE_VISIT = 'TRUE'
     ) combined
     GROUP BY AGENCY_ID
     ORDER BY (SUM(SV) + SUM(WV)) DESC
@@ -169,12 +173,15 @@ def get_all_agencies():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # =============================================================================
-# UNIFIED ADVERTISERS ENDPOINT
+# UNIFIED ADVERTISERS ENDPOINT (FIXED)
 # =============================================================================
 
 @app.route('/api/v3/advertisers', methods=['GET'])
 def get_advertisers_unified():
-    """List advertisers for any agency - routes to correct data source"""
+    """List advertisers for any agency - routes to correct data source
+    
+    FIXED: ViacomCBS now uses web visits only (removed PARAMOUNT_IMP_STORE_VISITS)
+    """
     agency_id = request.args.get('agency_id')
     start_date, end_date = get_date_params(request)
     
@@ -218,33 +225,20 @@ def get_advertisers_unified():
         ORDER BY S_VISITS DESC
         """
     elif agency_class == 'VIACOM':
-        # ViacomCBS: Combined web + store
+        # FIXED: ViacomCBS web visits only (removed PARAMOUNT_IMP_STORE_VISITS union)
         query = """
         SELECT 
-            ADVERTISER_ID,
-            MAX(ADVERTISER_NAME) as ADVERTISER_NAME,
-            SUM(SV) as S_VISITS,
-            SUM(WV) as W_VISITS,
-            SUM(UV) as UNIQUE_VISITORS
-        FROM (
-            SELECT v.QUORUM_ADVERTISER_ID as ADVERTISER_ID, MAX(aa.COMP_NAME) as ADVERTISER_NAME,
-                   0 as SV, COUNT(*) as WV, COUNT(DISTINCT v.MAID) as UV
-            FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
-            JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa ON TRY_CAST(v.QUORUM_ADVERTISER_ID AS NUMBER) = aa.ID
-            WHERE v.CONVERSION_DATE >= %(start_date)s AND v.CONVERSION_DATE <= %(end_date)s
-              AND v.VISIT_TYPE = 'WEB' AND aa.ADVERTISER_ID = 1480
-            GROUP BY v.QUORUM_ADVERTISER_ID
-            
-            UNION ALL
-            
-            SELECT QUORUM_ADVERTISER_ID, MAX(ADVERTISER_NAME),
-                   COUNT(DISTINCT CONCAT(IMP_MAID, DRIVEBYDATE, SEGMENT_MD5)), 0, COUNT(DISTINCT IMP_MAID)
-            FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMP_STORE_VISITS
-            WHERE DRIVEBYDATE >= %(start_date)s AND DRIVEBYDATE <= %(end_date)s AND IS_STORE_VISIT = 'TRUE'
-            GROUP BY QUORUM_ADVERTISER_ID
-        ) combined
-        GROUP BY ADVERTISER_ID
-        ORDER BY (SUM(SV) + SUM(WV)) DESC
+            v.QUORUM_ADVERTISER_ID as ADVERTISER_ID, 
+            MAX(aa.COMP_NAME) as ADVERTISER_NAME,
+            0 as S_VISITS, 
+            COUNT(*) as W_VISITS, 
+            COUNT(DISTINCT v.MAID) as UNIQUE_VISITORS
+        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
+        JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa ON TRY_CAST(v.QUORUM_ADVERTISER_ID AS NUMBER) = aa.ID
+        WHERE v.CONVERSION_DATE >= %(start_date)s AND v.CONVERSION_DATE <= %(end_date)s
+          AND v.VISIT_TYPE = 'WEB' AND aa.ADVERTISER_ID = 1480
+        GROUP BY v.QUORUM_ADVERTISER_ID
+        ORDER BY W_VISITS DESC
         """
     else:
         return jsonify({'success': False, 'error': f'Unknown agency_id: {agency_id}'}), 400
@@ -350,7 +344,7 @@ def get_advertiser_summary_unified():
         CROSS JOIN impressions i
         """
     elif agency_class == 'VIACOM':
-        # ViacomCBS: Web visits from QRM, impressions TBD
+        # ViacomCBS: Web visits from QRM
         query = """
         SELECT 
             0 as IMPRESSIONS,
@@ -737,6 +731,26 @@ def get_agencies_v2():
 def get_advertisers_v2():
     """v2 compatible - Class A only"""
     return get_advertisers_unified()
+
+@app.route('/api/advertiser-summary', methods=['GET'])
+def get_advertiser_summary_v2():
+    """v2 compatible - redirects to v3"""
+    return get_advertiser_summary_unified()
+
+@app.route('/api/campaign-performance', methods=['GET'])
+def get_campaign_performance_v2():
+    """v2 compatible - redirects to v3"""
+    return get_campaign_performance_unified()
+
+@app.route('/api/publisher-performance', methods=['GET'])
+def get_publisher_performance_v2():
+    """v2 compatible - redirects to v3"""
+    return get_publisher_performance_unified()
+
+@app.route('/api/zip-performance', methods=['GET'])
+def get_zip_performance_v2():
+    """v2 compatible - redirects to v3"""
+    return get_zip_performance_unified()
 
 # =============================================================================
 # MAIN
