@@ -1,18 +1,18 @@
 """
-Quorum Optimizer API v3.4 - UNIFIED + WEB FIX
-=============================================
-Version: 3.4
+Quorum Optimizer API v3.5 - VIACOM IMPRESSIONS
+==============================================
+Version: 3.5
 Updated: January 22, 2026
 
-Changes from v3.3:
-- Added VISIT_TYPE field to all summary responses (STORE or WEB)
-- Added S_VISITS alias to ViacomCBS queries for frontend compatibility
-- ViacomCBS campaigns/publishers/zips now show data correctly
+Changes from v3.4:
+- ViacomCBS now includes IMPRESSIONS from XANDR_IMPRESSION_LOG
+- Summary, Campaign, and Publisher endpoints all have impressions
+- Joined on CAMPAIGN_ID = IO_ID and PUBLISHER = SITE
 
 Architecture:
 - Class A (MNTN, Dealer Spike, InteractRV, ARI, ByRider, Level5): QRM_ALL_VISITS_V3
 - Class B (Causal iQ, Hearst, Magnite, TeamSnap, Shipyard, Parallel Path): CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW
-- ViacomCBS: QRM_ALL_VISITS_V3 (web only - store visits omitted due to table access)
+- ViacomCBS: QRM_ALL_VISITS_V3 + XANDR_IMPRESSION_LOG (full web attribution!)
 - Impressions: XANDR_IMPRESSION_LOG (all agencies)
 
 Deployment: Railway (github.com/ezrakd/quorum-optimizer)
@@ -106,12 +106,12 @@ def health_check():
         return jsonify({
             'success': True, 
             'status': 'healthy', 
-            'version': '3.4-WEB-FIX',
+            'version': '3.5-VIACOM-IMPRESSIONS',
             'agencies_supported': 13,
             'class_a': CLASS_A_AGENCIES,
             'class_b': CLASS_B_AGENCIES,
             'viacom': VIACOM_AGENCY,
-            'note': 'ViacomCBS store visits omitted (permission issue with PARAMOUNT_IMP_STORE_VISITS)'
+            'note': 'ViacomCBS now includes full impressions data'
         })
     except Exception as e:
         return jsonify({'success': False, 'status': 'unhealthy', 'error': str(e)}), 500
@@ -346,23 +346,40 @@ def get_advertiser_summary_unified():
         CROSS JOIN impressions i
         """
     elif agency_class == 'VIACOM':
-        # ViacomCBS: Web visits from QRM
+        # ViacomCBS: Web visits from QRM with impressions from XANDR
         query = """
+        WITH visit_campaigns AS (
+            SELECT CAMPAIGN_ID, COUNT(*) as W_VISITS, COUNT(DISTINCT MAID) as UNIQUE_VISITORS,
+                   SUM(IS_LEAD) as W_LEADS, SUM(IS_PURCHASE) as W_PURCHASES, SUM(PURCHASE_VALUE) as W_AMOUNT
+            FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
+            WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+              AND CONVERSION_DATE >= %(start_date)s AND CONVERSION_DATE <= %(end_date)s
+              AND VISIT_TYPE = 'WEB' AND CAMPAIGN_ID IS NOT NULL
+            GROUP BY CAMPAIGN_ID
+        ),
+        impressions AS (
+            SELECT IO_ID, COUNT(*) as IMPRESSIONS
+            FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG
+            WHERE AGENCY_ID = 1480
+              AND IO_ID IN (SELECT CAMPAIGN_ID FROM visit_campaigns)
+              AND CAST(TIMESTAMP AS DATE) >= %(start_date)s 
+              AND CAST(TIMESTAMP AS DATE) <= %(end_date)s
+            GROUP BY IO_ID
+        )
         SELECT 
-            0 as IMPRESSIONS,
-            COUNT(*) as W_VISITS,
+            COALESCE(SUM(i.IMPRESSIONS), 0) as IMPRESSIONS,
+            SUM(v.W_VISITS) as W_VISITS,
             0 as S_VISITS,
-            COUNT(DISTINCT MAID) as UNIQUE_VISITORS,
-            SUM(IS_LEAD) as W_LEADS,
-            SUM(IS_PURCHASE) as W_PURCHASES,
-            SUM(PURCHASE_VALUE) as W_AMOUNT,
-            0 as VISIT_RATE,
-            'WEB_ONLY' as DATA_TIER,
+            SUM(v.UNIQUE_VISITORS) as UNIQUE_VISITORS,
+            SUM(v.W_LEADS) as W_LEADS,
+            SUM(v.W_PURCHASES) as W_PURCHASES,
+            SUM(v.W_AMOUNT) as W_AMOUNT,
+            CASE WHEN COALESCE(SUM(i.IMPRESSIONS), 0) > 0 
+                 THEN ROUND((SUM(v.W_VISITS)::FLOAT / SUM(i.IMPRESSIONS)) * 100, 4) ELSE 0 END as VISIT_RATE,
+            'WEB_FULL' as DATA_TIER,
             'WEB' as VISIT_TYPE
-        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
-        WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
-          AND CONVERSION_DATE >= %(start_date)s AND CONVERSION_DATE <= %(end_date)s
-          AND VISIT_TYPE = 'WEB'
+        FROM visit_campaigns v
+        LEFT JOIN impressions i ON v.CAMPAIGN_ID = i.IO_ID
         """
     else:
         return jsonify({'success': False, 'error': f'Unknown agency_id: {agency_id}'}), 400
@@ -448,21 +465,35 @@ def get_campaign_performance_unified():
         LIMIT 50
         """
     elif agency_class == 'VIACOM':
-        # ViacomCBS: Web campaign data - include S_VISITS alias for frontend compatibility
+        # ViacomCBS: Web campaign data with impressions
         query = """
+        WITH visits AS (
+            SELECT CAMPAIGN_ID, MAX(CAMPAIGN_NAME) as CAMPAIGN_NAME,
+                   COUNT(*) as W_VISITS, 
+                   SUM(IS_LEAD) as W_LEADS, SUM(IS_PURCHASE) as W_PURCHASES,
+                   COUNT(DISTINCT MAID) as UNIQUE_VISITORS
+            FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
+            WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+              AND CONVERSION_DATE >= %(start_date)s AND CONVERSION_DATE <= %(end_date)s
+              AND VISIT_TYPE = 'WEB' AND CAMPAIGN_ID IS NOT NULL
+            GROUP BY CAMPAIGN_ID
+        ),
+        impressions AS (
+            SELECT IO_ID, COUNT(*) as IMPRESSIONS
+            FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG
+            WHERE AGENCY_ID = 1480
+              AND CAST(TIMESTAMP AS DATE) >= %(start_date)s 
+              AND CAST(TIMESTAMP AS DATE) <= %(end_date)s
+            GROUP BY IO_ID
+        )
         SELECT 
-            CAMPAIGN_ID, MAX(CAMPAIGN_NAME) as CAMPAIGN_NAME,
-            COUNT(*) as W_VISITS, 
-            COUNT(*) as S_VISITS,
-            SUM(IS_LEAD) as W_LEADS, SUM(IS_PURCHASE) as W_PURCHASES,
-            COUNT(DISTINCT MAID) as UNIQUE_VISITORS,
-            0 as IMPRESSIONS
-        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
-        WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
-          AND CONVERSION_DATE >= %(start_date)s AND CONVERSION_DATE <= %(end_date)s
-          AND VISIT_TYPE = 'WEB' AND CAMPAIGN_ID IS NOT NULL
-        GROUP BY CAMPAIGN_ID
-        ORDER BY W_VISITS DESC
+            v.CAMPAIGN_ID, v.CAMPAIGN_NAME,
+            v.W_VISITS, v.W_VISITS as S_VISITS,
+            v.W_LEADS, v.W_PURCHASES, v.UNIQUE_VISITORS,
+            COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS
+        FROM visits v
+        LEFT JOIN impressions i ON v.CAMPAIGN_ID = i.IO_ID
+        ORDER BY v.W_VISITS DESC
         LIMIT 50
         """
     else:
@@ -537,20 +568,44 @@ def get_publisher_performance_unified():
         LIMIT 100
         """
     else:  # VIACOM
+        # Get campaigns for this advertiser first, then join impressions by SITE=PUBLISHER
         query = """
-        SELECT PUBLISHER, MAX(PLATFORM_TYPE) as PT, 
-               COUNT(*) as W_VISITS,
-               COUNT(*) as S_VISITS,
-               SUM(IS_LEAD) as W_LEADS, SUM(IS_PURCHASE) as W_PURCHASES,
-               COUNT(DISTINCT MAID) as UNIQUE_VISITORS,
-               0 as IMPRESSIONS
-        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
-        WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
-          AND CONVERSION_DATE >= %(start_date)s AND CONVERSION_DATE <= %(end_date)s
-          AND VISIT_TYPE = 'WEB' AND PUBLISHER IS NOT NULL
-        GROUP BY PUBLISHER
-        HAVING W_VISITS >= %(min_visits)s
-        ORDER BY W_VISITS DESC
+        WITH adv_campaigns AS (
+            SELECT DISTINCT CAMPAIGN_ID
+            FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
+            WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+              AND CONVERSION_DATE >= %(start_date)s AND CONVERSION_DATE <= %(end_date)s
+              AND VISIT_TYPE = 'WEB' AND CAMPAIGN_ID IS NOT NULL
+        ),
+        visits AS (
+            SELECT PUBLISHER, MAX(PLATFORM_TYPE) as PT,
+                   COUNT(*) as W_VISITS,
+                   SUM(IS_LEAD) as W_LEADS, SUM(IS_PURCHASE) as W_PURCHASES,
+                   COUNT(DISTINCT MAID) as UNIQUE_VISITORS
+            FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
+            WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+              AND CONVERSION_DATE >= %(start_date)s AND CONVERSION_DATE <= %(end_date)s
+              AND VISIT_TYPE = 'WEB' AND PUBLISHER IS NOT NULL
+            GROUP BY PUBLISHER
+            HAVING COUNT(*) >= %(min_visits)s
+        ),
+        impressions AS (
+            SELECT SITE, COUNT(*) as IMPRESSIONS
+            FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG
+            WHERE AGENCY_ID = 1480
+              AND IO_ID IN (SELECT CAMPAIGN_ID FROM adv_campaigns)
+              AND CAST(TIMESTAMP AS DATE) >= %(start_date)s 
+              AND CAST(TIMESTAMP AS DATE) <= %(end_date)s
+            GROUP BY SITE
+        )
+        SELECT 
+            v.PUBLISHER, v.PT,
+            v.W_VISITS, v.W_VISITS as S_VISITS,
+            v.W_LEADS, v.W_PURCHASES, v.UNIQUE_VISITORS,
+            COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS
+        FROM visits v
+        LEFT JOIN impressions i ON v.PUBLISHER = i.SITE
+        ORDER BY v.W_VISITS DESC
         LIMIT 100
         """
     
