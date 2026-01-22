@@ -1,20 +1,16 @@
 """
-Quorum Optimizer API v3.6 - VIACOM STORE VISITS
-===============================================
-Version: 3.6
+Quorum Optimizer API v3.5 - VIACOM WEB + IMPRESSIONS
+====================================================
+Version: 3.5
 Updated: January 22, 2026
 
-Changes from v3.5:
-- ViacomCBS now supports STORE VISITS from PARAMOUNT_IMP_STORE_VISITS
-- Summary shows both W_VISITS and S_VISITS for ViacomCBS advertisers
-- Publishers and ZIPs combine web + store data
-- Requires SELECT grant on PARAMOUNT_IMP_STORE_VISITS to OPTIMIZER_READONLY_ROLE
+ViacomCBS: Web visits from QRM + Impressions from XANDR
+(Store visits from PARAMOUNT_IMP_STORE_VISITS disabled for stability)
 
 Architecture:
 - Class A (MNTN, Dealer Spike, InteractRV, ARI, ByRider, Level5): QRM_ALL_VISITS_V3
 - Class B (Causal iQ, Hearst, Magnite, TeamSnap, Shipyard, Parallel Path): CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW
-- ViacomCBS: QRM_ALL_VISITS_V3 (web) + PARAMOUNT_IMP_STORE_VISITS (store) + XANDR (impressions)
-- Impressions: XANDR_IMPRESSION_LOG (all agencies)
+- ViacomCBS: QRM_ALL_VISITS_V3 (web) + XANDR_IMPRESSION_LOG (impressions)
 
 Deployment: Railway (github.com/ezrakd/quorum-optimizer)
 """
@@ -107,12 +103,12 @@ def health_check():
         return jsonify({
             'success': True, 
             'status': 'healthy', 
-            'version': '3.6-VIACOM-STORE',
+            'version': '3.5',
             'agencies_supported': 13,
             'class_a': CLASS_A_AGENCIES,
             'class_b': CLASS_B_AGENCIES,
             'viacom': VIACOM_AGENCY,
-            'note': 'ViacomCBS now includes web + store visits'
+            'note': 'ViacomCBS web + impressions (store visits disabled for stability)'
         })
     except Exception as e:
         return jsonify({'success': False, 'status': 'unhealthy', 'error': str(e)}), 500
@@ -347,9 +343,9 @@ def get_advertiser_summary_unified():
         CROSS JOIN impressions i
         """
     elif agency_class == 'VIACOM':
-        # ViacomCBS: Web visits from QRM + Store visits from PARAMOUNT_IMP_STORE_VISITS
+        # ViacomCBS: Web visits from QRM with impressions from XANDR (v3.5)
         query = """
-        WITH web_campaigns AS (
+        WITH visit_campaigns AS (
             SELECT CAMPAIGN_ID, COUNT(*) as W_VISITS, COUNT(DISTINCT MAID) as UNIQUE_VISITORS,
                    SUM(IS_LEAD) as W_LEADS, SUM(IS_PURCHASE) as W_PURCHASES, SUM(PURCHASE_VALUE) as W_AMOUNT
             FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
@@ -358,47 +354,29 @@ def get_advertiser_summary_unified():
               AND VISIT_TYPE = 'WEB' AND CAMPAIGN_ID IS NOT NULL
             GROUP BY CAMPAIGN_ID
         ),
-        store_visits AS (
-            SELECT COUNT(*) as S_VISITS, COUNT(DISTINCT IMP_MAID) as S_UNIQUE_VISITORS
-            FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMP_STORE_VISITS
-            WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
-              AND DRIVEBYDATE >= %(start_date)s AND DRIVEBYDATE <= %(end_date)s
-        ),
-        all_campaigns AS (
-            SELECT CAMPAIGN_ID FROM web_campaigns
-            UNION
-            SELECT DISTINCT IO_ID FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMP_STORE_VISITS
-            WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
-              AND DRIVEBYDATE >= %(start_date)s AND DRIVEBYDATE <= %(end_date)s
-              AND IO_ID IS NOT NULL
-        ),
         impressions AS (
-            SELECT COUNT(*) as IMPRESSIONS
+            SELECT IO_ID, COUNT(*) as IMPRESSIONS
             FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG
             WHERE AGENCY_ID = 1480
-              AND IO_ID IN (SELECT CAMPAIGN_ID FROM all_campaigns)
+              AND IO_ID IN (SELECT CAMPAIGN_ID FROM visit_campaigns)
               AND CAST(TIMESTAMP AS DATE) >= %(start_date)s 
               AND CAST(TIMESTAMP AS DATE) <= %(end_date)s
+            GROUP BY IO_ID
         )
         SELECT 
-            COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS,
-            COALESCE(SUM(w.W_VISITS), 0) as W_VISITS,
-            COALESCE(s.S_VISITS, 0) as S_VISITS,
-            COALESCE(SUM(w.UNIQUE_VISITORS), 0) + COALESCE(s.S_UNIQUE_VISITORS, 0) as UNIQUE_VISITORS,
-            COALESCE(SUM(w.W_LEADS), 0) as W_LEADS,
-            COALESCE(SUM(w.W_PURCHASES), 0) as W_PURCHASES,
-            COALESCE(SUM(w.W_AMOUNT), 0) as W_AMOUNT,
-            CASE WHEN COALESCE(i.IMPRESSIONS, 0) > 0 
-                 THEN ROUND(((COALESCE(SUM(w.W_VISITS), 0) + COALESCE(s.S_VISITS, 0))::FLOAT / i.IMPRESSIONS) * 100, 4) 
-                 ELSE 0 END as VISIT_RATE,
-            CASE WHEN COALESCE(s.S_VISITS, 0) > 0 AND COALESCE(SUM(w.W_VISITS), 0) > 0 THEN 'WEB_AND_STORE'
-                 WHEN COALESCE(s.S_VISITS, 0) > 0 THEN 'STORE_ONLY'
-                 ELSE 'WEB_ONLY' END as DATA_TIER,
-            CASE WHEN COALESCE(s.S_VISITS, 0) > 0 THEN 'STORE' ELSE 'WEB' END as VISIT_TYPE
-        FROM web_campaigns w
-        CROSS JOIN store_visits s
-        CROSS JOIN impressions i
-        GROUP BY i.IMPRESSIONS, s.S_VISITS, s.S_UNIQUE_VISITORS
+            COALESCE(SUM(i.IMPRESSIONS), 0) as IMPRESSIONS,
+            SUM(v.W_VISITS) as W_VISITS,
+            0 as S_VISITS,
+            SUM(v.UNIQUE_VISITORS) as UNIQUE_VISITORS,
+            SUM(v.W_LEADS) as W_LEADS,
+            SUM(v.W_PURCHASES) as W_PURCHASES,
+            SUM(v.W_AMOUNT) as W_AMOUNT,
+            CASE WHEN COALESCE(SUM(i.IMPRESSIONS), 0) > 0 
+                 THEN ROUND((SUM(v.W_VISITS)::FLOAT / SUM(i.IMPRESSIONS)) * 100, 4) ELSE 0 END as VISIT_RATE,
+            'WEB_FULL' as DATA_TIER,
+            'WEB' as VISIT_TYPE
+        FROM visit_campaigns v
+        LEFT JOIN impressions i ON v.CAMPAIGN_ID = i.IO_ID
         """
     else:
         return jsonify({'success': False, 'error': f'Unknown agency_id: {agency_id}'}), 400
@@ -484,9 +462,9 @@ def get_campaign_performance_unified():
         LIMIT 50
         """
     elif agency_class == 'VIACOM':
-        # ViacomCBS: Combine web + store campaign data
+        # ViacomCBS: Web campaign data with impressions (v3.5)
         query = """
-        WITH web_campaigns AS (
+        WITH visits AS (
             SELECT CAMPAIGN_ID, MAX(CAMPAIGN_NAME) as CAMPAIGN_NAME,
                    COUNT(*) as W_VISITS, 
                    SUM(IS_LEAD) as W_LEADS, SUM(IS_PURCHASE) as W_PURCHASES,
@@ -497,28 +475,6 @@ def get_campaign_performance_unified():
               AND VISIT_TYPE = 'WEB' AND CAMPAIGN_ID IS NOT NULL
             GROUP BY CAMPAIGN_ID
         ),
-        store_campaigns AS (
-            SELECT IO_ID as CAMPAIGN_ID, MAX(IO_NAME) as CAMPAIGN_NAME,
-                   COUNT(*) as S_VISITS,
-                   COUNT(DISTINCT IMP_MAID) as UNIQUE_VISITORS
-            FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMP_STORE_VISITS
-            WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
-              AND DRIVEBYDATE >= %(start_date)s AND DRIVEBYDATE <= %(end_date)s
-              AND IO_ID IS NOT NULL
-            GROUP BY IO_ID
-        ),
-        combined AS (
-            SELECT 
-                COALESCE(w.CAMPAIGN_ID, s.CAMPAIGN_ID) as CAMPAIGN_ID,
-                COALESCE(w.CAMPAIGN_NAME, s.CAMPAIGN_NAME) as CAMPAIGN_NAME,
-                COALESCE(w.W_VISITS, 0) as W_VISITS,
-                COALESCE(s.S_VISITS, 0) as S_VISITS,
-                COALESCE(w.W_LEADS, 0) as W_LEADS,
-                COALESCE(w.W_PURCHASES, 0) as W_PURCHASES,
-                COALESCE(w.UNIQUE_VISITORS, 0) + COALESCE(s.UNIQUE_VISITORS, 0) as UNIQUE_VISITORS
-            FROM web_campaigns w
-            FULL OUTER JOIN store_campaigns s ON w.CAMPAIGN_ID = s.CAMPAIGN_ID
-        ),
         impressions AS (
             SELECT IO_ID, COUNT(*) as IMPRESSIONS
             FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG
@@ -528,14 +484,13 @@ def get_campaign_performance_unified():
             GROUP BY IO_ID
         )
         SELECT 
-            c.CAMPAIGN_ID, c.CAMPAIGN_NAME,
-            c.W_VISITS, c.S_VISITS,
-            c.W_VISITS + c.S_VISITS as TOTAL_VISITS,
-            c.W_LEADS, c.W_PURCHASES, c.UNIQUE_VISITORS,
+            v.CAMPAIGN_ID, v.CAMPAIGN_NAME,
+            v.W_VISITS, v.W_VISITS as S_VISITS,
+            v.W_LEADS, v.W_PURCHASES, v.UNIQUE_VISITORS,
             COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS
-        FROM combined c
-        LEFT JOIN impressions i ON c.CAMPAIGN_ID = i.IO_ID
-        ORDER BY TOTAL_VISITS DESC
+        FROM visits v
+        LEFT JOIN impressions i ON v.CAMPAIGN_ID = i.IO_ID
+        ORDER BY v.W_VISITS DESC
         LIMIT 50
         """
     else:
@@ -610,38 +565,26 @@ def get_publisher_performance_unified():
         LIMIT 100
         """
     else:  # VIACOM
-        # ViacomCBS: Combine web visits from QRM + store visits from PARAMOUNT
+        # ViacomCBS: Web visits with impressions (v3.5)
         query = """
         WITH adv_campaigns AS (
-            SELECT DISTINCT CAMPAIGN_ID FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
+            SELECT DISTINCT CAMPAIGN_ID
+            FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
             WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
               AND CONVERSION_DATE >= %(start_date)s AND CONVERSION_DATE <= %(end_date)s
               AND VISIT_TYPE = 'WEB' AND CAMPAIGN_ID IS NOT NULL
-            UNION
-            SELECT DISTINCT IO_ID FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMP_STORE_VISITS
-            WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
-              AND DRIVEBYDATE >= %(start_date)s AND DRIVEBYDATE <= %(end_date)s
-              AND IO_ID IS NOT NULL
         ),
-        web_visits AS (
+        visits AS (
             SELECT PUBLISHER, MAX(PLATFORM_TYPE) as PT,
                    COUNT(*) as W_VISITS,
-                   COUNT(DISTINCT MAID) as W_UNIQUE
+                   SUM(IS_LEAD) as W_LEADS, SUM(IS_PURCHASE) as W_PURCHASES,
+                   COUNT(DISTINCT MAID) as UNIQUE_VISITORS
             FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
             WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
               AND CONVERSION_DATE >= %(start_date)s AND CONVERSION_DATE <= %(end_date)s
               AND VISIT_TYPE = 'WEB' AND PUBLISHER IS NOT NULL
             GROUP BY PUBLISHER
-        ),
-        store_visits AS (
-            SELECT SITE as PUBLISHER, MAX(PT) as PT,
-                   COUNT(*) as S_VISITS,
-                   COUNT(DISTINCT IMP_MAID) as S_UNIQUE
-            FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMP_STORE_VISITS
-            WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
-              AND DRIVEBYDATE >= %(start_date)s AND DRIVEBYDATE <= %(end_date)s
-              AND SITE IS NOT NULL
-            GROUP BY SITE
+            HAVING COUNT(*) >= %(min_visits)s
         ),
         impressions AS (
             SELECT SITE, COUNT(*) as IMPRESSIONS
@@ -651,27 +594,15 @@ def get_publisher_performance_unified():
               AND CAST(TIMESTAMP AS DATE) >= %(start_date)s 
               AND CAST(TIMESTAMP AS DATE) <= %(end_date)s
             GROUP BY SITE
-        ),
-        combined AS (
-            SELECT 
-                COALESCE(w.PUBLISHER, s.PUBLISHER) as PUBLISHER,
-                COALESCE(w.PT, s.PT) as PT,
-                COALESCE(w.W_VISITS, 0) as W_VISITS,
-                COALESCE(s.S_VISITS, 0) as S_VISITS,
-                COALESCE(w.W_UNIQUE, 0) + COALESCE(s.S_UNIQUE, 0) as UNIQUE_VISITORS
-            FROM web_visits w
-            FULL OUTER JOIN store_visits s ON w.PUBLISHER = s.PUBLISHER
         )
         SELECT 
-            c.PUBLISHER, c.PT,
-            c.W_VISITS, c.S_VISITS,
-            c.W_VISITS + c.S_VISITS as TOTAL_VISITS,
-            c.UNIQUE_VISITORS,
+            v.PUBLISHER, v.PT,
+            v.W_VISITS, v.W_VISITS as S_VISITS,
+            v.W_LEADS, v.W_PURCHASES, v.UNIQUE_VISITORS,
             COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS
-        FROM combined c
-        LEFT JOIN impressions i ON c.PUBLISHER = i.SITE
-        WHERE c.W_VISITS + c.S_VISITS >= %(min_visits)s
-        ORDER BY TOTAL_VISITS DESC
+        FROM visits v
+        LEFT JOIN impressions i ON v.PUBLISHER = i.SITE
+        ORDER BY v.W_VISITS DESC
         LIMIT 100
         """
     
@@ -745,53 +676,26 @@ def get_zip_performance_unified():
         ORDER BY S_VISITS DESC
         LIMIT 500
         """
-    else:  # VIACOM - combining web + store visits
+    else:  # VIACOM - using MAID from QRM (v3.5)
         query = """
-        WITH web_visits AS (
-            SELECT 
-                mca.ZIP_CODE,
-                COUNT(*) as W_VISITS,
-                COUNT(DISTINCT v.MAID) as W_UNIQUE
-            FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
-            JOIN QUORUM_CROSS_CLOUD.ATTAIN_FEED.MAID_CENTROID_ASSOCIATION mca 
-                ON LOWER(v.MAID) = LOWER(mca.DEVICE_ID)
-            WHERE v.QUORUM_ADVERTISER_ID = %(advertiser_id)s
-              AND v.CONVERSION_DATE >= %(start_date)s AND v.CONVERSION_DATE <= %(end_date)s
-              AND v.VISIT_TYPE = 'WEB'
-            GROUP BY mca.ZIP_CODE
-        ),
-        store_visits AS (
-            SELECT 
-                ZIP_CODE,
-                COUNT(*) as S_VISITS,
-                COUNT(DISTINCT IMP_MAID) as S_UNIQUE
-            FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMP_STORE_VISITS
-            WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
-              AND DRIVEBYDATE >= %(start_date)s AND DRIVEBYDATE <= %(end_date)s
-              AND ZIP_CODE IS NOT NULL
-            GROUP BY ZIP_CODE
-        ),
-        combined AS (
-            SELECT 
-                COALESCE(w.ZIP_CODE, s.ZIP_CODE) as ZIP_CODE,
-                COALESCE(w.W_VISITS, 0) as W_VISITS,
-                COALESCE(s.S_VISITS, 0) as S_VISITS,
-                COALESCE(w.W_UNIQUE, 0) + COALESCE(s.S_UNIQUE, 0) as UNIQUE_VISITORS
-            FROM web_visits w
-            FULL OUTER JOIN store_visits s ON w.ZIP_CODE = s.ZIP_CODE
-        )
         SELECT 
             zdm.DMA_NAME,
-            c.ZIP_CODE,
-            c.W_VISITS, c.S_VISITS,
-            c.W_VISITS + c.S_VISITS as TOTAL_VISITS,
-            c.UNIQUE_VISITORS,
-            0 as ZIP_POPULATION,
+            mca.ZIP_CODE, 
+            COUNT(*) as W_VISITS, 
+            COUNT(*) as S_VISITS,
+            COUNT(DISTINCT v.MAID) as UNIQUE_VISITORS,
+            MAX(mca.ZIP_POPULATION) as ZIP_POPULATION,
             0 as IMPRESSIONS
-        FROM combined c
-        LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING zdm ON c.ZIP_CODE = zdm.ZIP_CODE
-        WHERE c.W_VISITS + c.S_VISITS >= %(min_visits)s
-        ORDER BY TOTAL_VISITS DESC
+        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
+        JOIN QUORUM_CROSS_CLOUD.ATTAIN_FEED.MAID_CENTROID_ASSOCIATION mca 
+            ON LOWER(v.MAID) = LOWER(mca.DEVICE_ID)
+        LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING zdm ON mca.ZIP_CODE = zdm.ZIP_CODE
+        WHERE v.QUORUM_ADVERTISER_ID = %(advertiser_id)s
+          AND v.CONVERSION_DATE >= %(start_date)s AND v.CONVERSION_DATE <= %(end_date)s
+          AND v.VISIT_TYPE = 'WEB'
+        GROUP BY zdm.DMA_NAME, mca.ZIP_CODE
+        HAVING COUNT(*) >= %(min_visits)s
+        ORDER BY W_VISITS DESC
         LIMIT 500
         """
     
