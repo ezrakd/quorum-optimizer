@@ -227,6 +227,58 @@ def get_impressions_timeseries():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # =============================================================================
+# NEW: ADVERTISER TIME SERIES (For Agency Overview Chart)
+# =============================================================================
+
+@app.route('/api/v3/advertiser-timeseries', methods=['GET'])
+def get_advertiser_timeseries():
+    """Daily impressions by advertiser for a specific agency - top 20 + Others"""
+    agency_id = request.args.get('agency_id')
+    start_date, end_date = get_date_params(request)
+    
+    if not agency_id:
+        return jsonify({'success': False, 'error': 'agency_id required'}), 400
+    
+    query = """
+    WITH daily_adv AS (
+        SELECT 
+            LOG_DATE,
+            ADVERTISER_ID,
+            ADVERTISER_NAME,
+            SUM(IMPRESSIONS) as IMPRESSIONS
+        FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
+        WHERE AGENCY_ID = %(agency_id)s
+          AND LOG_DATE >= %(start_date)s AND LOG_DATE <= %(end_date)s
+        GROUP BY LOG_DATE, ADVERTISER_ID, ADVERTISER_NAME
+    ),
+    ranked_advertisers AS (
+        SELECT ADVERTISER_ID, ADVERTISER_NAME, SUM(IMPRESSIONS) as TOTAL_IMPRESSIONS,
+               ROW_NUMBER() OVER (ORDER BY SUM(IMPRESSIONS) DESC) as rank
+        FROM daily_adv
+        GROUP BY ADVERTISER_ID, ADVERTISER_NAME
+    )
+    SELECT 
+        d.LOG_DATE,
+        CASE WHEN r.rank <= 20 THEN d.ADVERTISER_NAME ELSE 'Others' END as ADVERTISER_NAME,
+        SUM(d.IMPRESSIONS) as IMPRESSIONS
+    FROM daily_adv d
+    JOIN ranked_advertisers r ON d.ADVERTISER_ID = r.ADVERTISER_ID
+    GROUP BY d.LOG_DATE, CASE WHEN r.rank <= 20 THEN d.ADVERTISER_NAME ELSE 'Others' END
+    ORDER BY d.LOG_DATE, IMPRESSIONS DESC
+    """
+    
+    try:
+        results = execute_query(query, {'agency_id': int(agency_id), 'start_date': start_date, 'end_date': end_date})
+        return jsonify({
+            'success': True, 
+            'data': results,
+            'agency_id': int(agency_id),
+            'date_range': {'start': start_date, 'end': end_date}
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# =============================================================================
 # NEW: GLOBAL ADVERTISER OVERVIEW (All Agencies) - Uses DAILY_ADVERTISER_REPORTING
 # =============================================================================
 
