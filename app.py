@@ -1,575 +1,746 @@
 """
-Quorum Optimizer API v3 - Unified Architecture
-Supports 14 agencies via dual-path query system:
-- Class A (7 agencies): QRM_ALL_VISITS_V3 (fast, pre-deduplicated)
-- Class B (7 agencies): CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW (slower, requires ROW_NUMBER)
+Quorum Optimizer API v3.2 - UNIFIED
+====================================
+Version: 3.2 (All 13 Agencies)
+Updated: January 22, 2026
+
+Architecture:
+- Class A (MNTN, Dealer Spike, InteractRV, ARI, ByRider, Level5): QRM_ALL_VISITS_V3
+- Class B (Causal iQ, Hearst, Magnite, TeamSnap, Shipyard, Parallel Path): CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW
+- ViacomCBS: QRM_ALL_VISITS_V3 (web) + PARAMOUNT_IMP_STORE_VISITS (store)
+- Impressions: XANDR_IMPRESSION_LOG (all agencies)
+
+Deployment: Railway (github.com/ezrakd/quorum-optimizer)
 """
 
 import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import snowflake.connector
-from datetime import datetime
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 CORS(app)
 
-# Snowflake connection
+# =============================================================================
+# AGENCY CLASSIFICATION
+# =============================================================================
+
+CLASS_A_AGENCIES = [2514, 1956, 2298, 1955, 1950, 2086]  # MNTN, Dealer Spike, InteractRV, ARI, ByRider, Level5
+CLASS_B_AGENCIES = [1813, 1972, 2234, 2379, 1880, 2744]  # Causal iQ, Hearst, Magnite, TeamSnap, Shipyard, Parallel Path
+VIACOM_AGENCY = 1480
+
+AGENCY_NAMES = {
+    2514: 'MNTN', 1956: 'Dealer Spike', 2298: 'InteractRV', 
+    1955: 'ARI Network Services', 1950: 'ByRider', 2086: 'Level5',
+    1813: 'Causal iQ', 1972: 'Hearst', 2234: 'Magnite',
+    2379: 'The Shipyard', 1880: 'TeamSnap', 2744: 'Parallel Path',
+    1480: 'ViacomCBS WhoSay'
+}
+
+def get_agency_class(agency_id):
+    """Determine which data source to use for an agency"""
+    agency_id = int(agency_id)
+    if agency_id in CLASS_A_AGENCIES:
+        return 'A'
+    elif agency_id in CLASS_B_AGENCIES:
+        return 'B'
+    elif agency_id == VIACOM_AGENCY:
+        return 'VIACOM'
+    return None
+
+# =============================================================================
+# DATABASE HELPERS
+# =============================================================================
+
 def get_snowflake_connection():
     return snowflake.connector.connect(
+        account=os.environ.get('SNOWFLAKE_ACCOUNT', 'FZB05958.us-east-1'),
         user=os.environ.get('SNOWFLAKE_USER', 'OPTIMIZER_SERVICE_USER'),
         password=os.environ.get('SNOWFLAKE_PASSWORD'),
-        account=os.environ.get('SNOWFLAKE_ACCOUNT', 'FZB05958.us-east-1'),
         warehouse=os.environ.get('SNOWFLAKE_WAREHOUSE', 'COMPUTE_WH'),
         database='QUORUMDB',
         schema='SEGMENT_DATA'
     )
 
-# Agency Classification
-CLASS_A_AGENCIES = [1480, 1956, 2298, 1955, 2514, 1950, 2086]  # QRM_ALL_VISITS_V3
-CLASS_B_AGENCIES = [1813, 2234, 1972, 2379, 1445, 1880, 2744]  # CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW
+def execute_query(query, params=None):
+    conn = get_snowflake_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(query, params or {})
+        columns = [col[0] for col in cursor.description]
+        results = []
+        for row in cursor.fetchall():
+            row_dict = {}
+            for i, val in enumerate(row):
+                if hasattr(val, 'isoformat'):
+                    row_dict[columns[i]] = val.isoformat()
+                elif val is None:
+                    row_dict[columns[i]] = None
+                else:
+                    row_dict[columns[i]] = val
+            results.append(row_dict)
+        return results
+    finally:
+        conn.close()
 
-def get_agency_class(agency_id):
-    """Determine which query pattern to use"""
-    if agency_id in CLASS_A_AGENCIES:
-        return 'A'
-    elif agency_id in CLASS_B_AGENCIES:
-        return 'B'
-    else:
-        return None
+def get_date_params(request):
+    default_end = datetime.now().strftime('%Y-%m-%d')
+    default_start = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+    return request.args.get('start_date', default_start), request.args.get('end_date', default_end)
 
-# ============================================================================
-# AGENCIES ENDPOINT - Universal (combines both classes)
-# ============================================================================
+# =============================================================================
+# HEALTH CHECK
+# =============================================================================
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    try:
+        conn = get_snowflake_connection()
+        conn.close()
+        return jsonify({
+            'success': True, 
+            'status': 'healthy', 
+            'version': '3.2-UNIFIED',
+            'agencies_supported': 13,
+            'class_a': CLASS_A_AGENCIES,
+            'class_b': CLASS_B_AGENCIES,
+            'viacom': VIACOM_AGENCY
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'status': 'unhealthy', 'error': str(e)}), 500
+
+# =============================================================================
+# UNIFIED AGENCIES ENDPOINT - ALL 13 AGENCIES
+# =============================================================================
 
 @app.route('/api/v3/agencies', methods=['GET'])
-def get_agencies_v3():
-    """Get all agencies (fast - no expensive visit counts)"""
+def get_all_agencies():
+    """List ALL 13 agencies with S_VISITS and W_VISITS"""
+    start_date, end_date = get_date_params(request)
+    
+    query = """
+    SELECT AGENCY_ID, SUM(SV) as S_VISITS, SUM(WV) as W_VISITS, MAX(ADV_CNT) as ADVERTISER_COUNT
+    FROM (
+        -- Class A: QRM_ALL_VISITS_V3 store visits
+        SELECT v.AGENCY_ID, COUNT(*) as SV, 0 as WV, COUNT(DISTINCT v.QUORUM_ADVERTISER_ID) as ADV_CNT
+        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
+        WHERE v.CONVERSION_DATE >= %(start_date)s AND v.CONVERSION_DATE <= %(end_date)s
+          AND v.VISIT_TYPE = 'STORE' AND v.AGENCY_ID IN (2514, 1956, 2298, 1955, 1950, 2086)
+        GROUP BY v.AGENCY_ID
+        
+        UNION ALL
+        
+        -- Class B: CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW
+        SELECT cp.AGENCY_ID, COUNT(DISTINCT CONCAT(cp.DEVICE_ID, cp.DRIVE_BY_DATE, cp.POI_MD5)), 0, COUNT(DISTINCT cp.ADVERTISER_ID)
+        FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW cp
+        WHERE cp.DRIVE_BY_DATE >= %(start_date)s AND cp.DRIVE_BY_DATE <= %(end_date)s
+          AND cp.AGENCY_ID IN (1813, 1972, 2234, 2379, 1880, 2744)
+        GROUP BY cp.AGENCY_ID
+        
+        UNION ALL
+        
+        -- ViacomCBS Web
+        SELECT 1480, 0, COUNT(*), COUNT(DISTINCT v.QUORUM_ADVERTISER_ID)
+        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
+        JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa ON TRY_CAST(v.QUORUM_ADVERTISER_ID AS NUMBER) = aa.ID
+        WHERE v.CONVERSION_DATE >= %(start_date)s AND v.CONVERSION_DATE <= %(end_date)s
+          AND v.VISIT_TYPE = 'WEB' AND aa.ADVERTISER_ID = 1480
+        
+        UNION ALL
+        
+        -- ViacomCBS Store
+        SELECT 1480, COUNT(DISTINCT CONCAT(IMP_MAID, DRIVEBYDATE, SEGMENT_MD5)), 0, COUNT(DISTINCT QUORUM_ADVERTISER_ID)
+        FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMP_STORE_VISITS
+        WHERE DRIVEBYDATE >= %(start_date)s AND DRIVEBYDATE <= %(end_date)s AND IS_STORE_VISIT = 'TRUE'
+    ) combined
+    GROUP BY AGENCY_ID
+    ORDER BY (SUM(SV) + SUM(WV)) DESC
+    """
+    
     try:
-        conn = get_snowflake_connection()
-        cursor = conn.cursor()
-        
-        # Just get agency names from metadata - instant
-        query = """
-            SELECT DISTINCT
-                aa.ADVERTISER_ID as AGENCY_ID,
-                aa.AGENCY_NAME,
-                CASE 
-                    WHEN aa.ADVERTISER_ID IN (1480, 1956, 2298, 1955, 2514, 1950, 2086) THEN 'A'
-                    WHEN aa.ADVERTISER_ID IN (1813, 2234, 1972, 2379, 1445, 1880, 2744) THEN 'B'
-                END as AGENCY_CLASS
-            FROM QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa
-            WHERE aa.ADVERTISER_ID IN (1480, 1956, 2298, 1955, 2514, 1950, 2086, 1813, 2234, 1972, 2379, 1445, 1880, 2744)
-            ORDER BY aa.AGENCY_NAME
-        """
-        
-        cursor.execute(query)
-        results = cursor.fetchall()
-        
-        agencies = []
-        for row in results:
-            agencies.append({
-                'AGENCY_ID': row[0],
-                'AGENCY_NAME': row[1],
-                'AGENCY_CLASS': row[2]
-            })
-        
-        cursor.close()
-        conn.close()
-        
-        return jsonify({'success': True, 'data': agencies})
-        
+        results = execute_query(query, {'start_date': start_date, 'end_date': end_date})
+        # Add agency names
+        for r in results:
+            r['AGENCY_NAME'] = AGENCY_NAMES.get(r['AGENCY_ID'], 'Unknown')
+            r['DATA_CLASS'] = get_agency_class(r['AGENCY_ID'])
+        return jsonify({'success': True, 'data': results, 'total_agencies': len(results)})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
-# ============================================================================
-# ADVERTISERS ENDPOINT - Dual-path
-# ============================================================================
+# =============================================================================
+# UNIFIED ADVERTISERS ENDPOINT
+# =============================================================================
 
 @app.route('/api/v3/advertisers', methods=['GET'])
-def get_advertisers_v3():
-    """Get advertisers for an agency (auto-detects Class A vs B)"""
+def get_advertisers_unified():
+    """List advertisers for any agency - routes to correct data source"""
+    agency_id = request.args.get('agency_id')
+    start_date, end_date = get_date_params(request)
+    
+    if not agency_id:
+        return jsonify({'success': False, 'error': 'agency_id required'}), 400
+    
+    agency_class = get_agency_class(agency_id)
+    
+    if agency_class == 'A':
+        query = """
+        SELECT 
+            v.QUORUM_ADVERTISER_ID as ADVERTISER_ID,
+            MAX(aa.COMP_NAME) as ADVERTISER_NAME,
+            COUNT(*) as S_VISITS,
+            0 as W_VISITS,
+            COUNT(DISTINCT v.MAID) as UNIQUE_VISITORS
+        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
+        LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa 
+            ON TRY_CAST(v.QUORUM_ADVERTISER_ID AS NUMBER) = aa.ID
+        WHERE v.AGENCY_ID = %(agency_id)s
+          AND v.CONVERSION_DATE >= %(start_date)s
+          AND v.CONVERSION_DATE <= %(end_date)s
+          AND v.VISIT_TYPE = 'STORE'
+        GROUP BY v.QUORUM_ADVERTISER_ID
+        ORDER BY S_VISITS DESC
+        """
+    elif agency_class == 'B':
+        query = """
+        SELECT 
+            cp.ADVERTISER_ID::TEXT as ADVERTISER_ID,
+            MAX(aa.COMP_NAME) as ADVERTISER_NAME,
+            COUNT(DISTINCT CONCAT(cp.DEVICE_ID, cp.DRIVE_BY_DATE, cp.POI_MD5)) as S_VISITS,
+            0 as W_VISITS,
+            COUNT(DISTINCT cp.DEVICE_ID) as UNIQUE_VISITORS
+        FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW cp
+        JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa ON cp.ADVERTISER_ID = aa.ID
+        WHERE cp.AGENCY_ID = %(agency_id)s
+          AND cp.DRIVE_BY_DATE >= %(start_date)s
+          AND cp.DRIVE_BY_DATE <= %(end_date)s
+        GROUP BY cp.ADVERTISER_ID
+        ORDER BY S_VISITS DESC
+        """
+    elif agency_class == 'VIACOM':
+        # ViacomCBS: Combined web + store
+        query = """
+        SELECT 
+            ADVERTISER_ID,
+            MAX(ADVERTISER_NAME) as ADVERTISER_NAME,
+            SUM(SV) as S_VISITS,
+            SUM(WV) as W_VISITS,
+            SUM(UV) as UNIQUE_VISITORS
+        FROM (
+            SELECT v.QUORUM_ADVERTISER_ID as ADVERTISER_ID, MAX(aa.COMP_NAME) as ADVERTISER_NAME,
+                   0 as SV, COUNT(*) as WV, COUNT(DISTINCT v.MAID) as UV
+            FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
+            JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa ON TRY_CAST(v.QUORUM_ADVERTISER_ID AS NUMBER) = aa.ID
+            WHERE v.CONVERSION_DATE >= %(start_date)s AND v.CONVERSION_DATE <= %(end_date)s
+              AND v.VISIT_TYPE = 'WEB' AND aa.ADVERTISER_ID = 1480
+            GROUP BY v.QUORUM_ADVERTISER_ID
+            
+            UNION ALL
+            
+            SELECT QUORUM_ADVERTISER_ID, MAX(ADVERTISER_NAME),
+                   COUNT(DISTINCT CONCAT(IMP_MAID, DRIVEBYDATE, SEGMENT_MD5)), 0, COUNT(DISTINCT IMP_MAID)
+            FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMP_STORE_VISITS
+            WHERE DRIVEBYDATE >= %(start_date)s AND DRIVEBYDATE <= %(end_date)s AND IS_STORE_VISIT = 'TRUE'
+            GROUP BY QUORUM_ADVERTISER_ID
+        ) combined
+        GROUP BY ADVERTISER_ID
+        ORDER BY (SUM(SV) + SUM(WV)) DESC
+        """
+    else:
+        return jsonify({'success': False, 'error': f'Unknown agency_id: {agency_id}'}), 400
+    
     try:
-        agency_id = int(request.args.get('agency_id'))
-        agency_class = get_agency_class(agency_id)
-        
-        if not agency_class:
-            return jsonify({'success': False, 'error': 'Agency not supported'}), 400
-        
-        conn = get_snowflake_connection()
-        cursor = conn.cursor()
-        
-        if agency_class == 'A':
-            # Class A: QRM_ALL_VISITS_V3
-            query = """
-                SELECT 
-                    v.QUORUM_ADVERTISER_ID as ADVERTISER_ID,
-                    aa.COMP_NAME as ADVERTISER_NAME,
-                    COUNT(*) as TOTAL_VISITS
-                FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
-                JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa 
-                    ON v.QUORUM_ADVERTISER_ID = aa.ID::TEXT
-                WHERE v.AGENCY_ID = %s
-                  AND v.VISIT_TYPE = 'STORE'
-                GROUP BY v.QUORUM_ADVERTISER_ID, aa.COMP_NAME
-                ORDER BY TOTAL_VISITS DESC
-            """
-        else:
-            # Class B: CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW (with date filter)
-            query = """
-                WITH deduplicated AS (
-                    SELECT 
-                        cp.ADVERTISER_ID,
-                        cp.DEVICE_ID,
-                        cp.DRIVE_BY_DATE,
-                        cp.POI_MD5,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY cp.DEVICE_ID, cp.DRIVE_BY_DATE, cp.POI_MD5
-                            ORDER BY cp.IMP_ID DESC
-                        ) as rn
-                    FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW cp
-                    WHERE cp.AGENCY_ID = %s
-                      AND cp.DRIVE_BY_DATE >= DATEADD(day, -60, CURRENT_DATE())
-                )
-                SELECT 
-                    d.ADVERTISER_ID,
-                    aa.COMP_NAME as ADVERTISER_NAME,
-                    COUNT(*) as TOTAL_VISITS
-                FROM deduplicated d
-                JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa 
-                    ON d.ADVERTISER_ID = aa.ID
-                WHERE d.rn = 1
-                GROUP BY d.ADVERTISER_ID, aa.COMP_NAME
-                ORDER BY TOTAL_VISITS DESC
-            """
-        
-        cursor.execute(query, (agency_id,))
-        results = cursor.fetchall()
-        
-        advertisers = []
-        for row in results:
-            advertisers.append({
-                'ADVERTISER_ID': str(row[0]),
-                'ADVERTISER_NAME': row[1],
-                'TOTAL_VISITS': row[2]
-            })
-        
-        cursor.close()
-        conn.close()
-        
-        return jsonify({'success': True, 'data': advertisers})
-        
+        results = execute_query(query, {
+            'agency_id': int(agency_id),
+            'start_date': start_date,
+            'end_date': end_date
+        })
+        return jsonify({
+            'success': True, 
+            'data': results, 
+            'agency_id': int(agency_id),
+            'agency_name': AGENCY_NAMES.get(int(agency_id), 'Unknown'),
+            'data_class': agency_class
+        })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
-# ============================================================================
-# SUMMARY ENDPOINT - Dual-path
-# ============================================================================
+# =============================================================================
+# UNIFIED ADVERTISER SUMMARY WITH IMPRESSIONS
+# =============================================================================
 
 @app.route('/api/v3/advertiser-summary', methods=['GET'])
-def get_advertiser_summary_v3():
-    """Get summary metrics for an advertiser (auto-detects Class A vs B)"""
-    try:
-        advertiser_id = request.args.get('advertiser_id')
-        agency_id = int(request.args.get('agency_id'))
-        start_date = request.args.get('start_date', '2020-01-01')
-        end_date = request.args.get('end_date', '2030-12-31')
-        
-        agency_class = get_agency_class(agency_id)
-        if not agency_class:
-            return jsonify({'success': False, 'error': 'Agency not supported'}), 400
-        
-        conn = get_snowflake_connection()
-        cursor = conn.cursor()
-        
-        if agency_class == 'A':
-            # Class A: QRM_ALL_VISITS_V3
-            query = """
-                SELECT 
-                    COUNT(*) as TOTAL_VISITS,
-                    COUNT(DISTINCT MAID) as UNIQUE_DEVICES,
-                    MIN(CONVERSION_DATE) as EARLIEST_DATE,
-                    MAX(CONVERSION_DATE) as LATEST_DATE
-                FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
-                WHERE QUORUM_ADVERTISER_ID = %s
-                  AND AGENCY_ID = %s
-                  AND VISIT_TYPE = 'STORE'
-                  AND CONVERSION_DATE >= %s
-                  AND CONVERSION_DATE < %s
-            """
-        else:
-            # Class B: CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW
-            query = """
-                WITH deduplicated AS (
-                    SELECT 
-                        cp.DEVICE_ID,
-                        cp.DRIVE_BY_DATE,
-                        cp.POI_MD5,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY cp.DEVICE_ID, cp.DRIVE_BY_DATE, cp.POI_MD5
-                            ORDER BY cp.IMP_ID DESC
-                        ) as rn
-                    FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW cp
-                    WHERE cp.ADVERTISER_ID = %s
-                      AND cp.AGENCY_ID = %s
-                      AND cp.DRIVE_BY_DATE >= %s
-                      AND cp.DRIVE_BY_DATE < %s
-                )
-                SELECT 
-                    COUNT(*) as TOTAL_VISITS,
-                    COUNT(DISTINCT DEVICE_ID) as UNIQUE_DEVICES,
-                    MIN(DRIVE_BY_DATE) as EARLIEST_DATE,
-                    MAX(DRIVE_BY_DATE) as LATEST_DATE
-                FROM deduplicated
-                WHERE rn = 1
-            """
-        
-        cursor.execute(query, (advertiser_id, agency_id, start_date, end_date))
-        row = cursor.fetchone()
-        
-        # Get impression count from XANDR
-        imp_query = """
-            SELECT COUNT(*) as IMPRESSIONS
-            FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG x
-            JOIN QUORUMDB.SEGMENT_DATA."QuorumAdvImpMapping" m 
-                ON x.ADVERTISER_ID = m.ADVERTISER_ID
-            WHERE m.QUORUM_ADVERTISER_ID = %s
-              AND x.TIMESTAMP >= %s
-              AND x.TIMESTAMP < %s
+def get_advertiser_summary_unified():
+    """Get advertiser summary with impressions - routes to correct join logic"""
+    advertiser_id = request.args.get('advertiser_id')
+    agency_id = request.args.get('agency_id')
+    start_date, end_date = get_date_params(request)
+    
+    if not advertiser_id:
+        return jsonify({'success': False, 'error': 'advertiser_id required'}), 400
+    if not agency_id:
+        return jsonify({'success': False, 'error': 'agency_id required'}), 400
+    
+    agency_class = get_agency_class(agency_id)
+    
+    if agency_class == 'A':
+        # Class A: Campaign-based impression join
+        query = """
+        WITH visit_campaigns AS (
+            SELECT CAMPAIGN_ID, COUNT(*) as S_VISITS, COUNT(DISTINCT MAID) as UNIQUE_VISITORS
+            FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
+            WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+              AND CONVERSION_DATE >= %(start_date)s AND CONVERSION_DATE <= %(end_date)s
+              AND VISIT_TYPE = 'STORE' AND CAMPAIGN_ID IS NOT NULL
+            GROUP BY CAMPAIGN_ID
+        ),
+        impressions AS (
+            SELECT v.CAMPAIGN_ID, COUNT(*) as IMPRESSIONS
+            FROM visit_campaigns v
+            JOIN QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG x ON x.IO_ID = v.CAMPAIGN_ID
+            WHERE x.AGENCY_ID = %(agency_id)s
+              AND CAST(x.TIMESTAMP AS DATE) >= %(start_date)s 
+              AND CAST(x.TIMESTAMP AS DATE) <= %(end_date)s
+            GROUP BY v.CAMPAIGN_ID
+        )
+        SELECT 
+            COALESCE(SUM(i.IMPRESSIONS), 0) as IMPRESSIONS,
+            SUM(v.S_VISITS) as S_VISITS,
+            0 as W_VISITS,
+            SUM(v.UNIQUE_VISITORS) as UNIQUE_VISITORS,
+            CASE WHEN COALESCE(SUM(i.IMPRESSIONS), 0) > 0 
+                 THEN ROUND((SUM(v.S_VISITS)::FLOAT / SUM(i.IMPRESSIONS)) * 100, 4) ELSE 0 END as VISIT_RATE,
+            'FULL' as DATA_TIER
+        FROM visit_campaigns v
+        LEFT JOIN impressions i ON v.CAMPAIGN_ID = i.CAMPAIGN_ID
         """
-        cursor.execute(imp_query, (advertiser_id, start_date, end_date))
-        imp_row = cursor.fetchone()
-        
-        cursor.close()
-        conn.close()
-        
-        total_visits = row[0] if row[0] else 0
-        impressions = imp_row[0] if imp_row and imp_row[0] else 1
-        
-        return jsonify({
-            'success': True,
-            'data': {
-                'TOTAL_VISITS': total_visits,
-                'TOTAL_IMPRESSIONS': impressions,
-                'VISIT_RATE': round(total_visits / impressions * 100, 3) if impressions > 0 else 0,
-                'UNIQUE_DEVICES': row[1] if row[1] else 0,
-                'DATE_RANGE_START': str(row[2]) if row[2] else start_date,
-                'DATE_RANGE_END': str(row[3]) if row[3] else end_date
-            }
-        })
-        
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-# ============================================================================
-# ZIP PERFORMANCE ENDPOINT - Dual-path
-# ============================================================================
-
-@app.route('/api/v3/zip-performance', methods=['GET'])
-def get_zip_performance_v3():
-    """Get ZIP code performance (auto-detects Class A vs B)"""
+    elif agency_class == 'B':
+        # Class B: QuorumAdvImpMapping-based impression join
+        query = """
+        WITH visits AS (
+            SELECT 
+                COUNT(DISTINCT CONCAT(cp.DEVICE_ID, cp.DRIVE_BY_DATE, cp.POI_MD5)) as S_VISITS,
+                COUNT(DISTINCT cp.DEVICE_ID) as UNIQUE_VISITORS
+            FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW cp
+            WHERE cp.ADVERTISER_ID = %(advertiser_id)s
+              AND cp.DRIVE_BY_DATE >= %(start_date)s AND cp.DRIVE_BY_DATE <= %(end_date)s
+        ),
+        io_mapping AS (
+            SELECT DISTINCT IO_ID
+            FROM QUORUMDB.SEGMENT_DATA."QuorumAdvImpMapping"
+            WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s AND IO_ID IS NOT NULL AND IO_ID != 0
+        ),
+        impressions AS (
+            SELECT COUNT(*) as IMPRESSIONS
+            FROM io_mapping m
+            JOIN QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG x ON m.IO_ID = x.IO_ID
+            WHERE x.AGENCY_ID = %(agency_id)s
+              AND CAST(x.TIMESTAMP AS DATE) >= %(start_date)s 
+              AND CAST(x.TIMESTAMP AS DATE) <= %(end_date)s
+        )
+        SELECT 
+            COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS,
+            v.S_VISITS,
+            0 as W_VISITS,
+            v.UNIQUE_VISITORS,
+            CASE WHEN COALESCE(i.IMPRESSIONS, 0) > 0 
+                 THEN ROUND((v.S_VISITS::FLOAT / i.IMPRESSIONS) * 100, 4) ELSE 0 END as VISIT_RATE,
+            CASE WHEN i.IMPRESSIONS > 0 THEN 'MAPPED' ELSE 'UNMAPPED' END as DATA_TIER
+        FROM visits v
+        CROSS JOIN impressions i
+        """
+    elif agency_class == 'VIACOM':
+        # ViacomCBS: Web visits from QRM, impressions TBD
+        query = """
+        SELECT 
+            0 as IMPRESSIONS,
+            COUNT(*) as W_VISITS,
+            0 as S_VISITS,
+            COUNT(DISTINCT MAID) as UNIQUE_VISITORS,
+            SUM(IS_LEAD) as W_LEADS,
+            SUM(IS_PURCHASE) as W_PURCHASES,
+            SUM(PURCHASE_VALUE) as W_AMOUNT,
+            0 as VISIT_RATE,
+            'WEB_ONLY' as DATA_TIER
+        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
+        WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+          AND CONVERSION_DATE >= %(start_date)s AND CONVERSION_DATE <= %(end_date)s
+          AND VISIT_TYPE = 'WEB'
+        """
+    else:
+        return jsonify({'success': False, 'error': f'Unknown agency_id: {agency_id}'}), 400
+    
     try:
-        advertiser_id = request.args.get('advertiser_id')
-        agency_id = int(request.args.get('agency_id'))
-        start_date = request.args.get('start_date', '2020-01-01')
-        end_date = request.args.get('end_date', '2030-12-31')
-        min_visits = int(request.args.get('min_visits', '10'))
-        
-        agency_class = get_agency_class(agency_id)
-        if not agency_class:
-            return jsonify({'success': False, 'error': 'Agency not supported'}), 400
-        
-        conn = get_snowflake_connection()
-        cursor = conn.cursor()
-        
-        if agency_class == 'A':
-            # Class A: QRM_ALL_VISITS_V3
-            query = """
-                WITH visits_by_zip AS (
-                    SELECT 
-                        mca.ZIP_CODE,
-                        COUNT(*) as S_VISITS,
-                        COUNT(DISTINCT v.MAID) as UNIQUE_DEVICES
-                    FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
-                    JOIN QUORUM_CROSS_CLOUD.ATTAIN_FEED.MAID_CENTROID_ASSOCIATION mca 
-                        ON LOWER(v.MAID) = LOWER(mca.DEVICE_ID)
-                    WHERE v.QUORUM_ADVERTISER_ID = %s
-                      AND v.AGENCY_ID = %s
-                      AND v.VISIT_TYPE = 'STORE'
-                      AND v.CONVERSION_DATE >= %s
-                      AND v.CONVERSION_DATE < %s
-                    GROUP BY mca.ZIP_CODE
-                    HAVING COUNT(*) >= %s
-                )
-                SELECT 
-                    v.ZIP_CODE,
-                    COALESCE(zdm.DMA_NAME, 'UNKNOWN') as DMA_NAME,
-                    COALESCE(zpd.POPULATION, 0) as POPULATION,
-                    v.S_VISITS,
-                    v.UNIQUE_DEVICES
-                FROM visits_by_zip v
-                LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING zdm 
-                    ON v.ZIP_CODE = zdm.ZIP_CODE
-                LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_POPULATION_DATA zpd 
-                    ON v.ZIP_CODE = zpd.ZIP_CODE
-                ORDER BY v.S_VISITS DESC
-                LIMIT 500
-            """
-        else:
-            # Class B: CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW
-            query = """
-                WITH deduplicated AS (
-                    SELECT 
-                        cp.DEVICE_ID,
-                        cp.DRIVE_BY_DATE,
-                        cp.POI_MD5,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY cp.DEVICE_ID, cp.DRIVE_BY_DATE, cp.POI_MD5
-                            ORDER BY cp.IMP_ID DESC
-                        ) as rn
-                    FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW cp
-                    WHERE cp.ADVERTISER_ID = %s
-                      AND cp.AGENCY_ID = %s
-                      AND cp.DRIVE_BY_DATE >= %s
-                      AND cp.DRIVE_BY_DATE < %s
-                ),
-                visits_by_zip AS (
-                    SELECT 
-                        mca.ZIP_CODE,
-                        COUNT(*) as S_VISITS,
-                        COUNT(DISTINCT d.DEVICE_ID) as UNIQUE_DEVICES
-                    FROM deduplicated d
-                    JOIN QUORUM_CROSS_CLOUD.ATTAIN_FEED.MAID_CENTROID_ASSOCIATION mca 
-                        ON LOWER(d.DEVICE_ID) = LOWER(mca.DEVICE_ID)
-                    WHERE d.rn = 1
-                    GROUP BY mca.ZIP_CODE
-                    HAVING COUNT(*) >= %s
-                )
-                SELECT 
-                    v.ZIP_CODE,
-                    COALESCE(zdm.DMA_NAME, 'UNKNOWN') as DMA_NAME,
-                    COALESCE(zpd.POPULATION, 0) as POPULATION,
-                    v.S_VISITS,
-                    v.UNIQUE_DEVICES
-                FROM visits_by_zip v
-                LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING zdm 
-                    ON v.ZIP_CODE = zdm.ZIP_CODE
-                LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_POPULATION_DATA zpd 
-                    ON v.ZIP_CODE = zpd.ZIP_CODE
-                ORDER BY v.S_VISITS DESC
-                LIMIT 500
-            """
-        
-        cursor.execute(query, (advertiser_id, agency_id, start_date, end_date, min_visits))
-        results = cursor.fetchall()
-        
-        zips = []
-        for row in results:
-            zips.append({
-                'ZIP_CODE': row[0],
-                'DMA_NAME': row[1],
-                'POPULATION': row[2],
-                'S_VISITS': row[3],
-                'UNIQUE_DEVICES': row[4]
-            })
-        
-        cursor.close()
-        conn.close()
-        
-        return jsonify({'success': True, 'data': zips})
-        
+        results = execute_query(query, {
+            'advertiser_id': advertiser_id,
+            'agency_id': int(agency_id),
+            'start_date': start_date,
+            'end_date': end_date
+        })
+        return jsonify({
+            'success': True, 
+            'data': results[0] if results else {},
+            'data_class': agency_class
+        })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
-# ============================================================================
-# CAMPAIGN PERFORMANCE ENDPOINT - Dual-path
-# ============================================================================
+# =============================================================================
+# CAMPAIGN PERFORMANCE
+# =============================================================================
 
 @app.route('/api/v3/campaign-performance', methods=['GET'])
-def get_campaign_performance_v3():
-    """Get campaign performance (auto-detects Class A vs B)"""
+def get_campaign_performance_unified():
+    """Campaign breakdown - only available for Class A and ViacomCBS"""
+    advertiser_id = request.args.get('advertiser_id')
+    agency_id = request.args.get('agency_id')
+    start_date, end_date = get_date_params(request)
+    
+    if not advertiser_id or not agency_id:
+        return jsonify({'success': False, 'error': 'advertiser_id and agency_id required'}), 400
+    
+    agency_class = get_agency_class(agency_id)
+    
+    if agency_class == 'B':
+        # Class B: Use aggregate stats table
+        query = """
+        SELECT 
+            IO_ID::NUMBER as CAMPAIGN_ID,
+            MAX(IO_NAME) as CAMPAIGN_NAME,
+            SUM(IMPRESSIONS) as IMPRESSIONS,
+            SUM(VISITORS) as S_VISITS,
+            CASE WHEN SUM(IMPRESSIONS) > 0 
+                 THEN ROUND((SUM(VISITORS)::FLOAT / SUM(IMPRESSIONS)) * 100, 4) ELSE 0 END as VISIT_RATE
+        FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_DAILY_STATS
+        WHERE ADVERTISER_ID = %(advertiser_id)s
+          AND AGENCY_ID = %(agency_id)s
+          AND LOG_DATE >= %(start_date)s AND LOG_DATE <= %(end_date)s
+          AND IO_ID IS NOT NULL
+        GROUP BY IO_ID
+        ORDER BY S_VISITS DESC
+        LIMIT 50
+        """
+    elif agency_class == 'A':
+        # Class A: Direct campaign data with impressions
+        query = """
+        WITH visit_data AS (
+            SELECT CAMPAIGN_ID, MAX(CAMPAIGN_NAME) as CAMPAIGN_NAME,
+                   COUNT(*) as S_VISITS, COUNT(DISTINCT MAID) as UNIQUE_VISITORS
+            FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
+            WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+              AND CONVERSION_DATE >= %(start_date)s AND CONVERSION_DATE <= %(end_date)s
+              AND VISIT_TYPE = 'STORE' AND CAMPAIGN_ID IS NOT NULL
+            GROUP BY CAMPAIGN_ID
+        ),
+        impressions AS (
+            SELECT v.CAMPAIGN_ID, COUNT(*) as IMPRESSIONS
+            FROM visit_data v
+            JOIN QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG x 
+                ON x.IO_ID = v.CAMPAIGN_ID AND x.AGENCY_ID = %(agency_id)s
+            WHERE CAST(x.TIMESTAMP AS DATE) >= %(start_date)s 
+              AND CAST(x.TIMESTAMP AS DATE) <= %(end_date)s
+            GROUP BY v.CAMPAIGN_ID
+        )
+        SELECT v.CAMPAIGN_ID, v.CAMPAIGN_NAME, COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS,
+               v.S_VISITS, v.UNIQUE_VISITORS,
+               CASE WHEN COALESCE(i.IMPRESSIONS, 0) > 0 
+                    THEN ROUND((v.S_VISITS::FLOAT / i.IMPRESSIONS) * 100, 4) ELSE 0 END as VISIT_RATE
+        FROM visit_data v
+        LEFT JOIN impressions i ON v.CAMPAIGN_ID = i.CAMPAIGN_ID
+        ORDER BY IMPRESSIONS DESC NULLS LAST
+        LIMIT 50
+        """
+    elif agency_class == 'VIACOM':
+        # ViacomCBS: Web campaign data
+        query = """
+        SELECT 
+            CAMPAIGN_ID, MAX(CAMPAIGN_NAME) as CAMPAIGN_NAME,
+            COUNT(*) as W_VISITS, SUM(IS_LEAD) as W_LEADS, SUM(IS_PURCHASE) as W_PURCHASES,
+            COUNT(DISTINCT MAID) as UNIQUE_VISITORS
+        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
+        WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+          AND CONVERSION_DATE >= %(start_date)s AND CONVERSION_DATE <= %(end_date)s
+          AND VISIT_TYPE = 'WEB' AND CAMPAIGN_ID IS NOT NULL
+        GROUP BY CAMPAIGN_ID
+        ORDER BY W_VISITS DESC
+        LIMIT 50
+        """
+    else:
+        return jsonify({'success': False, 'error': f'Unknown agency_id: {agency_id}'}), 400
+    
     try:
-        advertiser_id = request.args.get('advertiser_id')
-        agency_id = int(request.args.get('agency_id'))
-        start_date = request.args.get('start_date', '2020-01-01')
-        end_date = request.args.get('end_date', '2030-12-31')
-        
-        agency_class = get_agency_class(agency_id)
-        if not agency_class:
-            return jsonify({'success': False, 'error': 'Agency not supported'}), 400
-        
-        conn = get_snowflake_connection()
-        cursor = conn.cursor()
-        
-        if agency_class == 'A':
-            # Class A: QRM_ALL_VISITS_V3 (has campaign data built-in)
-            query = """
-                SELECT 
-                    COALESCE(CAMPAIGN_ID, 0) as CAMPAIGN_ID,
-                    COALESCE(CAMPAIGN_NAME, 'Unknown') as CAMPAIGN_NAME,
-                    COUNT(*) as S_VISITS,
-                    COUNT(DISTINCT MAID) as UNIQUE_DEVICES
-                FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
-                WHERE QUORUM_ADVERTISER_ID = %s
-                  AND AGENCY_ID = %s
-                  AND VISIT_TYPE = 'STORE'
-                  AND CONVERSION_DATE >= %s
-                  AND CONVERSION_DATE < %s
-                GROUP BY CAMPAIGN_ID, CAMPAIGN_NAME
-                ORDER BY S_VISITS DESC
-            """
-        else:
-            # Class B: Join to XANDR via IMP_ID
-            query = """
-                WITH deduplicated AS (
-                    SELECT 
-                        cp.IMP_ID,
-                        cp.DEVICE_ID,
-                        cp.DRIVE_BY_DATE,
-                        cp.POI_MD5,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY cp.DEVICE_ID, cp.DRIVE_BY_DATE, cp.POI_MD5
-                            ORDER BY cp.IMP_ID DESC
-                        ) as rn
-                    FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW cp
-                    WHERE cp.ADVERTISER_ID = %s
-                      AND cp.AGENCY_ID = %s
-                      AND cp.DRIVE_BY_DATE >= %s
-                      AND cp.DRIVE_BY_DATE < %s
-                )
-                SELECT 
-                    COALESCE(x.IO_ID, 0) as CAMPAIGN_ID,
-                    COALESCE(x.IO_NAME, 'Unknown') as CAMPAIGN_NAME,
-                    COUNT(*) as S_VISITS,
-                    COUNT(DISTINCT d.DEVICE_ID) as UNIQUE_DEVICES
-                FROM deduplicated d
-                LEFT JOIN QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG x 
-                    ON d.IMP_ID = x.ID
-                WHERE d.rn = 1
-                GROUP BY x.IO_ID, x.IO_NAME
-                ORDER BY S_VISITS DESC
-            """
-        
-        cursor.execute(query, (advertiser_id, agency_id, start_date, end_date))
-        results = cursor.fetchall()
-        
-        campaigns = []
-        for row in results:
-            campaigns.append({
-                'CAMPAIGN_ID': row[0],
-                'CAMPAIGN_NAME': row[1],
-                'S_VISITS': row[2],
-                'UNIQUE_DEVICES': row[3]
-            })
-        
-        cursor.close()
-        conn.close()
-        
-        return jsonify({'success': True, 'data': campaigns})
-        
+        results = execute_query(query, {
+            'advertiser_id': advertiser_id,
+            'agency_id': int(agency_id),
+            'start_date': start_date,
+            'end_date': end_date
+        })
+        return jsonify({'success': True, 'data': results, 'data_class': agency_class})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
-# ============================================================================
-# PUBLISHER PERFORMANCE ENDPOINT - Dual-path
-# ============================================================================
+# =============================================================================
+# PUBLISHER PERFORMANCE (Class A and ViacomCBS only)
+# =============================================================================
 
 @app.route('/api/v3/publisher-performance', methods=['GET'])
-def get_publisher_performance_v3():
-    """Get publisher performance (auto-detects Class A vs B)"""
+def get_publisher_performance_unified():
+    """Publisher breakdown - Class A has impressions, ViacomCBS web only"""
+    advertiser_id = request.args.get('advertiser_id')
+    agency_id = request.args.get('agency_id')
+    min_visits = int(request.args.get('min_visits', 10))
+    start_date, end_date = get_date_params(request)
+    
+    if not advertiser_id or not agency_id:
+        return jsonify({'success': False, 'error': 'advertiser_id and agency_id required'}), 400
+    
+    agency_class = get_agency_class(agency_id)
+    
+    if agency_class == 'B':
+        return jsonify({
+            'success': True, 
+            'data': [], 
+            'message': 'Publisher breakdown not available for Class B agencies (Causal iQ, Magnite, etc.)',
+            'data_class': agency_class
+        })
+    
+    if agency_class == 'A':
+        query = """
+        WITH visit_publishers AS (
+            SELECT PUBLISHER, MAX(PLATFORM_TYPE) as PT, COUNT(*) as S_VISITS, 
+                   COUNT(DISTINCT MAID) as UNIQUE_VISITORS
+            FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
+            WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+              AND CONVERSION_DATE >= %(start_date)s AND CONVERSION_DATE <= %(end_date)s
+              AND VISIT_TYPE = 'STORE' AND PUBLISHER IS NOT NULL
+            GROUP BY PUBLISHER
+            HAVING COUNT(*) >= %(min_visits)s
+        ),
+        publisher_impressions AS (
+            SELECT vp.PUBLISHER, COUNT(*) as IMPRESSIONS
+            FROM visit_publishers vp
+            JOIN QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG x 
+                ON x.AGENCY_ID = %(agency_id)s
+                AND (x.PUBLISHER_CODE = vp.PUBLISHER 
+                     OR x.PUBLISHER_CODE = REPLACE(REPLACE(vp.PUBLISHER, '%%2520', ' '), '%%20', ' '))
+            WHERE CAST(x.TIMESTAMP AS DATE) >= %(start_date)s 
+              AND CAST(x.TIMESTAMP AS DATE) <= %(end_date)s
+            GROUP BY vp.PUBLISHER
+        )
+        SELECT REPLACE(REPLACE(vp.PUBLISHER, '%%2520', ' '), '%%20', ' ') as PUBLISHER,
+               vp.PT, COALESCE(pi.IMPRESSIONS, 0) as IMPRESSIONS, vp.S_VISITS, vp.UNIQUE_VISITORS,
+               CASE WHEN COALESCE(pi.IMPRESSIONS, 0) > 0 
+                    THEN ROUND((vp.S_VISITS::FLOAT / pi.IMPRESSIONS) * 100, 4) ELSE 0 END as VISIT_RATE
+        FROM visit_publishers vp
+        LEFT JOIN publisher_impressions pi ON vp.PUBLISHER = pi.PUBLISHER
+        ORDER BY IMPRESSIONS DESC NULLS LAST
+        LIMIT 100
+        """
+    else:  # VIACOM
+        query = """
+        SELECT PUBLISHER, MAX(PLATFORM_TYPE) as PT, COUNT(*) as W_VISITS,
+               SUM(IS_LEAD) as W_LEADS, SUM(IS_PURCHASE) as W_PURCHASES,
+               COUNT(DISTINCT MAID) as UNIQUE_VISITORS
+        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
+        WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+          AND CONVERSION_DATE >= %(start_date)s AND CONVERSION_DATE <= %(end_date)s
+          AND VISIT_TYPE = 'WEB' AND PUBLISHER IS NOT NULL
+        GROUP BY PUBLISHER
+        HAVING W_VISITS >= %(min_visits)s
+        ORDER BY W_VISITS DESC
+        LIMIT 100
+        """
+    
     try:
-        advertiser_id = request.args.get('advertiser_id')
-        agency_id = int(request.args.get('agency_id'))
-        start_date = request.args.get('start_date', '2020-01-01')
-        end_date = request.args.get('end_date', '2030-12-31')
-        
-        agency_class = get_agency_class(agency_id)
-        if not agency_class:
-            return jsonify({'success': False, 'error': 'Agency not supported'}), 400
-        
-        conn = get_snowflake_connection()
-        cursor = conn.cursor()
-        
-        if agency_class == 'A':
-            # Class A: QRM_ALL_VISITS_V3 (has publisher data built-in)
-            query = """
-                SELECT 
-                    COALESCE(PUBLISHER, 'Unknown') as PUBLISHER,
-                    COUNT(*) as S_VISITS,
-                    COUNT(DISTINCT MAID) as UNIQUE_DEVICES
-                FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
-                WHERE QUORUM_ADVERTISER_ID = %s
-                  AND AGENCY_ID = %s
-                  AND VISIT_TYPE = 'STORE'
-                  AND CONVERSION_DATE >= %s
-                  AND CONVERSION_DATE < %s
-                GROUP BY PUBLISHER
-                ORDER BY S_VISITS DESC
-            """
-        else:
-            # Class B: Join to XANDR via IMP_ID
-            query = """
-                WITH deduplicated AS (
-                    SELECT 
-                        cp.IMP_ID,
-                        cp.DEVICE_ID,
-                        cp.DRIVE_BY_DATE,
-                        cp.POI_MD5,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY cp.DEVICE_ID, cp.DRIVE_BY_DATE, cp.POI_MD5
-                            ORDER BY cp.IMP_ID DESC
-                        ) as rn
-                    FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW cp
-                    WHERE cp.ADVERTISER_ID = %s
-                      AND cp.AGENCY_ID = %s
-                      AND cp.DRIVE_BY_DATE >= %s
-                      AND cp.DRIVE_BY_DATE < %s
-                )
-                SELECT 
-                    COALESCE(x.PUBLISHER_CODE, x.SITE, CAST(x.PUBLISHER_ID AS TEXT), 'Unknown') as PUBLISHER,
-                    COUNT(*) as S_VISITS,
-                    COUNT(DISTINCT d.DEVICE_ID) as UNIQUE_DEVICES
-                FROM deduplicated d
-                LEFT JOIN QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG x 
-                    ON d.IMP_ID = x.ID
-                WHERE d.rn = 1
-                GROUP BY PUBLISHER
-                ORDER BY S_VISITS DESC
-            """
-        
-        cursor.execute(query, (advertiser_id, agency_id, start_date, end_date))
-        results = cursor.fetchall()
-        
-        publishers = []
-        for row in results:
-            publishers.append({
-                'PUBLISHER': row[0],
-                'S_VISITS': row[1],
-                'UNIQUE_DEVICES': row[2]
-            })
-        
-        cursor.close()
-        conn.close()
-        
-        return jsonify({'success': True, 'data': publishers})
-        
+        results = execute_query(query, {
+            'advertiser_id': advertiser_id,
+            'agency_id': int(agency_id),
+            'start_date': start_date,
+            'end_date': end_date,
+            'min_visits': min_visits
+        })
+        return jsonify({'success': True, 'data': results, 'data_class': agency_class})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
-# ============================================================================
-# HEALTH CHECK
-# ============================================================================
+# =============================================================================
+# ZIP PERFORMANCE
+# =============================================================================
 
-@app.route('/api/v3/health', methods=['GET'])
-def health_check():
-    """Health check endpoint"""
-    return jsonify({
-        'success': True,
-        'version': '3.0',
-        'architecture': 'dual-path',
-        'class_a_agencies': CLASS_A_AGENCIES,
-        'class_b_agencies': CLASS_B_AGENCIES
-    })
+@app.route('/api/v3/zip-performance', methods=['GET'])
+def get_zip_performance_unified():
+    """ZIP breakdown - available for all agency classes"""
+    advertiser_id = request.args.get('advertiser_id')
+    agency_id = request.args.get('agency_id')
+    min_visits = int(request.args.get('min_visits', 5))
+    start_date, end_date = get_date_params(request)
+    
+    if not advertiser_id or not agency_id:
+        return jsonify({'success': False, 'error': 'advertiser_id and agency_id required'}), 400
+    
+    agency_class = get_agency_class(agency_id)
+    
+    if agency_class == 'A':
+        query = """
+        SELECT 
+            mca.ZIP_CODE, COUNT(*) as S_VISITS, COUNT(DISTINCT v.MAID) as UNIQUE_VISITORS,
+            MAX(mca.ZIP_POPULATION) as ZIP_POPULATION
+        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
+        JOIN QUORUM_CROSS_CLOUD.ATTAIN_FEED.MAID_CENTROID_ASSOCIATION mca 
+            ON LOWER(v.MAID) = LOWER(mca.DEVICE_ID)
+        WHERE v.QUORUM_ADVERTISER_ID = %(advertiser_id)s
+          AND v.CONVERSION_DATE >= %(start_date)s AND v.CONVERSION_DATE <= %(end_date)s
+          AND v.VISIT_TYPE = 'STORE'
+        GROUP BY mca.ZIP_CODE
+        HAVING COUNT(*) >= %(min_visits)s
+        ORDER BY S_VISITS DESC
+        LIMIT 500
+        """
+    elif agency_class == 'B':
+        query = """
+        SELECT 
+            mca.ZIP_CODE, 
+            COUNT(DISTINCT CONCAT(cp.DEVICE_ID, cp.DRIVE_BY_DATE, cp.POI_MD5)) as S_VISITS,
+            COUNT(DISTINCT cp.DEVICE_ID) as UNIQUE_VISITORS,
+            MAX(mca.ZIP_POPULATION) as ZIP_POPULATION
+        FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW cp
+        JOIN QUORUM_CROSS_CLOUD.ATTAIN_FEED.MAID_CENTROID_ASSOCIATION mca 
+            ON LOWER(cp.DEVICE_ID) = LOWER(mca.DEVICE_ID)
+        WHERE cp.ADVERTISER_ID = %(advertiser_id)s
+          AND cp.DRIVE_BY_DATE >= %(start_date)s AND cp.DRIVE_BY_DATE <= %(end_date)s
+        GROUP BY mca.ZIP_CODE
+        HAVING S_VISITS >= %(min_visits)s
+        ORDER BY S_VISITS DESC
+        LIMIT 500
+        """
+    else:  # VIACOM - using MAID from QRM
+        query = """
+        SELECT 
+            mca.ZIP_CODE, COUNT(*) as W_VISITS, COUNT(DISTINCT v.MAID) as UNIQUE_VISITORS,
+            MAX(mca.ZIP_POPULATION) as ZIP_POPULATION
+        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
+        JOIN QUORUM_CROSS_CLOUD.ATTAIN_FEED.MAID_CENTROID_ASSOCIATION mca 
+            ON LOWER(v.MAID) = LOWER(mca.DEVICE_ID)
+        WHERE v.QUORUM_ADVERTISER_ID = %(advertiser_id)s
+          AND v.CONVERSION_DATE >= %(start_date)s AND v.CONVERSION_DATE <= %(end_date)s
+          AND v.VISIT_TYPE = 'WEB'
+        GROUP BY mca.ZIP_CODE
+        HAVING COUNT(*) >= %(min_visits)s
+        ORDER BY W_VISITS DESC
+        LIMIT 500
+        """
+    
+    try:
+        results = execute_query(query, {
+            'advertiser_id': advertiser_id,
+            'agency_id': int(agency_id),
+            'start_date': start_date,
+            'end_date': end_date,
+            'min_visits': min_visits
+        })
+        return jsonify({'success': True, 'data': results, 'data_class': agency_class})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# =============================================================================
+# DIAGNOSTIC ENDPOINTS
+# =============================================================================
+
+@app.route('/api/v3/unmapped-advertisers', methods=['GET'])
+def get_unmapped_advertisers():
+    """List Class B advertisers missing IO_ID mapping"""
+    start_date, end_date = get_date_params(request)
+    
+    query = """
+    WITH visits AS (
+        SELECT cp.AGENCY_ID, cp.ADVERTISER_ID, MAX(aa.COMP_NAME) as ADVERTISER_NAME,
+               COUNT(DISTINCT CONCAT(cp.DEVICE_ID, cp.DRIVE_BY_DATE, cp.POI_MD5)) as S_VISITS
+        FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW cp
+        JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa ON cp.ADVERTISER_ID = aa.ID
+        WHERE cp.DRIVE_BY_DATE >= %(start_date)s AND cp.DRIVE_BY_DATE <= %(end_date)s
+          AND cp.AGENCY_ID IN (1813, 1972, 2234, 2379, 1880, 2744)
+        GROUP BY cp.AGENCY_ID, cp.ADVERTISER_ID
+    ),
+    mapping_exists AS (
+        SELECT DISTINCT QUORUM_ADVERTISER_ID::NUMBER as ADVERTISER_ID
+        FROM QUORUMDB.SEGMENT_DATA."QuorumAdvImpMapping"
+        WHERE IO_ID IS NOT NULL AND IO_ID != 0
+    )
+    SELECT v.AGENCY_ID, v.ADVERTISER_ID, v.ADVERTISER_NAME, v.S_VISITS,
+           CASE WHEN m.ADVERTISER_ID IS NOT NULL THEN 'MAPPED' ELSE 'UNMAPPED' END as MAPPING_STATUS
+    FROM visits v
+    LEFT JOIN mapping_exists m ON v.ADVERTISER_ID = m.ADVERTISER_ID
+    WHERE m.ADVERTISER_ID IS NULL
+    ORDER BY v.S_VISITS DESC
+    """
+    
+    try:
+        results = execute_query(query, {'start_date': start_date, 'end_date': end_date})
+        for r in results:
+            r['AGENCY_NAME'] = AGENCY_NAMES.get(r['AGENCY_ID'], 'Unknown')
+        return jsonify({'success': True, 'data': results, 'count': len(results)})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/v3/mapping-coverage', methods=['GET'])
+def get_mapping_coverage():
+    """Summary of QuorumAdvImpMapping coverage by agency"""
+    start_date, end_date = get_date_params(request)
+    
+    query = """
+    WITH visits AS (
+        SELECT cp.AGENCY_ID, cp.ADVERTISER_ID,
+               COUNT(DISTINCT CONCAT(cp.DEVICE_ID, cp.DRIVE_BY_DATE, cp.POI_MD5)) as S_VISITS
+        FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW cp
+        WHERE cp.DRIVE_BY_DATE >= %(start_date)s AND cp.DRIVE_BY_DATE <= %(end_date)s
+          AND cp.AGENCY_ID IN (1813, 1972, 2234, 2379, 1880, 2744)
+        GROUP BY cp.AGENCY_ID, cp.ADVERTISER_ID
+    ),
+    mapping_exists AS (
+        SELECT DISTINCT QUORUM_ADVERTISER_ID::NUMBER as ADVERTISER_ID
+        FROM QUORUMDB.SEGMENT_DATA."QuorumAdvImpMapping"
+        WHERE IO_ID IS NOT NULL AND IO_ID != 0
+    )
+    SELECT 
+        v.AGENCY_ID,
+        COUNT(*) as TOTAL_ADVERTISERS,
+        SUM(CASE WHEN m.ADVERTISER_ID IS NOT NULL THEN 1 ELSE 0 END) as MAPPED,
+        SUM(CASE WHEN m.ADVERTISER_ID IS NULL THEN 1 ELSE 0 END) as UNMAPPED,
+        SUM(v.S_VISITS) as TOTAL_VISITS,
+        SUM(CASE WHEN m.ADVERTISER_ID IS NOT NULL THEN v.S_VISITS ELSE 0 END) as MAPPED_VISITS,
+        ROUND(SUM(CASE WHEN m.ADVERTISER_ID IS NOT NULL THEN v.S_VISITS ELSE 0 END)::FLOAT / 
+              NULLIF(SUM(v.S_VISITS), 0) * 100, 1) as MAPPED_VISIT_PCT
+    FROM visits v
+    LEFT JOIN mapping_exists m ON v.ADVERTISER_ID = m.ADVERTISER_ID
+    GROUP BY v.AGENCY_ID
+    ORDER BY TOTAL_VISITS DESC
+    """
+    
+    try:
+        results = execute_query(query, {'start_date': start_date, 'end_date': end_date})
+        for r in results:
+            r['AGENCY_NAME'] = AGENCY_NAMES.get(r['AGENCY_ID'], 'Unknown')
+        return jsonify({'success': True, 'data': results})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# =============================================================================
+# BACKWARD COMPATIBLE ENDPOINTS (v2 style - store visits only)
+# =============================================================================
+
+@app.route('/api/agencies', methods=['GET'])
+def get_agencies_v2():
+    """v2 compatible - redirects to v3"""
+    return get_all_agencies()
+
+@app.route('/api/advertisers', methods=['GET'])
+def get_advertisers_v2():
+    """v2 compatible - Class A only"""
+    return get_advertisers_unified()
+
+# =============================================================================
+# MAIN
+# =============================================================================
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
