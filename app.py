@@ -376,7 +376,6 @@ def get_all_agencies():
             SUM(COALESCE(d.SITE_VISITS, 0)) as W_VISITS
         FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING d
         WHERE d.LOG_DATE >= %(start_date)s AND d.LOG_DATE <= %(end_date)s
-          AND (SUM(d.TEST_VISITORS) > 0 OR SUM(COALESCE(d.SITE_VISITS, 0)) > 0)
         GROUP BY d.AGENCY_ID, d.AGENCY_NAME, d.ADVERTISER_ID
         HAVING SUM(d.TEST_VISITORS) > 0 OR SUM(COALESCE(d.SITE_VISITS, 0)) > 0
     ),
