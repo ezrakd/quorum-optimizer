@@ -97,244 +97,127 @@ def get_date_params(request):
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
-    try:
-        conn = get_snowflake_connection()
-        conn.close()
-        return jsonify({
-            'success': True, 
-            'status': 'healthy', 
-            'version': '3.7',
-            'agencies_supported': 13,
-            'new_endpoints': [
-                '/api/v3/agency-overview',
-                '/api/v3/advertiser-overview',
-                '/api/v3/impressions-timeseries',
-                '/api/v3/global-advertiser-overview'
-            ]
-        })
-    except Exception as e:
-        return jsonify({'success': False, 'status': 'unhealthy', 'error': str(e)}), 500
+    """Light health check - doesn't test DB to avoid timeout"""
+    return jsonify({
+        'success': True, 
+        'status': 'healthy', 
+        'version': '3.7',
+        'agencies_supported': 13,
+        'new_endpoints': [
+            '/api/v3/agency-overview',
+            '/api/v3/advertiser-overview',
+            '/api/v3/impressions-timeseries',
+            '/api/v3/global-advertiser-overview'
+        ]
+    })
 
 # =============================================================================
-# NEW: AGENCY OVERVIEW (Cross-Agency View)
+# NEW: AGENCY OVERVIEW (Cross-Agency View) - Uses DAILY_ADVERTISER_REPORTING
 # =============================================================================
 
 @app.route('/api/v3/agency-overview', methods=['GET'])
 def get_agency_overview():
-    """Cross-agency overview with impressions, visits, and rates"""
+    """Cross-agency overview using pre-aggregated DAILY_ADVERTISER_REPORTING"""
     start_date, end_date = get_date_params(request)
     
     query = """
-    WITH agency_visits AS (
-        SELECT v.AGENCY_ID, COUNT(*) as S_VISITS, 0 as W_VISITS, COUNT(DISTINCT v.QUORUM_ADVERTISER_ID) as ADV_CNT
-        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
-        WHERE v.CONVERSION_DATE >= %(start_date)s AND v.CONVERSION_DATE <= %(end_date)s
-          AND v.VISIT_TYPE = 'STORE' AND v.AGENCY_ID IN (2514, 1956, 2298, 1955, 1950, 2086)
-        GROUP BY v.AGENCY_ID
-        
-        UNION ALL
-        
-        SELECT cp.AGENCY_ID, COUNT(DISTINCT CONCAT(cp.DEVICE_ID, cp.DRIVE_BY_DATE, cp.POI_MD5)), 0, COUNT(DISTINCT cp.ADVERTISER_ID)
-        FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW cp
-        WHERE cp.DRIVE_BY_DATE >= %(start_date)s AND cp.DRIVE_BY_DATE <= %(end_date)s
-          AND cp.AGENCY_ID IN (1813, 1972, 2234, 2379, 1880, 2744)
-        GROUP BY cp.AGENCY_ID
-        
-        UNION ALL
-        
-        SELECT 1480, 0, COUNT(*), COUNT(DISTINCT v.QUORUM_ADVERTISER_ID)
-        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
-        JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa ON TRY_CAST(v.QUORUM_ADVERTISER_ID AS NUMBER) = aa.ID
-        WHERE v.CONVERSION_DATE >= %(start_date)s AND v.CONVERSION_DATE <= %(end_date)s
-          AND v.VISIT_TYPE = 'WEB' AND aa.ADVERTISER_ID = 1480
-    ),
-    agency_impressions AS (
-        SELECT x.AGENCY_ID, COUNT(*) as IMPRESSIONS
-        FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG x
-        WHERE CAST(x.TIMESTAMP AS DATE) >= %(start_date)s AND CAST(x.TIMESTAMP AS DATE) <= %(end_date)s
-          AND x.AGENCY_ID IN (2514, 1956, 2298, 1955, 1950, 2086, 1480)
-        GROUP BY x.AGENCY_ID
-        
-        UNION ALL
-        
-        SELECT aa.ADVERTISER_ID, SUM(ds.IMPRESSIONS)
-        FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_DAILY_STATS ds
-        JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa ON ds.ADVERTISER_ID = aa.ID
-        WHERE ds.LOG_DATE >= %(start_date)s AND ds.LOG_DATE <= %(end_date)s
-          AND aa.ADVERTISER_ID IN (1813, 1972, 2234, 2379, 1880, 2744)
-        GROUP BY aa.ADVERTISER_ID
-    )
     SELECT 
-        v.AGENCY_ID,
-        SUM(v.S_VISITS) as LOCATION_VISITS,
-        SUM(v.W_VISITS) as WEB_VISITS,
-        MAX(v.ADV_CNT) as ADVERTISER_COUNT,
-        COALESCE(MAX(i.IMPRESSIONS), 0) as IMPRESSIONS,
+        AGENCY_ID,
+        AGENCY_NAME,
+        COUNT(DISTINCT ADVERTISER_ID) as ADVERTISER_COUNT,
+        SUM(IMPRESSIONS) as IMPRESSIONS,
+        SUM(TEST_VISITORS) as LOCATION_VISITS,
+        SUM(COALESCE(SITE_VISITS, 0)) as WEB_VISITS,
         0 as WEB_TRAFFIC,
-        CASE WHEN COALESCE(MAX(i.IMPRESSIONS), 0) > 0 
-             THEN (SUM(v.S_VISITS) + SUM(v.W_VISITS))::FLOAT / MAX(i.IMPRESSIONS) ELSE 0 END as VISIT_RATE,
-        CASE WHEN COALESCE(MAX(i.IMPRESSIONS), 0) > 0 
-             THEN SUM(v.S_VISITS)::FLOAT / MAX(i.IMPRESSIONS) ELSE 0 END as LOCATION_VR,
+        CASE WHEN SUM(IMPRESSIONS) > 0 
+             THEN SUM(TEST_VISITORS)::FLOAT / SUM(IMPRESSIONS) ELSE 0 END as LOCATION_VR,
+        CASE WHEN SUM(IMPRESSIONS) > 0 
+             THEN (SUM(TEST_VISITORS) + SUM(COALESCE(SITE_VISITS, 0)))::FLOAT / SUM(IMPRESSIONS) ELSE 0 END as VISIT_RATE,
         0 as WEB_CONTRIBUTION
-    FROM agency_visits v
-    LEFT JOIN agency_impressions i ON v.AGENCY_ID = i.AGENCY_ID
-    GROUP BY v.AGENCY_ID
+    FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
+    WHERE LOG_DATE >= %(start_date)s AND LOG_DATE <= %(end_date)s
+    GROUP BY AGENCY_ID, AGENCY_NAME
     ORDER BY IMPRESSIONS DESC
     """
     
     try:
         results = execute_query(query, {'start_date': start_date, 'end_date': end_date})
         for r in results:
-            r['AGENCY_NAME'] = AGENCY_NAMES.get(r['AGENCY_ID'], 'Unknown')
             r['DATA_CLASS'] = get_agency_class(r['AGENCY_ID'])
         return jsonify({'success': True, 'data': results, 'total_agencies': len(results), 'date_range': {'start': start_date, 'end': end_date}})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # =============================================================================
-# NEW: ADVERTISER OVERVIEW (Cross-Advertiser View)
+# NEW: ADVERTISER OVERVIEW (Cross-Advertiser View) - Uses DAILY_ADVERTISER_REPORTING
 # =============================================================================
 
 @app.route('/api/v3/advertiser-overview', methods=['GET'])
 def get_advertiser_overview():
-    """Cross-advertiser overview for a specific agency"""
+    """Cross-advertiser overview for a specific agency using pre-aggregated data"""
     agency_id = request.args.get('agency_id')
     start_date, end_date = get_date_params(request)
     
     if not agency_id:
         return jsonify({'success': False, 'error': 'agency_id required'}), 400
     
-    agency_class = get_agency_class(agency_id)
-    
-    if agency_class == 'A':
-        query = """
-        WITH advertiser_visits AS (
-            SELECT v.QUORUM_ADVERTISER_ID as ADVERTISER_ID, MAX(aa.COMP_NAME) as ADVERTISER_NAME,
-                   COUNT(*) as LOCATION_VISITS, 0 as WEB_VISITS
-            FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
-            LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa ON TRY_CAST(v.QUORUM_ADVERTISER_ID AS NUMBER) = aa.ID
-            WHERE v.AGENCY_ID = %(agency_id)s AND v.CONVERSION_DATE >= %(start_date)s AND v.CONVERSION_DATE <= %(end_date)s AND v.VISIT_TYPE = 'STORE'
-            GROUP BY v.QUORUM_ADVERTISER_ID
-        ),
-        advertiser_impressions AS (
-            SELECT m.ADVERTISER_ID, COUNT(*) as IMPRESSIONS
-            FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG x
-            JOIN QUORUMDB.SEGMENT_DATA.QuorumAdvImpMapping m ON x.IO_ID = m.IO_ID
-            WHERE x.AGENCY_ID = %(agency_id)s AND CAST(x.TIMESTAMP AS DATE) >= %(start_date)s AND CAST(x.TIMESTAMP AS DATE) <= %(end_date)s
-            GROUP BY m.ADVERTISER_ID
-        )
-        SELECT v.ADVERTISER_ID, v.ADVERTISER_NAME, COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS,
-               0 as WEB_TRAFFIC, v.WEB_VISITS, 0 as WEB_CONTRIBUTION, v.LOCATION_VISITS,
-               CASE WHEN COALESCE(i.IMPRESSIONS, 0) > 0 THEN v.LOCATION_VISITS::FLOAT / i.IMPRESSIONS ELSE 0 END as LOCATION_VR,
-               CASE WHEN COALESCE(i.IMPRESSIONS, 0) > 0 THEN (v.LOCATION_VISITS + v.WEB_VISITS)::FLOAT / i.IMPRESSIONS ELSE 0 END as VISIT_RATE
-        FROM advertiser_visits v
-        LEFT JOIN advertiser_impressions i ON v.ADVERTISER_ID::TEXT = i.ADVERTISER_ID::TEXT
-        ORDER BY IMPRESSIONS DESC
-        """
-    elif agency_class == 'B':
-        query = """
-        WITH advertiser_data AS (
-            SELECT cp.ADVERTISER_ID, MAX(aa.COMP_NAME) as ADVERTISER_NAME,
-                   COUNT(DISTINCT CONCAT(cp.DEVICE_ID, cp.DRIVE_BY_DATE, cp.POI_MD5)) as LOCATION_VISITS, 0 as WEB_VISITS
-            FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW cp
-            JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa ON cp.ADVERTISER_ID = aa.ID
-            WHERE cp.AGENCY_ID = %(agency_id)s AND cp.DRIVE_BY_DATE >= %(start_date)s AND cp.DRIVE_BY_DATE <= %(end_date)s
-            GROUP BY cp.ADVERTISER_ID
-        ),
-        advertiser_impressions AS (
-            SELECT ADVERTISER_ID, SUM(IMPRESSIONS) as IMPRESSIONS
-            FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_DAILY_STATS
-            WHERE LOG_DATE >= %(start_date)s AND LOG_DATE <= %(end_date)s
-            GROUP BY ADVERTISER_ID
-        )
-        SELECT v.ADVERTISER_ID::TEXT as ADVERTISER_ID, v.ADVERTISER_NAME, COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS,
-               0 as WEB_TRAFFIC, v.WEB_VISITS, 0 as WEB_CONTRIBUTION, v.LOCATION_VISITS,
-               CASE WHEN COALESCE(i.IMPRESSIONS, 0) > 0 THEN v.LOCATION_VISITS::FLOAT / i.IMPRESSIONS ELSE 0 END as LOCATION_VR,
-               CASE WHEN COALESCE(i.IMPRESSIONS, 0) > 0 THEN (v.LOCATION_VISITS + v.WEB_VISITS)::FLOAT / i.IMPRESSIONS ELSE 0 END as VISIT_RATE
-        FROM advertiser_data v
-        LEFT JOIN advertiser_impressions i ON v.ADVERTISER_ID = i.ADVERTISER_ID
-        ORDER BY IMPRESSIONS DESC
-        """
-    elif agency_class == 'VIACOM':
-        query = """
-        WITH advertiser_visits AS (
-            SELECT v.QUORUM_ADVERTISER_ID as ADVERTISER_ID, MAX(aa.COMP_NAME) as ADVERTISER_NAME,
-                   0 as LOCATION_VISITS, COUNT(*) as WEB_VISITS
-            FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
-            JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa ON TRY_CAST(v.QUORUM_ADVERTISER_ID AS NUMBER) = aa.ID
-            WHERE v.CONVERSION_DATE >= %(start_date)s AND v.CONVERSION_DATE <= %(end_date)s AND v.VISIT_TYPE = 'WEB' AND aa.ADVERTISER_ID = 1480
-            GROUP BY v.QUORUM_ADVERTISER_ID
-        ),
-        advertiser_impressions AS (
-            SELECT m.ADVERTISER_ID, COUNT(*) as IMPRESSIONS
-            FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG x
-            JOIN QUORUMDB.SEGMENT_DATA.QuorumAdvImpMapping m ON x.IO_ID = m.IO_ID
-            WHERE x.AGENCY_ID = 1480 AND CAST(x.TIMESTAMP AS DATE) >= %(start_date)s AND CAST(x.TIMESTAMP AS DATE) <= %(end_date)s
-            GROUP BY m.ADVERTISER_ID
-        )
-        SELECT v.ADVERTISER_ID, v.ADVERTISER_NAME, COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS,
-               0 as WEB_TRAFFIC, v.WEB_VISITS,
-               CASE WHEN COALESCE(i.IMPRESSIONS, 0) > 0 THEN (v.WEB_VISITS::FLOAT / i.IMPRESSIONS) * 100 ELSE 0 END as WEB_CONTRIBUTION,
-               v.LOCATION_VISITS, 0 as LOCATION_VR,
-               CASE WHEN COALESCE(i.IMPRESSIONS, 0) > 0 THEN v.WEB_VISITS::FLOAT / i.IMPRESSIONS ELSE 0 END as VISIT_RATE
-        FROM advertiser_visits v
-        LEFT JOIN advertiser_impressions i ON v.ADVERTISER_ID::TEXT = i.ADVERTISER_ID::TEXT
-        ORDER BY WEB_VISITS DESC
-        """
-    else:
-        return jsonify({'success': False, 'error': f'Unknown agency_id: {agency_id}'}), 400
+    query = """
+    SELECT 
+        ADVERTISER_ID,
+        ADVERTISER_NAME,
+        SUM(IMPRESSIONS) as IMPRESSIONS,
+        SUM(TEST_VISITORS) as LOCATION_VISITS,
+        SUM(COALESCE(SITE_VISITS, 0)) as WEB_VISITS,
+        0 as WEB_TRAFFIC,
+        CASE WHEN SUM(IMPRESSIONS) > 0 
+             THEN SUM(TEST_VISITORS)::FLOAT / SUM(IMPRESSIONS) ELSE 0 END as LOCATION_VR,
+        CASE WHEN SUM(IMPRESSIONS) > 0 
+             THEN (SUM(TEST_VISITORS) + SUM(COALESCE(SITE_VISITS, 0)))::FLOAT / SUM(IMPRESSIONS) ELSE 0 END as VISIT_RATE,
+        CASE WHEN SUM(IMPRESSIONS) > 0 AND SUM(COALESCE(SITE_VISITS, 0)) > 0
+             THEN (SUM(COALESCE(SITE_VISITS, 0))::FLOAT / SUM(IMPRESSIONS)) * 100 ELSE 0 END as WEB_CONTRIBUTION
+    FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
+    WHERE AGENCY_ID = %(agency_id)s
+      AND LOG_DATE >= %(start_date)s AND LOG_DATE <= %(end_date)s
+    GROUP BY ADVERTISER_ID, ADVERTISER_NAME
+    ORDER BY IMPRESSIONS DESC
+    """
     
     try:
         results = execute_query(query, {'agency_id': int(agency_id), 'start_date': start_date, 'end_date': end_date})
-        return jsonify({'success': True, 'data': results, 'agency_id': int(agency_id), 'agency_name': AGENCY_NAMES.get(int(agency_id), 'Unknown'), 'total_advertisers': len(results), 'date_range': {'start': start_date, 'end': end_date}})
+        return jsonify({
+            'success': True, 
+            'data': results, 
+            'agency_id': int(agency_id), 
+            'agency_name': AGENCY_NAMES.get(int(agency_id), 'Unknown'), 
+            'total_advertisers': len(results), 
+            'date_range': {'start': start_date, 'end': end_date}
+        })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # =============================================================================
-# NEW: IMPRESSIONS TIME SERIES (For Chart)
+# NEW: IMPRESSIONS TIME SERIES (For Chart) - Uses DAILY_ADVERTISER_REPORTING
 # =============================================================================
 
 @app.route('/api/v3/impressions-timeseries', methods=['GET'])
 def get_impressions_timeseries():
-    """Daily impressions by agency for time series chart"""
+    """Daily impressions by agency for time series chart using pre-aggregated data"""
     start_date, end_date = get_date_params(request)
     
     query = """
-    WITH daily_imps AS (
-        -- Class A + ViacomCBS impressions from XANDR
-        SELECT 
-            CAST(x.TIMESTAMP AS DATE) as LOG_DATE,
-            x.AGENCY_ID,
-            COUNT(*) as IMPRESSIONS
-        FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG x
-        WHERE CAST(x.TIMESTAMP AS DATE) >= %(start_date)s 
-          AND CAST(x.TIMESTAMP AS DATE) <= %(end_date)s
-          AND x.AGENCY_ID IN (2514, 1956, 2298, 1955, 1950, 2086, 1480)
-        GROUP BY CAST(x.TIMESTAMP AS DATE), x.AGENCY_ID
-        
-        UNION ALL
-        
-        -- Class B impressions from daily stats
-        SELECT 
-            ds.LOG_DATE,
-            aa.ADVERTISER_ID as AGENCY_ID,
-            SUM(ds.IMPRESSIONS) as IMPRESSIONS
-        FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_DAILY_STATS ds
-        JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa ON ds.ADVERTISER_ID = aa.ID
-        WHERE ds.LOG_DATE >= %(start_date)s AND ds.LOG_DATE <= %(end_date)s
-          AND aa.ADVERTISER_ID IN (1813, 1972, 2234, 2379, 1880, 2744)
-        GROUP BY ds.LOG_DATE, aa.ADVERTISER_ID
-    )
-    SELECT LOG_DATE, AGENCY_ID, IMPRESSIONS
-    FROM daily_imps
+    SELECT 
+        LOG_DATE,
+        AGENCY_ID,
+        AGENCY_NAME,
+        SUM(IMPRESSIONS) as IMPRESSIONS
+    FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
+    WHERE LOG_DATE >= %(start_date)s AND LOG_DATE <= %(end_date)s
+    GROUP BY LOG_DATE, AGENCY_ID, AGENCY_NAME
     ORDER BY LOG_DATE, AGENCY_ID
     """
     
     try:
         results = execute_query(query, {'start_date': start_date, 'end_date': end_date})
-        # Add agency names
-        for r in results:
-            r['AGENCY_NAME'] = AGENCY_NAMES.get(r['AGENCY_ID'], 'Unknown')
         return jsonify({
             'success': True, 
             'data': results,
@@ -344,109 +227,39 @@ def get_impressions_timeseries():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # =============================================================================
-# NEW: GLOBAL ADVERTISER OVERVIEW (All Agencies)
+# NEW: GLOBAL ADVERTISER OVERVIEW (All Agencies) - Uses DAILY_ADVERTISER_REPORTING
 # =============================================================================
 
 @app.route('/api/v3/global-advertiser-overview', methods=['GET'])
 def get_global_advertiser_overview():
-    """Cross-advertiser overview across ALL agencies"""
+    """Cross-advertiser overview across ALL agencies using pre-aggregated data"""
     start_date, end_date = get_date_params(request)
     
     query = """
-    WITH all_advertisers AS (
-        -- Class A advertisers
-        SELECT 
-            v.AGENCY_ID,
-            v.QUORUM_ADVERTISER_ID as ADVERTISER_ID,
-            MAX(aa.COMP_NAME) as ADVERTISER_NAME,
-            COUNT(*) as LOCATION_VISITS,
-            0 as WEB_VISITS
-        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
-        LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa ON TRY_CAST(v.QUORUM_ADVERTISER_ID AS NUMBER) = aa.ID
-        WHERE v.CONVERSION_DATE >= %(start_date)s AND v.CONVERSION_DATE <= %(end_date)s
-          AND v.VISIT_TYPE = 'STORE' AND v.AGENCY_ID IN (2514, 1956, 2298, 1955, 1950, 2086)
-        GROUP BY v.AGENCY_ID, v.QUORUM_ADVERTISER_ID
-        
-        UNION ALL
-        
-        -- Class B advertisers
-        SELECT 
-            cp.AGENCY_ID,
-            cp.ADVERTISER_ID::TEXT as ADVERTISER_ID,
-            MAX(aa.COMP_NAME) as ADVERTISER_NAME,
-            COUNT(DISTINCT CONCAT(cp.DEVICE_ID, cp.DRIVE_BY_DATE, cp.POI_MD5)) as LOCATION_VISITS,
-            0 as WEB_VISITS
-        FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW cp
-        JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa ON cp.ADVERTISER_ID = aa.ID
-        WHERE cp.DRIVE_BY_DATE >= %(start_date)s AND cp.DRIVE_BY_DATE <= %(end_date)s
-          AND cp.AGENCY_ID IN (1813, 1972, 2234, 2379, 1880, 2744)
-        GROUP BY cp.AGENCY_ID, cp.ADVERTISER_ID
-        
-        UNION ALL
-        
-        -- ViacomCBS advertisers (web)
-        SELECT 
-            1480 as AGENCY_ID,
-            v.QUORUM_ADVERTISER_ID as ADVERTISER_ID,
-            MAX(aa.COMP_NAME) as ADVERTISER_NAME,
-            0 as LOCATION_VISITS,
-            COUNT(*) as WEB_VISITS
-        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
-        JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa ON TRY_CAST(v.QUORUM_ADVERTISER_ID AS NUMBER) = aa.ID
-        WHERE v.CONVERSION_DATE >= %(start_date)s AND v.CONVERSION_DATE <= %(end_date)s
-          AND v.VISIT_TYPE = 'WEB' AND aa.ADVERTISER_ID = 1480
-        GROUP BY v.QUORUM_ADVERTISER_ID
-    ),
-    all_impressions AS (
-        -- Class A impressions
-        SELECT 
-            x.AGENCY_ID,
-            m.ADVERTISER_ID,
-            COUNT(*) as IMPRESSIONS
-        FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG x
-        JOIN QUORUMDB.SEGMENT_DATA.QuorumAdvImpMapping m ON x.IO_ID = m.IO_ID
-        WHERE CAST(x.TIMESTAMP AS DATE) >= %(start_date)s AND CAST(x.TIMESTAMP AS DATE) <= %(end_date)s
-          AND x.AGENCY_ID IN (2514, 1956, 2298, 1955, 1950, 2086, 1480)
-        GROUP BY x.AGENCY_ID, m.ADVERTISER_ID
-        
-        UNION ALL
-        
-        -- Class B impressions
-        SELECT 
-            aa.ADVERTISER_ID as AGENCY_ID,
-            ds.ADVERTISER_ID::TEXT,
-            SUM(ds.IMPRESSIONS) as IMPRESSIONS
-        FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_DAILY_STATS ds
-        JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa ON ds.ADVERTISER_ID = aa.ID
-        WHERE ds.LOG_DATE >= %(start_date)s AND ds.LOG_DATE <= %(end_date)s
-          AND aa.ADVERTISER_ID IN (1813, 1972, 2234, 2379, 1880, 2744)
-        GROUP BY aa.ADVERTISER_ID, ds.ADVERTISER_ID
-    )
     SELECT 
-        a.AGENCY_ID,
-        a.ADVERTISER_ID,
-        a.ADVERTISER_NAME,
-        COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS,
+        AGENCY_ID,
+        AGENCY_NAME,
+        ADVERTISER_ID,
+        ADVERTISER_NAME,
+        SUM(IMPRESSIONS) as IMPRESSIONS,
+        SUM(TEST_VISITORS) as LOCATION_VISITS,
+        SUM(COALESCE(SITE_VISITS, 0)) as WEB_VISITS,
         0 as WEB_TRAFFIC,
-        a.WEB_VISITS,
-        CASE WHEN a.WEB_VISITS > 0 AND COALESCE(i.IMPRESSIONS, 0) > 0 
-             THEN (a.WEB_VISITS::FLOAT / i.IMPRESSIONS) * 100 ELSE 0 END as WEB_CONTRIBUTION,
-        a.LOCATION_VISITS,
-        CASE WHEN COALESCE(i.IMPRESSIONS, 0) > 0 
-             THEN a.LOCATION_VISITS::FLOAT / i.IMPRESSIONS ELSE 0 END as LOCATION_VR,
-        CASE WHEN COALESCE(i.IMPRESSIONS, 0) > 0 
-             THEN (a.LOCATION_VISITS + a.WEB_VISITS)::FLOAT / i.IMPRESSIONS ELSE 0 END as VISIT_RATE
-    FROM all_advertisers a
-    LEFT JOIN all_impressions i ON a.AGENCY_ID = i.AGENCY_ID AND a.ADVERTISER_ID::TEXT = i.ADVERTISER_ID::TEXT
+        CASE WHEN SUM(IMPRESSIONS) > 0 
+             THEN SUM(TEST_VISITORS)::FLOAT / SUM(IMPRESSIONS) ELSE 0 END as LOCATION_VR,
+        CASE WHEN SUM(IMPRESSIONS) > 0 
+             THEN (SUM(TEST_VISITORS) + SUM(COALESCE(SITE_VISITS, 0)))::FLOAT / SUM(IMPRESSIONS) ELSE 0 END as VISIT_RATE,
+        CASE WHEN SUM(IMPRESSIONS) > 0 AND SUM(COALESCE(SITE_VISITS, 0)) > 0
+             THEN (SUM(COALESCE(SITE_VISITS, 0))::FLOAT / SUM(IMPRESSIONS)) * 100 ELSE 0 END as WEB_CONTRIBUTION
+    FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
+    WHERE LOG_DATE >= %(start_date)s AND LOG_DATE <= %(end_date)s
+    GROUP BY AGENCY_ID, AGENCY_NAME, ADVERTISER_ID, ADVERTISER_NAME
     ORDER BY IMPRESSIONS DESC
     LIMIT 200
     """
     
     try:
         results = execute_query(query, {'start_date': start_date, 'end_date': end_date})
-        # Add agency names
-        for r in results:
-            r['AGENCY_NAME'] = AGENCY_NAMES.get(r['AGENCY_ID'], 'Unknown')
         return jsonify({
             'success': True, 
             'data': results,
@@ -457,40 +270,28 @@ def get_global_advertiser_overview():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # =============================================================================
-# EXISTING ENDPOINTS (unchanged from v3.6)
+# SIDEBAR/LISTING ENDPOINTS - Now using DAILY_ADVERTISER_REPORTING for speed
 # =============================================================================
 
 @app.route('/api/v3/agencies', methods=['GET'])
 def get_all_agencies():
+    """Get agencies for sidebar - uses pre-aggregated data for speed"""
     start_date, end_date = get_date_params(request)
     query = """
-    SELECT AGENCY_ID, SUM(SV) as S_VISITS, SUM(WV) as W_VISITS, MAX(ADV_CNT) as ADVERTISER_COUNT
-    FROM (
-        SELECT v.AGENCY_ID, COUNT(*) as SV, 0 as WV, COUNT(DISTINCT v.QUORUM_ADVERTISER_ID) as ADV_CNT
-        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
-        WHERE v.CONVERSION_DATE >= %(start_date)s AND v.CONVERSION_DATE <= %(end_date)s
-          AND v.VISIT_TYPE = 'STORE' AND v.AGENCY_ID IN (2514, 1956, 2298, 1955, 1950, 2086)
-        GROUP BY v.AGENCY_ID
-        UNION ALL
-        SELECT cp.AGENCY_ID, COUNT(DISTINCT CONCAT(cp.DEVICE_ID, cp.DRIVE_BY_DATE, cp.POI_MD5)), 0, COUNT(DISTINCT cp.ADVERTISER_ID)
-        FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW cp
-        WHERE cp.DRIVE_BY_DATE >= %(start_date)s AND cp.DRIVE_BY_DATE <= %(end_date)s
-          AND cp.AGENCY_ID IN (1813, 1972, 2234, 2379, 1880, 2744)
-        GROUP BY cp.AGENCY_ID
-        UNION ALL
-        SELECT 1480, 0, COUNT(*), COUNT(DISTINCT v.QUORUM_ADVERTISER_ID)
-        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
-        JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa ON TRY_CAST(v.QUORUM_ADVERTISER_ID AS NUMBER) = aa.ID
-        WHERE v.CONVERSION_DATE >= %(start_date)s AND v.CONVERSION_DATE <= %(end_date)s
-          AND v.VISIT_TYPE = 'WEB' AND aa.ADVERTISER_ID = 1480
-    ) combined
-    GROUP BY AGENCY_ID
-    ORDER BY (SUM(SV) + SUM(WV)) DESC
+    SELECT 
+        AGENCY_ID,
+        AGENCY_NAME,
+        COUNT(DISTINCT ADVERTISER_ID) as ADVERTISER_COUNT,
+        SUM(TEST_VISITORS) as S_VISITS,
+        SUM(COALESCE(SITE_VISITS, 0)) as W_VISITS
+    FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
+    WHERE LOG_DATE >= %(start_date)s AND LOG_DATE <= %(end_date)s
+    GROUP BY AGENCY_ID, AGENCY_NAME
+    ORDER BY (SUM(TEST_VISITORS) + SUM(COALESCE(SITE_VISITS, 0))) DESC
     """
     try:
         results = execute_query(query, {'start_date': start_date, 'end_date': end_date})
         for r in results:
-            r['AGENCY_NAME'] = AGENCY_NAMES.get(r['AGENCY_ID'], 'Unknown')
             r['DATA_CLASS'] = get_agency_class(r['AGENCY_ID'])
         return jsonify({'success': True, 'data': results, 'total_agencies': len(results)})
     except Exception as e:
@@ -498,45 +299,33 @@ def get_all_agencies():
 
 @app.route('/api/v3/advertisers', methods=['GET'])
 def get_advertisers_unified():
+    """Get advertisers for sidebar - uses pre-aggregated data for speed"""
     agency_id = request.args.get('agency_id')
     start_date, end_date = get_date_params(request)
     if not agency_id:
         return jsonify({'success': False, 'error': 'agency_id required'}), 400
-    agency_class = get_agency_class(agency_id)
     
-    if agency_class == 'A':
-        query = """
-        SELECT v.QUORUM_ADVERTISER_ID as ADVERTISER_ID, MAX(aa.COMP_NAME) as ADVERTISER_NAME, COUNT(*) as S_VISITS, 0 as W_VISITS
-        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
-        LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa ON TRY_CAST(v.QUORUM_ADVERTISER_ID AS NUMBER) = aa.ID
-        WHERE v.AGENCY_ID = %(agency_id)s AND v.CONVERSION_DATE >= %(start_date)s AND v.CONVERSION_DATE <= %(end_date)s AND v.VISIT_TYPE = 'STORE'
-        GROUP BY v.QUORUM_ADVERTISER_ID ORDER BY S_VISITS DESC
-        """
-    elif agency_class == 'B':
-        query = """
-        SELECT cp.ADVERTISER_ID::TEXT as ADVERTISER_ID, MAX(aa.COMP_NAME) as ADVERTISER_NAME,
-               COUNT(DISTINCT CONCAT(cp.DEVICE_ID, cp.DRIVE_BY_DATE, cp.POI_MD5)) as S_VISITS, 0 as W_VISITS
-        FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW cp
-        JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa ON cp.ADVERTISER_ID = aa.ID
-        WHERE cp.AGENCY_ID = %(agency_id)s AND cp.DRIVE_BY_DATE >= %(start_date)s AND cp.DRIVE_BY_DATE <= %(end_date)s
-        GROUP BY cp.ADVERTISER_ID ORDER BY S_VISITS DESC
-        """
-    elif agency_class == 'VIACOM':
-        query = """
-        SELECT v.QUORUM_ADVERTISER_ID as ADVERTISER_ID, MAX(aa.COMP_NAME) as ADVERTISER_NAME, 0 as S_VISITS, COUNT(*) as W_VISITS
-        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
-        JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa ON TRY_CAST(v.QUORUM_ADVERTISER_ID AS NUMBER) = aa.ID
-        WHERE v.CONVERSION_DATE >= %(start_date)s AND v.CONVERSION_DATE <= %(end_date)s AND v.VISIT_TYPE = 'WEB' AND aa.ADVERTISER_ID = 1480
-        GROUP BY v.QUORUM_ADVERTISER_ID ORDER BY W_VISITS DESC
-        """
-    else:
-        return jsonify({'success': False, 'error': f'Unknown agency_id: {agency_id}'}), 400
-    
+    query = """
+    SELECT 
+        ADVERTISER_ID,
+        ADVERTISER_NAME,
+        SUM(TEST_VISITORS) as S_VISITS,
+        SUM(COALESCE(SITE_VISITS, 0)) as W_VISITS
+    FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
+    WHERE AGENCY_ID = %(agency_id)s
+      AND LOG_DATE >= %(start_date)s AND LOG_DATE <= %(end_date)s
+    GROUP BY ADVERTISER_ID, ADVERTISER_NAME
+    ORDER BY (SUM(TEST_VISITORS) + SUM(COALESCE(SITE_VISITS, 0))) DESC
+    """
     try:
         results = execute_query(query, {'agency_id': int(agency_id), 'start_date': start_date, 'end_date': end_date})
-        return jsonify({'success': True, 'data': results, 'agency_id': int(agency_id), 'agency_name': AGENCY_NAMES.get(int(agency_id), 'Unknown'), 'data_class': agency_class})
+        return jsonify({'success': True, 'data': results, 'agency_id': int(agency_id), 'total_advertisers': len(results)})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
+# =============================================================================
+# ADVERTISER DETAIL ENDPOINTS (granular - unchanged, uses raw tables)
+# =============================================================================
 
 @app.route('/api/v3/advertiser-summary', methods=['GET'])
 def get_advertiser_summary_unified():
