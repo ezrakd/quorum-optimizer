@@ -1,13 +1,13 @@
 """
-Quorum Optimizer API v3.3 - FIXED
-==================================
-Version: 3.3 (Permission Fix)
+Quorum Optimizer API v3.4 - UNIFIED + WEB FIX
+=============================================
+Version: 3.4
 Updated: January 22, 2026
 
-Changes from v3.2:
-- Removed PARAMOUNT_IMP_STORE_VISITS references (Railway permission issue)
-- ViacomCBS store visits are now omitted (web visits still work fine)
-- All 13 agencies now load correctly
+Changes from v3.3:
+- Added VISIT_TYPE field to all summary responses (STORE or WEB)
+- Added S_VISITS alias to ViacomCBS queries for frontend compatibility
+- ViacomCBS campaigns/publishers/zips now show data correctly
 
 Architecture:
 - Class A (MNTN, Dealer Spike, InteractRV, ARI, ByRider, Level5): QRM_ALL_VISITS_V3
@@ -106,7 +106,7 @@ def health_check():
         return jsonify({
             'success': True, 
             'status': 'healthy', 
-            'version': '3.3-FIXED',
+            'version': '3.4-WEB-FIX',
             'agencies_supported': 13,
             'class_a': CLASS_A_AGENCIES,
             'class_b': CLASS_B_AGENCIES,
@@ -304,7 +304,8 @@ def get_advertiser_summary_unified():
             SUM(v.UNIQUE_VISITORS) as UNIQUE_VISITORS,
             CASE WHEN COALESCE(SUM(i.IMPRESSIONS), 0) > 0 
                  THEN ROUND((SUM(v.S_VISITS)::FLOAT / SUM(i.IMPRESSIONS)) * 100, 4) ELSE 0 END as VISIT_RATE,
-            'FULL' as DATA_TIER
+            'FULL' as DATA_TIER,
+            'STORE' as VISIT_TYPE
         FROM visit_campaigns v
         LEFT JOIN impressions i ON v.CAMPAIGN_ID = i.CAMPAIGN_ID
         """
@@ -339,7 +340,8 @@ def get_advertiser_summary_unified():
             v.UNIQUE_VISITORS,
             CASE WHEN COALESCE(i.IMPRESSIONS, 0) > 0 
                  THEN ROUND((v.S_VISITS::FLOAT / i.IMPRESSIONS) * 100, 4) ELSE 0 END as VISIT_RATE,
-            CASE WHEN i.IMPRESSIONS > 0 THEN 'MAPPED' ELSE 'UNMAPPED' END as DATA_TIER
+            CASE WHEN i.IMPRESSIONS > 0 THEN 'MAPPED' ELSE 'UNMAPPED' END as DATA_TIER,
+            'STORE' as VISIT_TYPE
         FROM visits v
         CROSS JOIN impressions i
         """
@@ -355,7 +357,8 @@ def get_advertiser_summary_unified():
             SUM(IS_PURCHASE) as W_PURCHASES,
             SUM(PURCHASE_VALUE) as W_AMOUNT,
             0 as VISIT_RATE,
-            'WEB_ONLY' as DATA_TIER
+            'WEB_ONLY' as DATA_TIER,
+            'WEB' as VISIT_TYPE
         FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
         WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
           AND CONVERSION_DATE >= %(start_date)s AND CONVERSION_DATE <= %(end_date)s
@@ -445,12 +448,15 @@ def get_campaign_performance_unified():
         LIMIT 50
         """
     elif agency_class == 'VIACOM':
-        # ViacomCBS: Web campaign data
+        # ViacomCBS: Web campaign data - include S_VISITS alias for frontend compatibility
         query = """
         SELECT 
             CAMPAIGN_ID, MAX(CAMPAIGN_NAME) as CAMPAIGN_NAME,
-            COUNT(*) as W_VISITS, SUM(IS_LEAD) as W_LEADS, SUM(IS_PURCHASE) as W_PURCHASES,
-            COUNT(DISTINCT MAID) as UNIQUE_VISITORS
+            COUNT(*) as W_VISITS, 
+            COUNT(*) as S_VISITS,
+            SUM(IS_LEAD) as W_LEADS, SUM(IS_PURCHASE) as W_PURCHASES,
+            COUNT(DISTINCT MAID) as UNIQUE_VISITORS,
+            0 as IMPRESSIONS
         FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
         WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
           AND CONVERSION_DATE >= %(start_date)s AND CONVERSION_DATE <= %(end_date)s
@@ -532,9 +538,12 @@ def get_publisher_performance_unified():
         """
     else:  # VIACOM
         query = """
-        SELECT PUBLISHER, MAX(PLATFORM_TYPE) as PT, COUNT(*) as W_VISITS,
+        SELECT PUBLISHER, MAX(PLATFORM_TYPE) as PT, 
+               COUNT(*) as W_VISITS,
+               COUNT(*) as S_VISITS,
                SUM(IS_LEAD) as W_LEADS, SUM(IS_PURCHASE) as W_PURCHASES,
-               COUNT(DISTINCT MAID) as UNIQUE_VISITORS
+               COUNT(DISTINCT MAID) as UNIQUE_VISITORS,
+               0 as IMPRESSIONS
         FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3
         WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
           AND CONVERSION_DATE >= %(start_date)s AND CONVERSION_DATE <= %(end_date)s
@@ -610,8 +619,12 @@ def get_zip_performance_unified():
     else:  # VIACOM - using MAID from QRM
         query = """
         SELECT 
-            mca.ZIP_CODE, COUNT(*) as W_VISITS, COUNT(DISTINCT v.MAID) as UNIQUE_VISITORS,
-            MAX(mca.ZIP_POPULATION) as ZIP_POPULATION
+            mca.ZIP_CODE, 
+            COUNT(*) as W_VISITS, 
+            COUNT(*) as S_VISITS,
+            COUNT(DISTINCT v.MAID) as UNIQUE_VISITORS,
+            MAX(mca.ZIP_POPULATION) as ZIP_POPULATION,
+            0 as IMPRESSIONS
         FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
         JOIN QUORUM_CROSS_CLOUD.ATTAIN_FEED.MAID_CENTROID_ASSOCIATION mca 
             ON LOWER(v.MAID) = LOWER(mca.DEVICE_ID)
