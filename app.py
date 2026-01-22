@@ -1,16 +1,20 @@
 """
-Quorum Optimizer API v3.5 - VIACOM WEB + IMPRESSIONS
-====================================================
-Version: 3.5
+Quorum Optimizer API v3.6 - ZIP IMPRESSIONS FIX
+================================================
+Version: 3.6
 Updated: January 22, 2026
 
-ViacomCBS: Web visits from QRM + Impressions from XANDR
-(Store visits from PARAMOUNT_IMP_STORE_VISITS disabled for stability)
+Changes in v3.6:
+- Class B summary now uses CAMPAIGN_PERFORMANCE_REPORT_DAILY_STATS (fixes Magnite/Causal iQ 0 impressions)
+- ZIP queries now include DMA-level impressions from CAMPAIGN_PERFORMANCE_REPORT_DAILY_STATS
+- Removed AGENCY_ID filter from Class B queries (ADVERTISER_ID is unique)
 
 Architecture:
 - Class A (MNTN, Dealer Spike, InteractRV, ARI, ByRider, Level5): QRM_ALL_VISITS_V3
-- Class B (Causal iQ, Hearst, Magnite, TeamSnap, Shipyard, Parallel Path): CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW
+- Class B (Causal iQ, Hearst, Magnite, TeamSnap, Shipyard, Parallel Path): CAMPAIGN_PERFORMANCE_REPORT_DAILY_STATS
 - ViacomCBS: QRM_ALL_VISITS_V3 (web) + XANDR_IMPRESSION_LOG (impressions)
+
+Note: ViacomCBS ZIP impressions remain 0 (FreeWheel doesn't provide DMA-level data)
 
 Deployment: Railway (github.com/ezrakd/quorum-optimizer)
 """
@@ -103,7 +107,7 @@ def health_check():
         return jsonify({
             'success': True, 
             'status': 'healthy', 
-            'version': '3.5',
+            'version': '3.6',
             'agencies_supported': 13,
             'class_a': CLASS_A_AGENCIES,
             'class_b': CLASS_B_AGENCIES,
@@ -307,40 +311,20 @@ def get_advertiser_summary_unified():
         LEFT JOIN impressions i ON v.CAMPAIGN_ID = i.CAMPAIGN_ID
         """
     elif agency_class == 'B':
-        # Class B: QuorumAdvImpMapping-based impression join
+        # Class B: Use CAMPAIGN_PERFORMANCE_REPORT_DAILY_STATS (has impressions pre-aggregated)
         query = """
-        WITH visits AS (
-            SELECT 
-                COUNT(DISTINCT CONCAT(cp.DEVICE_ID, cp.DRIVE_BY_DATE, cp.POI_MD5)) as S_VISITS,
-                COUNT(DISTINCT cp.DEVICE_ID) as UNIQUE_VISITORS
-            FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW cp
-            WHERE cp.ADVERTISER_ID = %(advertiser_id)s
-              AND cp.DRIVE_BY_DATE >= %(start_date)s AND cp.DRIVE_BY_DATE <= %(end_date)s
-        ),
-        io_mapping AS (
-            SELECT DISTINCT IO_ID
-            FROM QUORUMDB.SEGMENT_DATA."QuorumAdvImpMapping"
-            WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s AND IO_ID IS NOT NULL AND IO_ID != 0
-        ),
-        impressions AS (
-            SELECT COUNT(*) as IMPRESSIONS
-            FROM io_mapping m
-            JOIN QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG x ON m.IO_ID = x.IO_ID
-            WHERE x.AGENCY_ID = %(agency_id)s
-              AND CAST(x.TIMESTAMP AS DATE) >= %(start_date)s 
-              AND CAST(x.TIMESTAMP AS DATE) <= %(end_date)s
-        )
         SELECT 
-            COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS,
-            v.S_VISITS,
+            COALESCE(SUM(IMPRESSIONS), 0) as IMPRESSIONS,
+            COALESCE(SUM(VISITORS), 0) as S_VISITS,
             0 as W_VISITS,
-            v.UNIQUE_VISITORS,
-            CASE WHEN COALESCE(i.IMPRESSIONS, 0) > 0 
-                 THEN ROUND((v.S_VISITS::FLOAT / i.IMPRESSIONS) * 100, 4) ELSE 0 END as VISIT_RATE,
-            CASE WHEN i.IMPRESSIONS > 0 THEN 'MAPPED' ELSE 'UNMAPPED' END as DATA_TIER,
+            0 as UNIQUE_VISITORS,
+            CASE WHEN COALESCE(SUM(IMPRESSIONS), 0) > 0 
+                 THEN ROUND((SUM(VISITORS)::FLOAT / SUM(IMPRESSIONS)) * 100, 4) ELSE 0 END as VISIT_RATE,
+            'DAILY_STATS' as DATA_TIER,
             'STORE' as VISIT_TYPE
-        FROM visits v
-        CROSS JOIN impressions i
+        FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_DAILY_STATS
+        WHERE ADVERTISER_ID = %(advertiser_id)s
+          AND LOG_DATE >= %(start_date)s AND LOG_DATE <= %(end_date)s
         """
     elif agency_class == 'VIACOM':
         # ViacomCBS: Web visits from QRM with impressions from XANDR (v3.5)
@@ -413,7 +397,7 @@ def get_campaign_performance_unified():
     agency_class = get_agency_class(agency_id)
     
     if agency_class == 'B':
-        # Class B: Use aggregate stats table
+        # Class B: Use aggregate stats table (ADVERTISER_ID is unique, no need for AGENCY_ID filter)
         query = """
         SELECT 
             IO_ID::NUMBER as CAMPAIGN_ID,
@@ -424,7 +408,6 @@ def get_campaign_performance_unified():
                  THEN ROUND((SUM(VISITORS)::FLOAT / SUM(IMPRESSIONS)) * 100, 4) ELSE 0 END as VISIT_RATE
         FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_DAILY_STATS
         WHERE ADVERTISER_ID = %(advertiser_id)s
-          AND AGENCY_ID = %(agency_id)s
           AND LOG_DATE >= %(start_date)s AND LOG_DATE <= %(end_date)s
           AND IO_ID IS NOT NULL
         GROUP BY IO_ID
@@ -637,43 +620,79 @@ def get_zip_performance_unified():
     
     if agency_class == 'A':
         query = """
+        WITH zip_visits AS (
+            SELECT 
+                mca.ZIP_CODE, 
+                zdm.DMA_NAME,
+                COUNT(*) as S_VISITS, 
+                COUNT(DISTINCT v.MAID) as UNIQUE_VISITORS,
+                MAX(mca.ZIP_POPULATION) as ZIP_POPULATION
+            FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
+            JOIN QUORUM_CROSS_CLOUD.ATTAIN_FEED.MAID_CENTROID_ASSOCIATION mca 
+                ON LOWER(v.MAID) = LOWER(mca.DEVICE_ID)
+            LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING zdm ON mca.ZIP_CODE = zdm.ZIP_CODE
+            WHERE v.QUORUM_ADVERTISER_ID = %(advertiser_id)s
+              AND v.CONVERSION_DATE >= %(start_date)s AND v.CONVERSION_DATE <= %(end_date)s
+              AND v.VISIT_TYPE = 'STORE'
+            GROUP BY mca.ZIP_CODE, zdm.DMA_NAME
+            HAVING COUNT(*) >= %(min_visits)s
+        ),
+        dma_impressions AS (
+            SELECT DMA, SUM(IMPRESSIONS) as DMA_IMPS
+            FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_DAILY_STATS
+            WHERE ADVERTISER_ID = %(advertiser_id)s
+              AND LOG_DATE >= %(start_date)s AND LOG_DATE <= %(end_date)s
+              AND DMA IS NOT NULL AND DMA != ''
+            GROUP BY DMA
+        )
         SELECT 
-            mca.ZIP_CODE, 
-            zdm.DMA_NAME,
-            COUNT(*) as S_VISITS, 
-            COUNT(DISTINCT v.MAID) as UNIQUE_VISITORS,
-            MAX(mca.ZIP_POPULATION) as ZIP_POPULATION,
-            0 as IMPRESSIONS
-        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
-        JOIN QUORUM_CROSS_CLOUD.ATTAIN_FEED.MAID_CENTROID_ASSOCIATION mca 
-            ON LOWER(v.MAID) = LOWER(mca.DEVICE_ID)
-        LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING zdm ON mca.ZIP_CODE = zdm.ZIP_CODE
-        WHERE v.QUORUM_ADVERTISER_ID = %(advertiser_id)s
-          AND v.CONVERSION_DATE >= %(start_date)s AND v.CONVERSION_DATE <= %(end_date)s
-          AND v.VISIT_TYPE = 'STORE'
-        GROUP BY mca.ZIP_CODE, zdm.DMA_NAME
-        HAVING COUNT(*) >= %(min_visits)s
-        ORDER BY S_VISITS DESC
+            zv.ZIP_CODE,
+            zv.DMA_NAME,
+            zv.S_VISITS,
+            zv.UNIQUE_VISITORS,
+            zv.ZIP_POPULATION,
+            COALESCE(di.DMA_IMPS, 0) as IMPRESSIONS
+        FROM zip_visits zv
+        LEFT JOIN dma_impressions di ON UPPER(zv.DMA_NAME) = UPPER(di.DMA)
+        ORDER BY zv.S_VISITS DESC
         LIMIT 500
         """
     elif agency_class == 'B':
         query = """
+        WITH zip_visits AS (
+            SELECT 
+                mca.ZIP_CODE, 
+                zdm.DMA_NAME,
+                COUNT(DISTINCT CONCAT(cp.DEVICE_ID, cp.DRIVE_BY_DATE, cp.POI_MD5)) as S_VISITS,
+                COUNT(DISTINCT cp.DEVICE_ID) as UNIQUE_VISITORS,
+                MAX(mca.ZIP_POPULATION) as ZIP_POPULATION
+            FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW cp
+            JOIN QUORUM_CROSS_CLOUD.ATTAIN_FEED.MAID_CENTROID_ASSOCIATION mca 
+                ON LOWER(cp.DEVICE_ID) = LOWER(mca.DEVICE_ID)
+            LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING zdm ON mca.ZIP_CODE = zdm.ZIP_CODE
+            WHERE cp.ADVERTISER_ID = %(advertiser_id)s
+              AND cp.DRIVE_BY_DATE >= %(start_date)s AND cp.DRIVE_BY_DATE <= %(end_date)s
+            GROUP BY mca.ZIP_CODE, zdm.DMA_NAME
+            HAVING COUNT(DISTINCT CONCAT(cp.DEVICE_ID, cp.DRIVE_BY_DATE, cp.POI_MD5)) >= %(min_visits)s
+        ),
+        dma_impressions AS (
+            SELECT DMA, SUM(IMPRESSIONS) as DMA_IMPS
+            FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_DAILY_STATS
+            WHERE ADVERTISER_ID = %(advertiser_id)s
+              AND LOG_DATE >= %(start_date)s AND LOG_DATE <= %(end_date)s
+              AND DMA IS NOT NULL AND DMA != ''
+            GROUP BY DMA
+        )
         SELECT 
-            mca.ZIP_CODE, 
-            zdm.DMA_NAME,
-            COUNT(DISTINCT CONCAT(cp.DEVICE_ID, cp.DRIVE_BY_DATE, cp.POI_MD5)) as S_VISITS,
-            COUNT(DISTINCT cp.DEVICE_ID) as UNIQUE_VISITORS,
-            MAX(mca.ZIP_POPULATION) as ZIP_POPULATION,
-            0 as IMPRESSIONS
-        FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW cp
-        JOIN QUORUM_CROSS_CLOUD.ATTAIN_FEED.MAID_CENTROID_ASSOCIATION mca 
-            ON LOWER(cp.DEVICE_ID) = LOWER(mca.DEVICE_ID)
-        LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING zdm ON mca.ZIP_CODE = zdm.ZIP_CODE
-        WHERE cp.ADVERTISER_ID = %(advertiser_id)s
-          AND cp.DRIVE_BY_DATE >= %(start_date)s AND cp.DRIVE_BY_DATE <= %(end_date)s
-        GROUP BY mca.ZIP_CODE, zdm.DMA_NAME
-        HAVING S_VISITS >= %(min_visits)s
-        ORDER BY S_VISITS DESC
+            zv.ZIP_CODE,
+            zv.DMA_NAME,
+            zv.S_VISITS,
+            zv.UNIQUE_VISITORS,
+            zv.ZIP_POPULATION,
+            COALESCE(di.DMA_IMPS, 0) as IMPRESSIONS
+        FROM zip_visits zv
+        LEFT JOIN dma_impressions di ON UPPER(zv.DMA_NAME) = UPPER(di.DMA)
+        ORDER BY zv.S_VISITS DESC
         LIMIT 500
         """
     else:  # VIACOM - using MAID from QRM (v3.5)
