@@ -356,50 +356,29 @@ def get_global_advertiser_overview():
 
 @app.route('/api/v3/agencies', methods=['GET'])
 def get_all_agencies():
-    """Get agencies for sidebar - uses pre-aggregated data for speed, counts only configured advertisers with visits"""
+    """Get agencies for sidebar - uses pre-aggregated data for speed, counts only advertisers with visits"""
     start_date, end_date = get_date_params(request)
     
-    # For ViacomCBS (1480), we need to filter to only configured advertisers
-    # Other agencies: filter to those with actual visits
+    # Simple query - just filter to advertisers with visits
     query = """
-    WITH configured_advertisers AS (
-        -- ViacomCBS: Only advertisers in PARAMOUNT_URL_MAPPING (configured for reporting)
-        SELECT DISTINCT ADVERTISER_ID 
-        FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_URL_MAPPING
-    ),
-    advertiser_visits AS (
-        SELECT 
-            d.AGENCY_ID,
-            d.AGENCY_NAME,
-            d.ADVERTISER_ID,
-            SUM(d.TEST_VISITORS) as S_VISITS,
-            SUM(COALESCE(d.SITE_VISITS, 0)) as W_VISITS
-        FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING d
-        WHERE d.LOG_DATE >= %(start_date)s AND d.LOG_DATE <= %(end_date)s
-        GROUP BY d.AGENCY_ID, d.AGENCY_NAME, d.ADVERTISER_ID
-        HAVING SUM(d.TEST_VISITORS) > 0 OR SUM(COALESCE(d.SITE_VISITS, 0)) > 0
-    ),
-    filtered_advertisers AS (
-        SELECT 
-            av.AGENCY_ID,
-            av.AGENCY_NAME,
-            av.ADVERTISER_ID,
-            av.S_VISITS,
-            av.W_VISITS
-        FROM advertiser_visits av
-        WHERE 
-            -- For ViacomCBS (1480): only include configured advertisers
-            (av.AGENCY_ID = 1480 AND av.ADVERTISER_ID IN (SELECT ADVERTISER_ID FROM configured_advertisers))
-            -- For all other agencies: include all with visits
-            OR av.AGENCY_ID != 1480
-    )
     SELECT 
         AGENCY_ID,
         AGENCY_NAME,
         COUNT(DISTINCT ADVERTISER_ID) as ADVERTISER_COUNT,
         SUM(S_VISITS) as S_VISITS,
         SUM(W_VISITS) as W_VISITS
-    FROM filtered_advertisers
+    FROM (
+        SELECT 
+            AGENCY_ID,
+            AGENCY_NAME,
+            ADVERTISER_ID,
+            SUM(TEST_VISITORS) as S_VISITS,
+            SUM(COALESCE(SITE_VISITS, 0)) as W_VISITS
+        FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
+        WHERE LOG_DATE >= %(start_date)s AND LOG_DATE <= %(end_date)s
+        GROUP BY AGENCY_ID, AGENCY_NAME, ADVERTISER_ID
+        HAVING SUM(TEST_VISITORS) > 0 OR SUM(COALESCE(SITE_VISITS, 0)) > 0
+    ) sub
     GROUP BY AGENCY_ID, AGENCY_NAME
     ORDER BY (SUM(S_VISITS) + SUM(W_VISITS)) DESC
     """
