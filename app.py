@@ -154,33 +154,62 @@ def get_agency_overview():
 
 @app.route('/api/v3/advertiser-overview', methods=['GET'])
 def get_advertiser_overview():
-    """Cross-advertiser overview for a specific agency using pre-aggregated data"""
+    """Cross-advertiser overview for a specific agency using pre-aggregated data, only configured advertisers with visits"""
     agency_id = request.args.get('agency_id')
     start_date, end_date = get_date_params(request)
     
     if not agency_id:
         return jsonify({'success': False, 'error': 'agency_id required'}), 400
     
-    query = """
-    SELECT 
-        ADVERTISER_ID,
-        ADVERTISER_NAME,
-        SUM(IMPRESSIONS) as IMPRESSIONS,
-        SUM(TEST_VISITORS) as LOCATION_VISITS,
-        SUM(COALESCE(SITE_VISITS, 0)) as WEB_VISITS,
-        0 as WEB_TRAFFIC,
-        CASE WHEN SUM(IMPRESSIONS) > 0 
-             THEN SUM(TEST_VISITORS)::FLOAT / SUM(IMPRESSIONS) ELSE 0 END as LOCATION_VR,
-        CASE WHEN SUM(IMPRESSIONS) > 0 
-             THEN (SUM(TEST_VISITORS) + SUM(COALESCE(SITE_VISITS, 0)))::FLOAT / SUM(IMPRESSIONS) ELSE 0 END as VISIT_RATE,
-        CASE WHEN SUM(IMPRESSIONS) > 0 AND SUM(COALESCE(SITE_VISITS, 0)) > 0
-             THEN (SUM(COALESCE(SITE_VISITS, 0))::FLOAT / SUM(IMPRESSIONS)) * 100 ELSE 0 END as WEB_CONTRIBUTION
-    FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
-    WHERE AGENCY_ID = %(agency_id)s
-      AND LOG_DATE >= %(start_date)s AND LOG_DATE <= %(end_date)s
-    GROUP BY ADVERTISER_ID, ADVERTISER_NAME
-    ORDER BY IMPRESSIONS DESC
-    """
+    # For ViacomCBS (1480), filter to only configured advertisers in PARAMOUNT_URL_MAPPING
+    if int(agency_id) == 1480:
+        query = """
+        SELECT 
+            d.ADVERTISER_ID,
+            d.ADVERTISER_NAME,
+            SUM(d.IMPRESSIONS) as IMPRESSIONS,
+            SUM(d.TEST_VISITORS) as LOCATION_VISITS,
+            SUM(COALESCE(d.SITE_VISITS, 0)) as WEB_VISITS,
+            0 as WEB_TRAFFIC,
+            CASE WHEN SUM(d.IMPRESSIONS) > 0 
+                 THEN SUM(d.TEST_VISITORS)::FLOAT / SUM(d.IMPRESSIONS) ELSE 0 END as LOCATION_VR,
+            CASE WHEN SUM(d.IMPRESSIONS) > 0 
+                 THEN (SUM(d.TEST_VISITORS) + SUM(COALESCE(d.SITE_VISITS, 0)))::FLOAT / SUM(d.IMPRESSIONS) ELSE 0 END as VISIT_RATE,
+            CASE WHEN SUM(d.IMPRESSIONS) > 0 AND SUM(COALESCE(d.SITE_VISITS, 0)) > 0
+                 THEN (SUM(COALESCE(d.SITE_VISITS, 0))::FLOAT / SUM(d.IMPRESSIONS)) * 100 ELSE 0 END as WEB_CONTRIBUTION
+        FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING d
+        WHERE d.AGENCY_ID = %(agency_id)s
+          AND d.LOG_DATE >= %(start_date)s AND d.LOG_DATE <= %(end_date)s
+          AND d.ADVERTISER_ID IN (
+              SELECT ADVERTISER_ID FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_URL_MAPPING
+          )
+        GROUP BY d.ADVERTISER_ID, d.ADVERTISER_NAME
+        HAVING SUM(d.TEST_VISITORS) > 0 OR SUM(COALESCE(d.SITE_VISITS, 0)) > 0
+        ORDER BY IMPRESSIONS DESC
+        """
+    else:
+        # All other agencies: just filter to those with visits
+        query = """
+        SELECT 
+            ADVERTISER_ID,
+            ADVERTISER_NAME,
+            SUM(IMPRESSIONS) as IMPRESSIONS,
+            SUM(TEST_VISITORS) as LOCATION_VISITS,
+            SUM(COALESCE(SITE_VISITS, 0)) as WEB_VISITS,
+            0 as WEB_TRAFFIC,
+            CASE WHEN SUM(IMPRESSIONS) > 0 
+                 THEN SUM(TEST_VISITORS)::FLOAT / SUM(IMPRESSIONS) ELSE 0 END as LOCATION_VR,
+            CASE WHEN SUM(IMPRESSIONS) > 0 
+                 THEN (SUM(TEST_VISITORS) + SUM(COALESCE(SITE_VISITS, 0)))::FLOAT / SUM(IMPRESSIONS) ELSE 0 END as VISIT_RATE,
+            CASE WHEN SUM(IMPRESSIONS) > 0 AND SUM(COALESCE(SITE_VISITS, 0)) > 0
+                 THEN (SUM(COALESCE(SITE_VISITS, 0))::FLOAT / SUM(IMPRESSIONS)) * 100 ELSE 0 END as WEB_CONTRIBUTION
+        FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
+        WHERE AGENCY_ID = %(agency_id)s
+          AND LOG_DATE >= %(start_date)s AND LOG_DATE <= %(end_date)s
+        GROUP BY ADVERTISER_ID, ADVERTISER_NAME
+        HAVING SUM(TEST_VISITORS) > 0 OR SUM(COALESCE(SITE_VISITS, 0)) > 0
+        ORDER BY IMPRESSIONS DESC
+        """
     
     try:
         results = execute_query(query, {'agency_id': int(agency_id), 'start_date': start_date, 'end_date': end_date})
@@ -327,19 +356,53 @@ def get_global_advertiser_overview():
 
 @app.route('/api/v3/agencies', methods=['GET'])
 def get_all_agencies():
-    """Get agencies for sidebar - uses pre-aggregated data for speed"""
+    """Get agencies for sidebar - uses pre-aggregated data for speed, counts only configured advertisers with visits"""
     start_date, end_date = get_date_params(request)
+    
+    # For ViacomCBS (1480), we need to filter to only configured advertisers
+    # Other agencies: filter to those with actual visits
     query = """
+    WITH configured_advertisers AS (
+        -- ViacomCBS: Only advertisers in PARAMOUNT_URL_MAPPING (configured for reporting)
+        SELECT DISTINCT ADVERTISER_ID 
+        FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_URL_MAPPING
+    ),
+    advertiser_visits AS (
+        SELECT 
+            d.AGENCY_ID,
+            d.AGENCY_NAME,
+            d.ADVERTISER_ID,
+            SUM(d.TEST_VISITORS) as S_VISITS,
+            SUM(COALESCE(d.SITE_VISITS, 0)) as W_VISITS
+        FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING d
+        WHERE d.LOG_DATE >= %(start_date)s AND d.LOG_DATE <= %(end_date)s
+          AND (SUM(d.TEST_VISITORS) > 0 OR SUM(COALESCE(d.SITE_VISITS, 0)) > 0)
+        GROUP BY d.AGENCY_ID, d.AGENCY_NAME, d.ADVERTISER_ID
+        HAVING SUM(d.TEST_VISITORS) > 0 OR SUM(COALESCE(d.SITE_VISITS, 0)) > 0
+    ),
+    filtered_advertisers AS (
+        SELECT 
+            av.AGENCY_ID,
+            av.AGENCY_NAME,
+            av.ADVERTISER_ID,
+            av.S_VISITS,
+            av.W_VISITS
+        FROM advertiser_visits av
+        WHERE 
+            -- For ViacomCBS (1480): only include configured advertisers
+            (av.AGENCY_ID = 1480 AND av.ADVERTISER_ID IN (SELECT ADVERTISER_ID FROM configured_advertisers))
+            -- For all other agencies: include all with visits
+            OR av.AGENCY_ID != 1480
+    )
     SELECT 
         AGENCY_ID,
         AGENCY_NAME,
         COUNT(DISTINCT ADVERTISER_ID) as ADVERTISER_COUNT,
-        SUM(TEST_VISITORS) as S_VISITS,
-        SUM(COALESCE(SITE_VISITS, 0)) as W_VISITS
-    FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
-    WHERE LOG_DATE >= %(start_date)s AND LOG_DATE <= %(end_date)s
+        SUM(S_VISITS) as S_VISITS,
+        SUM(W_VISITS) as W_VISITS
+    FROM filtered_advertisers
     GROUP BY AGENCY_ID, AGENCY_NAME
-    ORDER BY (SUM(TEST_VISITORS) + SUM(COALESCE(SITE_VISITS, 0))) DESC
+    ORDER BY (SUM(S_VISITS) + SUM(W_VISITS)) DESC
     """
     try:
         results = execute_query(query, {'start_date': start_date, 'end_date': end_date})
@@ -351,24 +414,46 @@ def get_all_agencies():
 
 @app.route('/api/v3/advertisers', methods=['GET'])
 def get_advertisers_unified():
-    """Get advertisers for sidebar - uses pre-aggregated data for speed"""
+    """Get advertisers for sidebar - uses pre-aggregated data for speed, only configured advertisers with visits"""
     agency_id = request.args.get('agency_id')
     start_date, end_date = get_date_params(request)
     if not agency_id:
         return jsonify({'success': False, 'error': 'agency_id required'}), 400
     
-    query = """
-    SELECT 
-        ADVERTISER_ID,
-        ADVERTISER_NAME,
-        SUM(TEST_VISITORS) as S_VISITS,
-        SUM(COALESCE(SITE_VISITS, 0)) as W_VISITS
-    FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
-    WHERE AGENCY_ID = %(agency_id)s
-      AND LOG_DATE >= %(start_date)s AND LOG_DATE <= %(end_date)s
-    GROUP BY ADVERTISER_ID, ADVERTISER_NAME
-    ORDER BY (SUM(TEST_VISITORS) + SUM(COALESCE(SITE_VISITS, 0))) DESC
-    """
+    # For ViacomCBS (1480), filter to only configured advertisers in PARAMOUNT_URL_MAPPING
+    if int(agency_id) == 1480:
+        query = """
+        SELECT 
+            d.ADVERTISER_ID,
+            d.ADVERTISER_NAME,
+            SUM(d.TEST_VISITORS) as S_VISITS,
+            SUM(COALESCE(d.SITE_VISITS, 0)) as W_VISITS
+        FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING d
+        WHERE d.AGENCY_ID = %(agency_id)s
+          AND d.LOG_DATE >= %(start_date)s AND d.LOG_DATE <= %(end_date)s
+          AND d.ADVERTISER_ID IN (
+              SELECT ADVERTISER_ID FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_URL_MAPPING
+          )
+        GROUP BY d.ADVERTISER_ID, d.ADVERTISER_NAME
+        HAVING SUM(d.TEST_VISITORS) > 0 OR SUM(COALESCE(d.SITE_VISITS, 0)) > 0
+        ORDER BY (SUM(d.TEST_VISITORS) + SUM(COALESCE(d.SITE_VISITS, 0))) DESC
+        """
+    else:
+        # All other agencies: just filter to those with visits
+        query = """
+        SELECT 
+            ADVERTISER_ID,
+            ADVERTISER_NAME,
+            SUM(TEST_VISITORS) as S_VISITS,
+            SUM(COALESCE(SITE_VISITS, 0)) as W_VISITS
+        FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
+        WHERE AGENCY_ID = %(agency_id)s
+          AND LOG_DATE >= %(start_date)s AND LOG_DATE <= %(end_date)s
+        GROUP BY ADVERTISER_ID, ADVERTISER_NAME
+        HAVING SUM(TEST_VISITORS) > 0 OR SUM(COALESCE(SITE_VISITS, 0)) > 0
+        ORDER BY (SUM(TEST_VISITORS) + SUM(COALESCE(SITE_VISITS, 0))) DESC
+        """
+    
     try:
         results = execute_query(query, {'agency_id': int(agency_id), 'start_date': start_date, 'end_date': end_date})
         return jsonify({'success': True, 'data': results, 'agency_id': int(agency_id), 'total_advertisers': len(results)})
