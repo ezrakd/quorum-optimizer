@@ -586,15 +586,20 @@ def get_zip_performance_unified():
     if agency_class == 'A':
         query = """
         SELECT 
-            mca.ZIP_CODE, COUNT(*) as S_VISITS, COUNT(DISTINCT v.MAID) as UNIQUE_VISITORS,
-            MAX(mca.ZIP_POPULATION) as ZIP_POPULATION
+            mca.ZIP_CODE, 
+            zdm.DMA_NAME,
+            COUNT(*) as S_VISITS, 
+            COUNT(DISTINCT v.MAID) as UNIQUE_VISITORS,
+            MAX(mca.ZIP_POPULATION) as ZIP_POPULATION,
+            0 as IMPRESSIONS
         FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
         JOIN QUORUM_CROSS_CLOUD.ATTAIN_FEED.MAID_CENTROID_ASSOCIATION mca 
             ON LOWER(v.MAID) = LOWER(mca.DEVICE_ID)
+        LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING zdm ON mca.ZIP_CODE = zdm.ZIP_CODE
         WHERE v.QUORUM_ADVERTISER_ID = %(advertiser_id)s
           AND v.CONVERSION_DATE >= %(start_date)s AND v.CONVERSION_DATE <= %(end_date)s
           AND v.VISIT_TYPE = 'STORE'
-        GROUP BY mca.ZIP_CODE
+        GROUP BY mca.ZIP_CODE, zdm.DMA_NAME
         HAVING COUNT(*) >= %(min_visits)s
         ORDER BY S_VISITS DESC
         LIMIT 500
@@ -603,15 +608,18 @@ def get_zip_performance_unified():
         query = """
         SELECT 
             mca.ZIP_CODE, 
+            zdm.DMA_NAME,
             COUNT(DISTINCT CONCAT(cp.DEVICE_ID, cp.DRIVE_BY_DATE, cp.POI_MD5)) as S_VISITS,
             COUNT(DISTINCT cp.DEVICE_ID) as UNIQUE_VISITORS,
-            MAX(mca.ZIP_POPULATION) as ZIP_POPULATION
+            MAX(mca.ZIP_POPULATION) as ZIP_POPULATION,
+            0 as IMPRESSIONS
         FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW cp
         JOIN QUORUM_CROSS_CLOUD.ATTAIN_FEED.MAID_CENTROID_ASSOCIATION mca 
             ON LOWER(cp.DEVICE_ID) = LOWER(mca.DEVICE_ID)
+        LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING zdm ON mca.ZIP_CODE = zdm.ZIP_CODE
         WHERE cp.ADVERTISER_ID = %(advertiser_id)s
           AND cp.DRIVE_BY_DATE >= %(start_date)s AND cp.DRIVE_BY_DATE <= %(end_date)s
-        GROUP BY mca.ZIP_CODE
+        GROUP BY mca.ZIP_CODE, zdm.DMA_NAME
         HAVING S_VISITS >= %(min_visits)s
         ORDER BY S_VISITS DESC
         LIMIT 500
@@ -620,6 +628,7 @@ def get_zip_performance_unified():
         query = """
         SELECT 
             mca.ZIP_CODE, 
+            zdm.DMA_NAME,
             COUNT(*) as W_VISITS, 
             COUNT(*) as S_VISITS,
             COUNT(DISTINCT v.MAID) as UNIQUE_VISITORS,
@@ -628,10 +637,11 @@ def get_zip_performance_unified():
         FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V3 v
         JOIN QUORUM_CROSS_CLOUD.ATTAIN_FEED.MAID_CENTROID_ASSOCIATION mca 
             ON LOWER(v.MAID) = LOWER(mca.DEVICE_ID)
+        LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING zdm ON mca.ZIP_CODE = zdm.ZIP_CODE
         WHERE v.QUORUM_ADVERTISER_ID = %(advertiser_id)s
           AND v.CONVERSION_DATE >= %(start_date)s AND v.CONVERSION_DATE <= %(end_date)s
           AND v.VISIT_TYPE = 'WEB'
-        GROUP BY mca.ZIP_CODE
+        GROUP BY mca.ZIP_CODE, zdm.DMA_NAME
         HAVING COUNT(*) >= %(min_visits)s
         ORDER BY W_VISITS DESC
         LIMIT 500
