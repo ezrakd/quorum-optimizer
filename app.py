@@ -356,31 +356,37 @@ def get_global_advertiser_overview():
 
 @app.route('/api/v3/agencies', methods=['GET'])
 def get_all_agencies():
-    """Get agencies for sidebar - uses pre-aggregated data for speed, counts only advertisers with visits"""
+    """Get agencies for sidebar - uses pre-aggregated data for speed, counts only configured advertisers with visits"""
     start_date, end_date = get_date_params(request)
     
-    # Simple query - just filter to advertisers with visits
+    # For ViacomCBS, filter to only PARAMOUNT_URL_MAPPING configured advertisers
     query = """
     SELECT 
         AGENCY_ID,
         AGENCY_NAME,
         COUNT(DISTINCT ADVERTISER_ID) as ADVERTISER_COUNT,
-        SUM(S_VISITS) as S_VISITS,
-        SUM(W_VISITS) as W_VISITS
+        SUM(ADV_S_VISITS) as S_VISITS,
+        SUM(ADV_W_VISITS) as W_VISITS
     FROM (
         SELECT 
-            AGENCY_ID,
-            AGENCY_NAME,
-            ADVERTISER_ID,
-            SUM(TEST_VISITORS) as S_VISITS,
-            SUM(COALESCE(SITE_VISITS, 0)) as W_VISITS
-        FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
-        WHERE LOG_DATE >= %(start_date)s AND LOG_DATE <= %(end_date)s
-        GROUP BY AGENCY_ID, AGENCY_NAME, ADVERTISER_ID
-        HAVING SUM(TEST_VISITORS) > 0 OR SUM(COALESCE(SITE_VISITS, 0)) > 0
+            d.AGENCY_ID,
+            d.AGENCY_NAME,
+            d.ADVERTISER_ID,
+            SUM(d.TEST_VISITORS) as ADV_S_VISITS,
+            SUM(COALESCE(d.SITE_VISITS, 0)) as ADV_W_VISITS
+        FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING d
+        WHERE d.LOG_DATE >= %(start_date)s AND d.LOG_DATE <= %(end_date)s
+          AND (
+              -- For ViacomCBS (1480): only configured advertisers
+              (d.AGENCY_ID = 1480 AND d.ADVERTISER_ID IN (SELECT ADVERTISER_ID FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_URL_MAPPING))
+              -- For all other agencies: include all
+              OR d.AGENCY_ID != 1480
+          )
+        GROUP BY d.AGENCY_ID, d.AGENCY_NAME, d.ADVERTISER_ID
+        HAVING SUM(d.TEST_VISITORS) > 0 OR SUM(COALESCE(d.SITE_VISITS, 0)) > 0
     ) sub
     GROUP BY AGENCY_ID, AGENCY_NAME
-    ORDER BY (SUM(S_VISITS) + SUM(W_VISITS)) DESC
+    ORDER BY S_VISITS + W_VISITS DESC
     """
     try:
         results = execute_query(query, {'start_date': start_date, 'end_date': end_date})
