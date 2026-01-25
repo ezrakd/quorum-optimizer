@@ -1147,6 +1147,214 @@ def zip_compat():
 def creative_compat():
     return get_creative_performance_v5()
 
+# Overview endpoint compatibility
+@app.route('/api/v3/agency-overview', methods=['GET'])
+@app.route('/api/v4/agency-overview', methods=['GET'])
+def agency_overview_compat():
+    return get_agency_overview_v5()
+
+@app.route('/api/v3/advertiser-overview', methods=['GET'])
+@app.route('/api/v4/advertiser-overview', methods=['GET'])
+def advertiser_overview_compat():
+    return get_advertiser_overview_v5()
+
+@app.route('/api/v3/impressions-timeseries', methods=['GET'])
+@app.route('/api/v4/impressions-timeseries', methods=['GET'])
+def impressions_timeseries_compat():
+    return get_impressions_timeseries_v5()
+
+@app.route('/api/v3/advertiser-timeseries', methods=['GET'])
+@app.route('/api/v4/advertiser-timeseries', methods=['GET'])
+def advertiser_timeseries_compat():
+    return get_impressions_timeseries_v5()
+
+@app.route('/api/v3/global-advertiser-overview', methods=['GET'])
+@app.route('/api/v4/global-advertiser-overview', methods=['GET'])
+def global_advertiser_overview_compat():
+    """Get all advertisers across all agencies"""
+    try:
+        conn = get_snowflake_connection()
+        cursor = conn.cursor()
+        
+        query = """
+            SELECT 
+                AGENCY_ID,
+                AGENCY_NAME,
+                ADVERTISER_ID,
+                ADVERTISER_NAME,
+                SUM(IMPRESSIONS) as IMPRESSIONS,
+                SUM(COALESCE(SITE_VISITS, 0)) as WEB_VISITS,
+                SUM(COALESCE(TEST_VISITORS, 0)) as LOCATION_VISITS
+            FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
+            WHERE LOG_DATE >= DATEADD(day, -90, CURRENT_DATE())
+            GROUP BY AGENCY_ID, AGENCY_NAME, ADVERTISER_ID, ADVERTISER_NAME
+            ORDER BY IMPRESSIONS DESC
+            LIMIT 200
+        """
+        
+        cursor.execute(query)
+        columns = [desc[0] for desc in cursor.description]
+        results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        
+        cursor.close()
+        conn.close()
+        
+        return jsonify({'success': True, 'data': results})
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# ============================================================================
+# OVERVIEW ENDPOINTS (for dashboard screens)
+# ============================================================================
+
+@app.route('/api/v5/agency-overview', methods=['GET'])
+def get_agency_overview_v5():
+    """Get all agencies with Web Visits, Location Visits, W Visit Rate, L Visit Rate"""
+    try:
+        conn = get_snowflake_connection()
+        cursor = conn.cursor()
+        
+        query = """
+            SELECT 
+                AGENCY_ID,
+                AGENCY_NAME,
+                COUNT(DISTINCT ADVERTISER_ID) as ADVERTISER_COUNT,
+                SUM(IMPRESSIONS) as IMPRESSIONS,
+                SUM(COALESCE(SITE_VISITS, 0)) as WEB_VISITS,
+                SUM(COALESCE(TEST_VISITORS, 0)) as LOCATION_VISITS
+            FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
+            WHERE LOG_DATE >= DATEADD(day, -90, CURRENT_DATE())
+            GROUP BY AGENCY_ID, AGENCY_NAME
+            ORDER BY IMPRESSIONS DESC
+        """
+        
+        cursor.execute(query)
+        columns = [desc[0] for desc in cursor.description]
+        results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        
+        cursor.close()
+        conn.close()
+        
+        return jsonify({'success': True, 'data': results})
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/v5/advertiser-overview', methods=['GET'])
+def get_advertiser_overview_v5():
+    """Get advertisers for an agency with Web Visits, Location Visits, W Visit Rate, L Visit Rate"""
+    agency_id = request.args.get('agency_id', type=int)
+    
+    try:
+        conn = get_snowflake_connection()
+        cursor = conn.cursor()
+        
+        if agency_id:
+            query = """
+                SELECT 
+                    ADVERTISER_ID,
+                    ADVERTISER_NAME,
+                    SUM(IMPRESSIONS) as IMPRESSIONS,
+                    SUM(COALESCE(SITE_VISITS, 0)) as WEB_VISITS,
+                    SUM(COALESCE(TEST_VISITORS, 0)) as LOCATION_VISITS
+                FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
+                WHERE AGENCY_ID = %(agency_id)s
+                  AND LOG_DATE >= DATEADD(day, -90, CURRENT_DATE())
+                GROUP BY ADVERTISER_ID, ADVERTISER_NAME
+                ORDER BY IMPRESSIONS DESC
+            """
+            cursor.execute(query, {'agency_id': agency_id})
+        else:
+            # Global advertiser overview
+            query = """
+                SELECT 
+                    AGENCY_ID,
+                    AGENCY_NAME,
+                    ADVERTISER_ID,
+                    ADVERTISER_NAME,
+                    SUM(IMPRESSIONS) as IMPRESSIONS,
+                    SUM(COALESCE(SITE_VISITS, 0)) as WEB_VISITS,
+                    SUM(COALESCE(TEST_VISITORS, 0)) as LOCATION_VISITS
+                FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
+                WHERE LOG_DATE >= DATEADD(day, -90, CURRENT_DATE())
+                GROUP BY AGENCY_ID, AGENCY_NAME, ADVERTISER_ID, ADVERTISER_NAME
+                ORDER BY IMPRESSIONS DESC
+                LIMIT 100
+            """
+            cursor.execute(query)
+        
+        columns = [desc[0] for desc in cursor.description]
+        results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        
+        cursor.close()
+        conn.close()
+        
+        return jsonify({'success': True, 'data': results})
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/v5/impressions-timeseries', methods=['GET'])
+def get_impressions_timeseries_v5():
+    """Get daily impressions by agency for stacked bar chart"""
+    agency_id = request.args.get('agency_id', type=int)
+    
+    try:
+        conn = get_snowflake_connection()
+        cursor = conn.cursor()
+        
+        if agency_id:
+            # Time series by advertiser for a specific agency
+            query = """
+                WITH ranked AS (
+                    SELECT 
+                        ADVERTISER_ID,
+                        ADVERTISER_NAME,
+                        SUM(IMPRESSIONS) as total_imps,
+                        ROW_NUMBER() OVER (ORDER BY SUM(IMPRESSIONS) DESC) as rn
+                    FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
+                    WHERE AGENCY_ID = %(agency_id)s
+                      AND LOG_DATE >= DATEADD(day, -30, CURRENT_DATE())
+                    GROUP BY ADVERTISER_ID, ADVERTISER_NAME
+                )
+                SELECT 
+                    d.LOG_DATE,
+                    CASE WHEN r.rn <= 10 THEN d.ADVERTISER_NAME ELSE 'Others' END as ENTITY_NAME,
+                    SUM(d.IMPRESSIONS) as IMPRESSIONS
+                FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING d
+                JOIN ranked r ON d.ADVERTISER_ID = r.ADVERTISER_ID
+                WHERE d.AGENCY_ID = %(agency_id)s
+                  AND d.LOG_DATE >= DATEADD(day, -30, CURRENT_DATE())
+                GROUP BY d.LOG_DATE, CASE WHEN r.rn <= 10 THEN d.ADVERTISER_NAME ELSE 'Others' END
+                ORDER BY d.LOG_DATE, SUM(d.IMPRESSIONS) DESC
+            """
+            cursor.execute(query, {'agency_id': agency_id})
+        else:
+            # Time series by agency (global view)
+            query = """
+                SELECT 
+                    LOG_DATE,
+                    AGENCY_NAME as ENTITY_NAME,
+                    SUM(IMPRESSIONS) as IMPRESSIONS
+                FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
+                WHERE LOG_DATE >= DATEADD(day, -30, CURRENT_DATE())
+                GROUP BY LOG_DATE, AGENCY_NAME
+                ORDER BY LOG_DATE, SUM(IMPRESSIONS) DESC
+            """
+            cursor.execute(query)
+        
+        columns = [desc[0] for desc in cursor.description]
+        results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        
+        cursor.close()
+        conn.close()
+        
+        return jsonify({'success': True, 'data': results})
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 # ============================================================================
 # RUN
 # ============================================================================
