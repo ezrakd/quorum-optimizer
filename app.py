@@ -269,11 +269,20 @@ def get_advertisers_v5():
             """
         elif agency_id in CLASS_W_AGENCIES:
             # Class W (ViacomCBS/Paramount) query
+            # Extract CLIENT_IDENTIFIER from ADVERTISER_NAME (e.g., "924962_selfservice_Lean Rx" -> 924962)
             query = """
-                WITH impressions AS (
+                WITH advertiser_mapping AS (
+                    SELECT DISTINCT
+                        QUORUM_ADVERTISER_ID,
+                        ADVERTISER_NAME,
+                        TRY_CAST(SUBSTRING(ADVERTISER_NAME, 1, POSITION('_' IN ADVERTISER_NAME)-1) AS NUMBER) as CLIENT_ID
+                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_MAPPED_IMPRESSIONS
+                    WHERE IMP_DATE >= DATEADD(day, -90, CURRENT_DATE())
+                      AND ADVERTISER_NAME LIKE '%_%'
+                ),
+                impressions AS (
                     SELECT 
-                        CAST(QUORUM_ADVERTISER_ID AS NUMBER) as ADVERTISER_ID,
-                        MAX(ADVERTISER_NAME) as ADVERTISER_NAME,
+                        QUORUM_ADVERTISER_ID,
                         COUNT(*) as IMPRESSIONS,
                         COUNT(DISTINCT IO_ID) as CAMPAIGN_COUNT
                     FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_MAPPED_IMPRESSIONS
@@ -282,7 +291,7 @@ def get_advertisers_v5():
                 ),
                 conversions AS (
                     SELECT 
-                        QUORUM_ADVERTISER_ID as ADVERTISER_ID,
+                        QUORUM_ADVERTISER_ID,
                         COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as SITE_VISITORS,
                         COUNT(DISTINCT CASE WHEN IS_LEAD = 'TRUE' THEN IMP_MAID END) as LEAD_VISITORS,
                         COUNT(DISTINCT CASE WHEN IS_PURCHASE = 'TRUE' THEN IMP_MAID END) as PURCHASERS
@@ -291,16 +300,18 @@ def get_advertisers_v5():
                     GROUP BY QUORUM_ADVERTISER_ID
                 )
                 SELECT 
-                    i.ADVERTISER_ID,
-                    i.ADVERTISER_NAME,
-                    i.IMPRESSIONS,
+                    am.CLIENT_ID as ADVERTISER_ID,
+                    am.ADVERTISER_NAME,
+                    COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS,
                     COALESCE(c.SITE_VISITORS, 0) as STORE_VISITS,
-                    i.CAMPAIGN_COUNT,
+                    COALESCE(i.CAMPAIGN_COUNT, 0) as CAMPAIGN_COUNT,
                     'W' as AGENCY_CLASS
-                FROM impressions i
-                LEFT JOIN conversions c ON i.ADVERTISER_ID = c.ADVERTISER_ID
-                WHERE i.IMPRESSIONS >= 10000
-                ORDER BY i.IMPRESSIONS DESC
+                FROM advertiser_mapping am
+                LEFT JOIN impressions i ON am.QUORUM_ADVERTISER_ID = i.QUORUM_ADVERTISER_ID
+                LEFT JOIN conversions c ON am.QUORUM_ADVERTISER_ID = c.QUORUM_ADVERTISER_ID
+                WHERE am.CLIENT_ID IS NOT NULL
+                  AND COALESCE(i.IMPRESSIONS, 0) >= 10000
+                ORDER BY COALESCE(i.IMPRESSIONS, 0) DESC
             """
         else:
             # Class B query using weekly stats + visits raw
@@ -403,6 +414,17 @@ def get_advertiser_summary_v5():
             
         elif agency_class == 'W':
             # Class W (ViacomCBS/Paramount) query
+            # First, map CLIENT_IDENTIFIER to QUORUM_ADVERTISER_ID
+            lookup_query = f"""
+                SELECT DISTINCT QUORUM_ADVERTISER_ID
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_MAPPED_IMPRESSIONS
+                WHERE ADVERTISER_NAME LIKE '{advertiser_id}_%'
+                LIMIT 1
+            """
+            cursor.execute(lookup_query)
+            result = cursor.fetchone()
+            quorum_adv_id = result[0] if result else str(advertiser_id)
+            
             date_filter = ""
             if start_date and end_date:
                 date_filter = f"AND IMP_DATE BETWEEN '{start_date}' AND '{end_date}'"
@@ -417,7 +439,7 @@ def get_advertiser_summary_v5():
                         COUNT(DISTINCT SITE) as PUBLISHER_COUNT,
                         COUNT(DISTINCT IMP_MAID) as UNIQUE_VISITORS
                     FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_MAPPED_IMPRESSIONS
-                    WHERE QUORUM_ADVERTISER_ID = '{advertiser_id}'
+                    WHERE QUORUM_ADVERTISER_ID = '{quorum_adv_id}'
                       {date_filter}
                 ),
                 conversions AS (
@@ -427,7 +449,7 @@ def get_advertiser_summary_v5():
                         COUNT(DISTINCT CASE WHEN IS_PURCHASE = 'TRUE' THEN IMP_MAID END) as PURCHASERS,
                         COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN ZIP_CODE END) as ZIP_COUNT
                     FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                    WHERE QUORUM_ADVERTISER_ID = {advertiser_id}
+                    WHERE QUORUM_ADVERTISER_ID = {quorum_adv_id}
                       {date_filter}
                 )
                 SELECT 
@@ -558,6 +580,17 @@ def get_campaign_performance_v5():
             
         elif agency_class == 'W':
             # Class W (ViacomCBS/Paramount) query
+            # First, map CLIENT_IDENTIFIER to QUORUM_ADVERTISER_ID
+            lookup_query = f"""
+                SELECT DISTINCT QUORUM_ADVERTISER_ID
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_MAPPED_IMPRESSIONS
+                WHERE ADVERTISER_NAME LIKE '{advertiser_id}_%'
+                LIMIT 1
+            """
+            cursor.execute(lookup_query)
+            result = cursor.fetchone()
+            quorum_adv_id = result[0] if result else str(advertiser_id)
+            
             date_filter = ""
             if start_date and end_date:
                 date_filter = f"AND IMP_DATE BETWEEN '{start_date}' AND '{end_date}'"
@@ -571,7 +604,7 @@ def get_campaign_performance_v5():
                         MAX(IO_NAME) as IO_NAME,
                         COUNT(*) as IMPRESSIONS
                     FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_MAPPED_IMPRESSIONS
-                    WHERE QUORUM_ADVERTISER_ID = '{advertiser_id}'
+                    WHERE QUORUM_ADVERTISER_ID = '{quorum_adv_id}'
                       {date_filter}
                     GROUP BY IO_ID
                 ),
@@ -580,7 +613,7 @@ def get_campaign_performance_v5():
                         IO_ID,
                         COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as SITE_VISITORS
                     FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                    WHERE QUORUM_ADVERTISER_ID = {advertiser_id}
+                    WHERE QUORUM_ADVERTISER_ID = {quorum_adv_id}
                       {date_filter}
                     GROUP BY IO_ID
                 )
@@ -707,6 +740,17 @@ def get_publisher_performance_v5():
             
         elif agency_class == 'W':
             # Class W (ViacomCBS/Paramount) query
+            # First, map CLIENT_IDENTIFIER to QUORUM_ADVERTISER_ID
+            lookup_query = f"""
+                SELECT DISTINCT QUORUM_ADVERTISER_ID
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_MAPPED_IMPRESSIONS
+                WHERE ADVERTISER_NAME LIKE '{advertiser_id}_%'
+                LIMIT 1
+            """
+            cursor.execute(lookup_query)
+            result = cursor.fetchone()
+            quorum_adv_id = result[0] if result else str(advertiser_id)
+            
             date_filter = ""
             if start_date and end_date:
                 date_filter = f"AND IMP_DATE BETWEEN '{start_date}' AND '{end_date}'"
@@ -725,7 +769,7 @@ def get_publisher_performance_v5():
                         SITE as PUBLISHER_CODE,
                         COUNT(*) as IMPRESSIONS
                     FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_MAPPED_IMPRESSIONS
-                    WHERE QUORUM_ADVERTISER_ID = '{advertiser_id}'
+                    WHERE QUORUM_ADVERTISER_ID = '{quorum_adv_id}'
                       {date_filter}
                       {campaign_filter_imps}
                     GROUP BY SITE
@@ -735,7 +779,7 @@ def get_publisher_performance_v5():
                         SITE as PUBLISHER_CODE,
                         COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as SITE_VISITORS
                     FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                    WHERE QUORUM_ADVERTISER_ID = {advertiser_id}
+                    WHERE QUORUM_ADVERTISER_ID = {quorum_adv_id}
                       {date_filter}
                       {campaign_filter_conv}
                     GROUP BY SITE
@@ -888,6 +932,17 @@ def get_zip_performance_v5():
             
         elif agency_class == 'W':
             # Class W (ViacomCBS/Paramount) - ZIP only available in conversions table
+            # First, map CLIENT_IDENTIFIER to QUORUM_ADVERTISER_ID
+            lookup_query = f"""
+                SELECT DISTINCT QUORUM_ADVERTISER_ID
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_MAPPED_IMPRESSIONS
+                WHERE ADVERTISER_NAME LIKE '{advertiser_id}_%'
+                LIMIT 1
+            """
+            cursor.execute(lookup_query)
+            result = cursor.fetchone()
+            quorum_adv_id = result[0] if result else str(advertiser_id)
+            
             date_filter = ""
             if start_date and end_date:
                 date_filter = f"AND IMP_DATE BETWEEN '{start_date}' AND '{end_date}'"
@@ -906,7 +961,7 @@ def get_zip_performance_v5():
                         COUNT(*) as CONVERSION_IMPS,
                         COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as SITE_VISITORS
                     FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                    WHERE QUORUM_ADVERTISER_ID = {advertiser_id}
+                    WHERE QUORUM_ADVERTISER_ID = {quorum_adv_id}
                       AND ZIP_CODE IS NOT NULL AND ZIP_CODE != '' AND ZIP_CODE != '0'
                       {date_filter}
                       {campaign_filter}
