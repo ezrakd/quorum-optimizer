@@ -46,7 +46,8 @@ def get_snowflake_connection():
         account=os.environ.get('SNOWFLAKE_ACCOUNT', 'FZB05958.us-east-1'),
         warehouse=os.environ.get('SNOWFLAKE_WAREHOUSE', 'COMPUTE_WH'),
         database='QUORUMDB',
-        schema='SEGMENT_DATA'
+        schema='SEGMENT_DATA',
+        role=os.environ.get('SNOWFLAKE_ROLE', 'OPTIMIZER_READONLY_ROLE')
     )
 
 # ============================================================================
