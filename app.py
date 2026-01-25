@@ -181,7 +181,7 @@ def get_agencies_v5():
                 1480 as AGENCY_ID,
                 'ViacomCBS / Paramount' as AGENCY_NAME,
                 i.IMPRESSIONS,
-                c.SITE_VISITORS as STORE_VISITS,
+                c.SITE_VISITORS as SITE_VISITS,
                 i.ADVERTISER_COUNT,
                 'W' as AGENCY_CLASS
             FROM impressions i
@@ -303,7 +303,7 @@ def get_advertisers_v5():
                     am.CLIENT_ID as ADVERTISER_ID,
                     am.ADVERTISER_NAME,
                     COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS,
-                    COALESCE(c.SITE_VISITORS, 0) as STORE_VISITS,
+                    COALESCE(c.SITE_VISITORS, 0) as SITE_VISITS,
                     COALESCE(i.CAMPAIGN_COUNT, 0) as CAMPAIGN_COUNT,
                     'W' as AGENCY_CLASS
                 FROM advertiser_mapping am
@@ -454,7 +454,7 @@ def get_advertiser_summary_v5():
                 )
                 SELECT 
                     i.IMPRESSIONS,
-                    COALESCE(c.SITE_VISITORS, 0) as STORE_VISITS,
+                    COALESCE(c.SITE_VISITORS, 0) as SITE_VISITS,
                     i.CAMPAIGN_COUNT,
                     i.PUBLISHER_COUNT,
                     COALESCE(c.ZIP_COUNT, 0) as ZIP_COUNT,
@@ -514,9 +514,9 @@ def get_advertiser_summary_v5():
         
         result = dict(zip(columns, row)) if row else {}
         
-        # Calculate visit rate
+        # Calculate visit rate (handle both SITE_VISITS for web and STORE_VISITS for physical locations)
         imps = result.get('IMPRESSIONS', 0) or 1
-        visits = result.get('STORE_VISITS', 0) or 0
+        visits = result.get('SITE_VISITS', 0) or result.get('STORE_VISITS', 0) or 0
         result['VISIT_RATE'] = round(visits / imps * 100, 4)
         result['VISIT_TYPE'] = visit_type
         result['AGENCY_CLASS'] = agency_class
@@ -621,7 +621,7 @@ def get_campaign_performance_v5():
                     i.IO_ID as CAMPAIGN_ID,
                     i.IO_NAME as CAMPAIGN_NAME,
                     i.IMPRESSIONS,
-                    COALESCE(c.SITE_VISITORS, 0) as S_VISITS
+                    COALESCE(c.SITE_VISITORS, 0) as SITE_VISITS
                 FROM impressions i
                 LEFT JOIN conversions c ON i.IO_ID = c.IO_ID
                 WHERE i.IMPRESSIONS >= 1000
@@ -787,7 +787,7 @@ def get_publisher_performance_v5():
                 SELECT 
                     COALESCE(i.PUBLISHER_CODE, c.PUBLISHER_CODE) as PUBLISHER_CODE,
                     COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS,
-                    COALESCE(c.SITE_VISITORS, 0) as S_VISITS
+                    COALESCE(c.SITE_VISITORS, 0) as SITE_VISITS
                 FROM impressions i
                 FULL OUTER JOIN conversions c ON i.PUBLISHER_CODE = c.PUBLISHER_CODE
                 WHERE COALESCE(i.IMPRESSIONS, 0) >= 100
@@ -972,12 +972,12 @@ def get_zip_performance_v5():
                     SELECT 
                         ZIP_CODE,
                         CONVERSION_IMPS as IMPRESSIONS,
-                        SITE_VISITORS as S_VISITS,
+                        SITE_VISITORS as SITE_VISITS,
                         ROW_NUMBER() OVER (ORDER BY CONVERSION_IMPS DESC) as imp_rank,
                         ROW_NUMBER() OVER (ORDER BY CASE WHEN CONVERSION_IMPS > 0 THEN SITE_VISITORS * 1.0 / CONVERSION_IMPS ELSE 0 END ASC) as low_rate_rank
                     FROM conversions
                 )
-                SELECT ZIP_CODE, IMPRESSIONS, S_VISITS
+                SELECT ZIP_CODE, IMPRESSIONS, SITE_VISITS
                 FROM ranked
                 WHERE imp_rank <= 50 OR low_rate_rank <= 50
                 ORDER BY IMPRESSIONS DESC
@@ -1185,6 +1185,7 @@ def get_lineitem_performance_v5():
 def get_dma_performance_v5():
     """Get DMA-level metrics"""
     advertiser_id = request.args.get('advertiser_id', type=int)
+    agency_id = request.args.get('agency_id', type=int)
     campaign_id = request.args.get('campaign_id')
     
     if not advertiser_id:
@@ -1196,6 +1197,18 @@ def get_dma_performance_v5():
     try:
         conn = get_snowflake_connection()
         cursor = conn.cursor()
+        
+        # Determine agency class
+        if agency_id in CLASS_A_AGENCIES:
+            agency_class = 'A'
+        elif agency_id in CLASS_W_AGENCIES:
+            agency_class = 'W'
+        else:
+            agency_class = 'B'
+        
+        if agency_class == 'W':
+            # Class W doesn't have DMA data - return empty result
+            return jsonify({'success': True, 'data': [], 'message': 'DMA data not available for web pixel advertisers'})
         
         date_filter = ""
         if start_date and end_date:
