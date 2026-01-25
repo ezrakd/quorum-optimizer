@@ -278,7 +278,7 @@ def get_advertisers_v5():
                         TRY_CAST(SUBSTRING(ADVERTISER_NAME, 1, POSITION('_' IN ADVERTISER_NAME)-1) AS NUMBER) as CLIENT_ID
                     FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_MAPPED_IMPRESSIONS
                     WHERE IMP_DATE >= DATEADD(day, -90, CURRENT_DATE())
-                      AND ADVERTISER_NAME LIKE '%_%'
+                      AND ADVERTISER_NAME LIKE '%%_%%'
                 ),
                 impressions AS (
                     SELECT 
