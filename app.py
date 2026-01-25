@@ -53,19 +53,23 @@ def error_response(message, status=400):
 
 @app.route('/api/v4/agencies', methods=['GET'])
 def get_agencies():
-    """Get all agencies with visit counts from V4"""
+    """Get all agencies with visit counts from pre-aggregated stats"""
     query = """
         SELECT 
-            v.AGENCY_ID,
+            ds.AGENCY_ID,
             aa.AGENCY_NAME,
-            v.DATA_CLASS as AGENCY_CLASS,
-            COUNT(*) as TOTAL_VISITS,
-            COUNT(DISTINCT v.QUORUM_ADVERTISER_ID) as ADVERTISER_COUNT
-        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V4 v
+            ds.DIMENSION_VALUE as AGENCY_CLASS,
+            ds.VISITS as TOTAL_VISITS,
+            ds.STORE_VISITS,
+            ds.WEB_VISITS,
+            ds.UNIQUE_DEVICES,
+            (SELECT COUNT(DISTINCT QUORUM_ADVERTISER_ID) 
+             FROM QUORUMDB.SEGMENT_DATA.QRM_DIMENSION_STATS 
+             WHERE DIMENSION_TYPE = 'ADVERTISER_TOTAL' AND AGENCY_ID = ds.AGENCY_ID) as ADVERTISER_COUNT
+        FROM QUORUMDB.SEGMENT_DATA.QRM_DIMENSION_STATS ds
         JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa 
-            ON v.AGENCY_ID = aa.ADVERTISER_ID
-        WHERE v.AGENCY_ID IS NOT NULL
-        GROUP BY v.AGENCY_ID, aa.AGENCY_NAME, v.DATA_CLASS
+            ON ds.AGENCY_ID = aa.ADVERTISER_ID
+        WHERE ds.DIMENSION_TYPE = 'AGENCY_TOTAL'
         ORDER BY TOTAL_VISITS DESC
     """
     try:
@@ -76,23 +80,26 @@ def get_agencies():
 
 @app.route('/api/v4/advertisers', methods=['GET'])
 def get_advertisers():
-    """Get advertisers for an agency"""
+    """Get advertisers for an agency from pre-aggregated stats"""
     agency_id = request.args.get('agency_id')
     if not agency_id:
         return error_response('agency_id required')
     
     query = """
         SELECT 
-            v.QUORUM_ADVERTISER_ID as ADVERTISER_ID,
+            ds.QUORUM_ADVERTISER_ID as ADVERTISER_ID,
             aa.AGENCY_NAME as ADVERTISER_NAME,
-            COUNT(*) as TOTAL_VISITS,
-            SUM(CASE WHEN v.VISIT_TYPE = 'STORE' THEN 1 ELSE 0 END) as STORE_VISITS,
-            SUM(CASE WHEN v.VISIT_TYPE = 'WEB' THEN 1 ELSE 0 END) as WEB_VISITS
-        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V4 v
+            ds.VISITS as TOTAL_VISITS,
+            ds.STORE_VISITS,
+            ds.WEB_VISITS,
+            ds.LEADS,
+            ds.PURCHASES,
+            ds.UNIQUE_DEVICES
+        FROM QUORUMDB.SEGMENT_DATA.QRM_DIMENSION_STATS ds
         LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa 
-            ON v.QUORUM_ADVERTISER_ID = CAST(aa.ADVERTISER_ID AS VARCHAR)
-        WHERE v.AGENCY_ID = %(agency_id)s
-        GROUP BY v.QUORUM_ADVERTISER_ID, aa.AGENCY_NAME
+            ON ds.QUORUM_ADVERTISER_ID = CAST(aa.ADVERTISER_ID AS VARCHAR)
+        WHERE ds.DIMENSION_TYPE = 'ADVERTISER_TOTAL'
+          AND ds.AGENCY_ID = %(agency_id)s
         ORDER BY TOTAL_VISITS DESC
     """
     try:
@@ -107,20 +114,20 @@ def get_advertisers():
 
 @app.route('/api/v4/campaigns-list', methods=['GET'])
 def get_campaigns_list():
-    """Get campaign list for dropdown"""
+    """Get campaign list for dropdown from pre-aggregated stats"""
     advertiser_id = request.args.get('advertiser_id')
     if not advertiser_id:
         return error_response('advertiser_id required')
     
     query = """
-        SELECT DISTINCT
+        SELECT 
             CAMPAIGN_ID,
             CAMPAIGN_NAME,
-            COUNT(*) as VISITS
-        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V4
+            VISITS
+        FROM QUORUMDB.SEGMENT_DATA.QRM_DIMENSION_STATS
         WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+          AND DIMENSION_TYPE = 'CAMPAIGN_TOTAL'
           AND CAMPAIGN_ID IS NOT NULL
-        GROUP BY CAMPAIGN_ID, CAMPAIGN_NAME
         ORDER BY VISITS DESC
     """
     try:
@@ -131,22 +138,22 @@ def get_campaigns_list():
 
 @app.route('/api/v4/lineitems-list', methods=['GET'])
 def get_lineitems_list():
-    """Get line item list for dropdown"""
+    """Get line item list for dropdown from pre-aggregated stats"""
     advertiser_id = request.args.get('advertiser_id')
     if not advertiser_id:
         return error_response('advertiser_id required')
     
     query = """
-        SELECT DISTINCT
+        SELECT 
             LINEITEM_ID,
             LINEITEM_NAME,
             CAMPAIGN_ID,
             CAMPAIGN_NAME,
-            COUNT(*) as VISITS
-        FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V4
+            VISITS
+        FROM QUORUMDB.SEGMENT_DATA.QRM_DIMENSION_STATS
         WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+          AND DIMENSION_TYPE = 'LINEITEM_TOTAL'
           AND LINEITEM_ID IS NOT NULL
-        GROUP BY LINEITEM_ID, LINEITEM_NAME, CAMPAIGN_ID, CAMPAIGN_NAME
         ORDER BY VISITS DESC
     """
     try:
@@ -161,7 +168,7 @@ def get_lineitems_list():
 
 @app.route('/api/v4/advertiser-summary', methods=['GET'])
 def get_advertiser_summary():
-    """Get summary stats for an advertiser"""
+    """Get summary stats for an advertiser (pre-aggregated or date-filtered)"""
     advertiser_id = request.args.get('advertiser_id')
     start_date = request.args.get('start_date')
     end_date = request.args.get('end_date')
@@ -169,11 +176,30 @@ def get_advertiser_summary():
     if not advertiser_id:
         return error_response('advertiser_id required')
     
-    date_filter = ""
-    if start_date and end_date:
-        date_filter = "AND CONVERSION_DATE BETWEEN %(start_date)s AND %(end_date)s"
+    # Use pre-aggregated stats if no date filter
+    if not start_date or not end_date:
+        query = """
+            SELECT 
+                VISITS as TOTAL_VISITS,
+                STORE_VISITS,
+                WEB_VISITS,
+                LEADS,
+                PURCHASES,
+                UNIQUE_DEVICES,
+                NULL as UNIQUE_ZIPS,
+                NULL as UNIQUE_DMAS
+            FROM QUORUMDB.SEGMENT_DATA.QRM_DIMENSION_STATS
+            WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+              AND DIMENSION_TYPE = 'ADVERTISER_TOTAL'
+        """
+        try:
+            results = execute_query(query, {'advertiser_id': advertiser_id})
+            return success_response(results[0] if results else {})
+        except Exception as e:
+            return error_response(str(e))
     
-    query = f"""
+    # Date-filtered query against raw table
+    query = """
         SELECT 
             COUNT(*) as TOTAL_VISITS,
             SUM(CASE WHEN VISIT_TYPE = 'STORE' THEN 1 ELSE 0 END) as STORE_VISITS,
@@ -185,7 +211,7 @@ def get_advertiser_summary():
             COUNT(DISTINCT USER_HOME_DMA) as UNIQUE_DMAS
         FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V4
         WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
-        {date_filter}
+          AND CONVERSION_DATE BETWEEN %(start_date)s AND %(end_date)s
     """
     try:
         results = execute_query(query, {
@@ -203,7 +229,7 @@ def get_advertiser_summary():
 
 @app.route('/api/v4/campaign-performance', methods=['GET'])
 def get_campaign_performance():
-    """Get campaign performance with date filter"""
+    """Get campaign performance (pre-aggregated or date-filtered)"""
     advertiser_id = request.args.get('advertiser_id')
     start_date = request.args.get('start_date')
     end_date = request.args.get('end_date')
@@ -211,11 +237,32 @@ def get_campaign_performance():
     if not advertiser_id:
         return error_response('advertiser_id required')
     
-    date_filter = ""
-    if start_date and end_date:
-        date_filter = "AND CONVERSION_DATE BETWEEN %(start_date)s AND %(end_date)s"
+    # Use pre-aggregated stats if no date filter
+    if not start_date or not end_date:
+        query = """
+            SELECT 
+                CAMPAIGN_ID,
+                CAMPAIGN_NAME,
+                VISITS as TOTAL_VISITS,
+                STORE_VISITS,
+                WEB_VISITS,
+                LEADS,
+                PURCHASES,
+                UNIQUE_DEVICES
+            FROM QUORUMDB.SEGMENT_DATA.QRM_DIMENSION_STATS
+            WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+              AND DIMENSION_TYPE = 'CAMPAIGN_TOTAL'
+              AND CAMPAIGN_ID IS NOT NULL
+            ORDER BY TOTAL_VISITS DESC
+        """
+        try:
+            results = execute_query(query, {'advertiser_id': advertiser_id})
+            return success_response(results)
+        except Exception as e:
+            return error_response(str(e))
     
-    query = f"""
+    # Date-filtered query
+    query = """
         SELECT 
             CAMPAIGN_ID,
             CAMPAIGN_NAME,
@@ -228,7 +275,7 @@ def get_campaign_performance():
         FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V4
         WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
           AND CAMPAIGN_ID IS NOT NULL
-        {date_filter}
+          AND CONVERSION_DATE BETWEEN %(start_date)s AND %(end_date)s
         GROUP BY CAMPAIGN_ID, CAMPAIGN_NAME
         ORDER BY TOTAL_VISITS DESC
     """
@@ -248,7 +295,7 @@ def get_campaign_performance():
 
 @app.route('/api/v4/lineitem-performance', methods=['GET'])
 def get_lineitem_performance():
-    """Get line item performance"""
+    """Get line item performance (pre-aggregated or date-filtered)"""
     advertiser_id = request.args.get('advertiser_id')
     campaign_id = request.args.get('campaign_id')
     start_date = request.args.get('start_date')
@@ -257,13 +304,43 @@ def get_lineitem_performance():
     if not advertiser_id:
         return error_response('advertiser_id required')
     
+    # Use pre-aggregated stats if no date filter
+    if not start_date or not end_date:
+        filters = ["QUORUM_ADVERTISER_ID = %(advertiser_id)s", "DIMENSION_TYPE = 'LINEITEM_TOTAL'", "LINEITEM_ID IS NOT NULL"]
+        params = {'advertiser_id': advertiser_id}
+        if campaign_id:
+            filters.append("CAMPAIGN_ID = %(campaign_id)s")
+            params['campaign_id'] = campaign_id
+        
+        query = f"""
+            SELECT 
+                LINEITEM_ID,
+                LINEITEM_NAME,
+                CAMPAIGN_ID,
+                CAMPAIGN_NAME,
+                VISITS as TOTAL_VISITS,
+                STORE_VISITS,
+                WEB_VISITS,
+                LEADS,
+                PURCHASES,
+                UNIQUE_DEVICES
+            FROM QUORUMDB.SEGMENT_DATA.QRM_DIMENSION_STATS
+            WHERE {' AND '.join(filters)}
+            ORDER BY TOTAL_VISITS DESC
+        """
+        try:
+            results = execute_query(query, params)
+            return success_response(results)
+        except Exception as e:
+            return error_response(str(e))
+    
+    # Date-filtered query
     filters = ["QUORUM_ADVERTISER_ID = %(advertiser_id)s", "LINEITEM_ID IS NOT NULL"]
+    params = {'advertiser_id': advertiser_id, 'start_date': start_date, 'end_date': end_date}
     if campaign_id:
         filters.append("CAMPAIGN_ID = %(campaign_id)s")
-    if start_date and end_date:
-        filters.append("CONVERSION_DATE BETWEEN %(start_date)s AND %(end_date)s")
-    
-    where_clause = " AND ".join(filters)
+        params['campaign_id'] = campaign_id
+    filters.append("CONVERSION_DATE BETWEEN %(start_date)s AND %(end_date)s")
     
     query = f"""
         SELECT 
@@ -278,17 +355,12 @@ def get_lineitem_performance():
             SUM(CASE WHEN IS_PURCHASE = 1 THEN 1 ELSE 0 END) as PURCHASES,
             COUNT(DISTINCT MAID) as UNIQUE_DEVICES
         FROM QUORUMDB.SEGMENT_DATA.QRM_ALL_VISITS_V4
-        WHERE {where_clause}
+        WHERE {' AND '.join(filters)}
         GROUP BY LINEITEM_ID, LINEITEM_NAME, CAMPAIGN_ID, CAMPAIGN_NAME
         ORDER BY TOTAL_VISITS DESC
     """
     try:
-        results = execute_query(query, {
-            'advertiser_id': advertiser_id,
-            'campaign_id': campaign_id,
-            'start_date': start_date,
-            'end_date': end_date
-        })
+        results = execute_query(query, params)
         return success_response(results)
     except Exception as e:
         return error_response(str(e))
