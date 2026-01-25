@@ -1884,6 +1884,13 @@ def get_lift_analysis_v5():
                 campaign_id, lineitem_id,
                 exposure_start_date, exposure_end_plus_1, lookback_days
             )
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
 # ============================================================================
 # BACKWARD COMPATIBILITY - V3/V4 ROUTES
 # ============================================================================
