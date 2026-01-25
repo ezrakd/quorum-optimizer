@@ -55,21 +55,40 @@ def error_response(message, status=400):
 def get_agencies():
     """Get all agencies with visit counts from pre-aggregated stats"""
     query = """
+        WITH agency_totals AS (
+            SELECT 
+                AGENCY_ID,
+                DIMENSION_VALUE as AGENCY_CLASS,
+                SUM(VISITS) as TOTAL_VISITS,
+                SUM(STORE_VISITS) as STORE_VISITS,
+                SUM(WEB_VISITS) as WEB_VISITS,
+                SUM(UNIQUE_DEVICES) as UNIQUE_DEVICES
+            FROM QUORUMDB.SEGMENT_DATA.QRM_DIMENSION_STATS
+            WHERE DIMENSION_TYPE = 'AGENCY_TOTAL'
+            GROUP BY AGENCY_ID, DIMENSION_VALUE
+        ),
+        advertiser_counts AS (
+            SELECT AGENCY_ID, COUNT(DISTINCT QUORUM_ADVERTISER_ID) as ADVERTISER_COUNT
+            FROM QUORUMDB.SEGMENT_DATA.QRM_DIMENSION_STATS
+            WHERE DIMENSION_TYPE = 'ADVERTISER_TOTAL'
+            GROUP BY AGENCY_ID
+        ),
+        agency_names AS (
+            SELECT DISTINCT ADVERTISER_ID, AGENCY_NAME 
+            FROM QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER
+        )
         SELECT 
-            ds.AGENCY_ID,
-            aa.AGENCY_NAME,
-            ds.DIMENSION_VALUE as AGENCY_CLASS,
-            ds.VISITS as TOTAL_VISITS,
-            ds.STORE_VISITS,
-            ds.WEB_VISITS,
-            ds.UNIQUE_DEVICES,
-            (SELECT COUNT(DISTINCT QUORUM_ADVERTISER_ID) 
-             FROM QUORUMDB.SEGMENT_DATA.QRM_DIMENSION_STATS 
-             WHERE DIMENSION_TYPE = 'ADVERTISER_TOTAL' AND AGENCY_ID = ds.AGENCY_ID) as ADVERTISER_COUNT
-        FROM QUORUMDB.SEGMENT_DATA.QRM_DIMENSION_STATS ds
-        JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa 
-            ON ds.AGENCY_ID = aa.ADVERTISER_ID
-        WHERE ds.DIMENSION_TYPE = 'AGENCY_TOTAL'
+            t.AGENCY_ID,
+            an.AGENCY_NAME,
+            t.AGENCY_CLASS,
+            t.TOTAL_VISITS,
+            t.STORE_VISITS,
+            t.WEB_VISITS,
+            t.UNIQUE_DEVICES,
+            c.ADVERTISER_COUNT
+        FROM agency_totals t
+        LEFT JOIN agency_names an ON t.AGENCY_ID = an.ADVERTISER_ID
+        LEFT JOIN advertiser_counts c ON t.AGENCY_ID = c.AGENCY_ID
         ORDER BY TOTAL_VISITS DESC
     """
     try:
@@ -86,9 +105,13 @@ def get_advertisers():
         return error_response('agency_id required')
     
     query = """
+        WITH advertiser_names AS (
+            SELECT DISTINCT ADVERTISER_ID, AGENCY_NAME 
+            FROM QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER
+        )
         SELECT 
             ds.QUORUM_ADVERTISER_ID as ADVERTISER_ID,
-            aa.AGENCY_NAME as ADVERTISER_NAME,
+            an.AGENCY_NAME as ADVERTISER_NAME,
             ds.VISITS as TOTAL_VISITS,
             ds.STORE_VISITS,
             ds.WEB_VISITS,
@@ -96,8 +119,8 @@ def get_advertisers():
             ds.PURCHASES,
             ds.UNIQUE_DEVICES
         FROM QUORUMDB.SEGMENT_DATA.QRM_DIMENSION_STATS ds
-        LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa 
-            ON ds.QUORUM_ADVERTISER_ID = CAST(aa.ADVERTISER_ID AS VARCHAR)
+        LEFT JOIN advertiser_names an 
+            ON ds.QUORUM_ADVERTISER_ID = CAST(an.ADVERTISER_ID AS VARCHAR)
         WHERE ds.DIMENSION_TYPE = 'ADVERTISER_TOTAL'
           AND ds.AGENCY_ID = %(agency_id)s
         ORDER BY TOTAL_VISITS DESC
