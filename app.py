@@ -303,40 +303,22 @@ def get_advertisers_v5():
                 ORDER BY i.IMPRESSIONS DESC
             """
         else:
-            # Class B query using weekly stats + visits raw
+            # Class B query using weekly stats - VISITORS column directly
             query = """
-                WITH impressions AS (
-                    SELECT 
-                        ADVERTISER_ID,
-                        SUM(IMPRESSIONS) as IMPRESSIONS,
-                        COUNT(DISTINCT IO_ID) as CAMPAIGN_COUNT
-                    FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
-                    WHERE AGENCY_ID = %(agency_id)s
-                      AND LOG_DATE >= DATEADD(day, -90, CURRENT_DATE())
-                    GROUP BY ADVERTISER_ID
-                ),
-                visits AS (
-                    SELECT 
-                        ADVERTISER_ID,
-                        COUNT(DISTINCT CONCAT(DEVICE_ID, DRIVE_BY_DATE, POI_MD5)) as STORE_VISITS
-                    FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW
-                    WHERE AGENCY_ID = %(agency_id)s
-                      AND DRIVE_BY_DATE >= DATEADD(day, -90, CURRENT_DATE())
-                    GROUP BY ADVERTISER_ID
-                )
                 SELECT 
-                    COALESCE(i.ADVERTISER_ID, v.ADVERTISER_ID) as ADVERTISER_ID,
-                    COALESCE(aa.COMP_NAME, 'Advertiser ' || COALESCE(i.ADVERTISER_ID, v.ADVERTISER_ID)) as ADVERTISER_NAME,
-                    COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS,
-                    COALESCE(v.STORE_VISITS, 0) as STORE_VISITS,
-                    COALESCE(i.CAMPAIGN_COUNT, 0) as CAMPAIGN_COUNT,
+                    ADVERTISER_ID,
+                    COALESCE(aa.COMP_NAME, 'Advertiser ' || w.ADVERTISER_ID) as ADVERTISER_NAME,
+                    SUM(IMPRESSIONS) as IMPRESSIONS,
+                    SUM(VISITORS) as STORE_VISITS,
+                    COUNT(DISTINCT IO_ID) as CAMPAIGN_COUNT,
                     'B' as AGENCY_CLASS
-                FROM impressions i
-                FULL OUTER JOIN visits v ON i.ADVERTISER_ID = v.ADVERTISER_ID
-                LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa 
-                    ON COALESCE(i.ADVERTISER_ID, v.ADVERTISER_ID) = aa.ID
-                WHERE COALESCE(i.IMPRESSIONS, 0) >= 1000 OR COALESCE(v.STORE_VISITS, 0) >= 10
-                ORDER BY COALESCE(i.IMPRESSIONS, 0) DESC
+                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS w
+                LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa ON w.ADVERTISER_ID = aa.ID
+                WHERE AGENCY_ID = %(agency_id)s
+                  AND LOG_DATE >= DATEADD(day, -90, CURRENT_DATE())
+                GROUP BY ADVERTISER_ID, aa.COMP_NAME
+                HAVING SUM(IMPRESSIONS) >= 1000 OR SUM(VISITORS) >= 10
+                ORDER BY SUM(IMPRESSIONS) DESC
             """
         
         cursor.execute(query, {'agency_id': agency_id})
@@ -596,46 +578,25 @@ def get_campaign_performance_v5():
             """
             
         else:
-            # Class B query - join visits to XANDR for campaign context
-            date_filter_imps = ""
-            date_filter_visits = ""
+            # Class B query - use VISITORS column directly from WEEKLY_STATS
+            date_filter = ""
             if start_date and end_date:
-                date_filter_imps = f"AND CAST(LOG_DATE AS DATE) BETWEEN '{start_date}' AND '{end_date}'"
-                date_filter_visits = f"AND CAST(v.DRIVE_BY_DATE AS DATE) BETWEEN '{start_date}' AND '{end_date}'"
+                date_filter = f"AND CAST(LOG_DATE AS DATE) BETWEEN '{start_date}' AND '{end_date}'"
             else:
-                date_filter_imps = "AND LOG_DATE >= DATEADD(day, -28, CURRENT_DATE())"
-                date_filter_visits = "AND v.DRIVE_BY_DATE >= DATEADD(day, -28, CURRENT_DATE())"
+                date_filter = "AND LOG_DATE >= DATEADD(day, -28, CURRENT_DATE())"
             
             query = f"""
-                WITH imps AS (
-                    SELECT 
-                        CAST(IO_ID AS NUMBER) as IO_ID,
-                        MAX(IO_NAME) as IO_NAME,
-                        SUM(IMPRESSIONS) as IMPRESSIONS
-                    FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
-                    WHERE ADVERTISER_ID = %(advertiser_id)s
-                      {date_filter_imps}
-                    GROUP BY IO_ID
-                ),
-                visits AS (
-                    SELECT 
-                        x.IO_ID,
-                        COUNT(DISTINCT CONCAT(v.DEVICE_ID, v.DRIVE_BY_DATE, v.POI_MD5)) as STORE_VISITS
-                    FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW v
-                    JOIN QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG x ON v.IMP_ID = x.ID
-                    WHERE v.ADVERTISER_ID = %(advertiser_id)s
-                      {date_filter_visits}
-                    GROUP BY x.IO_ID
-                )
                 SELECT 
-                    COALESCE(i.IO_ID, v.IO_ID) as CAMPAIGN_ID,
-                    i.IO_NAME as CAMPAIGN_NAME,
-                    COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS,
-                    COALESCE(v.STORE_VISITS, 0) as S_VISITS
-                FROM imps i
-                FULL OUTER JOIN visits v ON i.IO_ID = v.IO_ID
-                WHERE COALESCE(i.IMPRESSIONS, 0) >= 1000 OR COALESCE(v.STORE_VISITS, 0) >= 10
-                ORDER BY COALESCE(i.IMPRESSIONS, 0) DESC
+                    CAST(IO_ID AS NUMBER) as CAMPAIGN_ID,
+                    MAX(IO_NAME) as CAMPAIGN_NAME,
+                    SUM(IMPRESSIONS) as IMPRESSIONS,
+                    SUM(VISITORS) as S_VISITS
+                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
+                WHERE ADVERTISER_ID = %(advertiser_id)s
+                  {date_filter}
+                GROUP BY IO_ID
+                HAVING SUM(IMPRESSIONS) >= 1000 OR SUM(VISITORS) >= 10
+                ORDER BY SUM(IMPRESSIONS) DESC
             """
         
         cursor.execute(query, {'advertiser_id': advertiser_id})
@@ -752,58 +713,29 @@ def get_publisher_performance_v5():
             """
             
         else:
-            # Class B query - join visits to XANDR for publisher context
-            date_filter_imps = ""
-            date_filter_visits = ""
+            # Class B query - use VISITORS column directly from WEEKLY_STATS
+            date_filter = ""
             if start_date and end_date:
-                date_filter_imps = f"AND CAST(LOG_DATE AS DATE) BETWEEN '{start_date}' AND '{end_date}'"
-                date_filter_visits = f"AND CAST(v.DRIVE_BY_DATE AS DATE) BETWEEN '{start_date}' AND '{end_date}'"
+                date_filter = f"AND CAST(LOG_DATE AS DATE) BETWEEN '{start_date}' AND '{end_date}'"
             else:
-                date_filter_imps = "AND LOG_DATE >= DATEADD(day, -28, CURRENT_DATE())"
-                date_filter_visits = "AND v.DRIVE_BY_DATE >= DATEADD(day, -28, CURRENT_DATE())"
+                date_filter = "AND LOG_DATE >= DATEADD(day, -28, CURRENT_DATE())"
             
-            campaign_filter_imps = ""
-            campaign_filter_visits = ""
+            campaign_filter = ""
             if campaign_id:
-                campaign_filter_imps = f"AND IO_ID = '{campaign_id}'"
-                campaign_filter_visits = f"AND x.IO_ID = {campaign_id}"
+                campaign_filter = f"AND IO_ID = '{campaign_id}'"
             
             query = f"""
-                WITH imps AS (
-                    SELECT 
-                        PUBLISHER as PUBLISHER_CODE,
-                        SUM(IMPRESSIONS) as IMPRESSIONS
-                    FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
-                    WHERE ADVERTISER_ID = %(advertiser_id)s
-                      {date_filter_imps}
-                      {campaign_filter_imps}
-                    GROUP BY PUBLISHER
-                ),
-                visits AS (
-                    SELECT 
-                        CASE 
-                            WHEN x.PT IN ('6', '8', '9', '11', '16', '20', '23', '28') THEN x.SITE
-                            ELSE x.PUBLISHER_CODE
-                        END as PUBLISHER_CODE,
-                        COUNT(DISTINCT CONCAT(v.DEVICE_ID, v.DRIVE_BY_DATE, v.POI_MD5)) as STORE_VISITS
-                    FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW v
-                    JOIN QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG x ON v.IMP_ID = x.ID
-                    WHERE v.ADVERTISER_ID = %(advertiser_id)s
-                      {date_filter_visits}
-                      {campaign_filter_visits}
-                    GROUP BY CASE 
-                        WHEN x.PT IN ('6', '8', '9', '11', '16', '20', '23', '28') THEN x.SITE
-                        ELSE x.PUBLISHER_CODE
-                    END
-                )
                 SELECT 
-                    COALESCE(i.PUBLISHER_CODE, v.PUBLISHER_CODE) as PUBLISHER_CODE,
-                    COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS,
-                    COALESCE(v.STORE_VISITS, 0) as S_VISITS
-                FROM imps i
-                FULL OUTER JOIN visits v ON i.PUBLISHER_CODE = v.PUBLISHER_CODE
-                WHERE COALESCE(i.IMPRESSIONS, 0) >= 100 OR COALESCE(v.STORE_VISITS, 0) >= 10
-                ORDER BY COALESCE(i.IMPRESSIONS, 0) DESC
+                    PUBLISHER as PUBLISHER_CODE,
+                    SUM(IMPRESSIONS) as IMPRESSIONS,
+                    SUM(VISITORS) as S_VISITS
+                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
+                WHERE ADVERTISER_ID = %(advertiser_id)s
+                  {date_filter}
+                  {campaign_filter}
+                GROUP BY PUBLISHER
+                HAVING SUM(IMPRESSIONS) >= 100
+                ORDER BY SUM(IMPRESSIONS) DESC
                 LIMIT 50
             """
         
@@ -931,54 +863,30 @@ def get_zip_performance_v5():
             """
             
         else:
-            # Class B query - join visits to XANDR for ZIP context
-            date_filter_imps = ""
-            date_filter_visits = ""
+            # Class B query - use VISITORS column directly from WEEKLY_STATS
+            date_filter = ""
             if start_date and end_date:
-                date_filter_imps = f"AND CAST(LOG_DATE AS DATE) BETWEEN '{start_date}' AND '{end_date}'"
-                date_filter_visits = f"AND CAST(v.DRIVE_BY_DATE AS DATE) BETWEEN '{start_date}' AND '{end_date}'"
+                date_filter = f"AND CAST(LOG_DATE AS DATE) BETWEEN '{start_date}' AND '{end_date}'"
             else:
-                date_filter_imps = "AND LOG_DATE >= DATEADD(day, -28, CURRENT_DATE())"
-                date_filter_visits = "AND v.DRIVE_BY_DATE >= DATEADD(day, -28, CURRENT_DATE())"
+                date_filter = "AND LOG_DATE >= DATEADD(day, -28, CURRENT_DATE())"
             
-            campaign_filter_imps = ""
-            campaign_filter_visits = ""
+            campaign_filter = ""
             if campaign_id:
-                campaign_filter_imps = f"AND IO_ID = '{campaign_id}'"
-                campaign_filter_visits = f"AND x.IO_ID = {campaign_id}"
+                campaign_filter = f"AND IO_ID = '{campaign_id}'"
             
             query = f"""
-                WITH imps AS (
+                WITH combined AS (
                     SELECT 
                         ZIP as ZIP_CODE,
-                        SUM(IMPRESSIONS) as IMPRESSIONS
+                        SUM(IMPRESSIONS) as IMPRESSIONS,
+                        SUM(VISITORS) as S_VISITS
                     FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
                     WHERE ADVERTISER_ID = %(advertiser_id)s
                       AND ZIP IS NOT NULL AND ZIP != '' AND ZIP != '0'
-                      {date_filter_imps}
-                      {campaign_filter_imps}
+                      {date_filter}
+                      {campaign_filter}
                     GROUP BY ZIP
-                ),
-                visits AS (
-                    SELECT 
-                        x.POSTAL_CODE as ZIP_CODE,
-                        COUNT(DISTINCT CONCAT(v.DEVICE_ID, v.DRIVE_BY_DATE, v.POI_MD5)) as STORE_VISITS
-                    FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW v
-                    JOIN QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG x ON v.IMP_ID = x.ID
-                    WHERE v.ADVERTISER_ID = %(advertiser_id)s
-                      AND x.POSTAL_CODE IS NOT NULL AND x.POSTAL_CODE != '' AND x.POSTAL_CODE != '0'
-                      {date_filter_visits}
-                      {campaign_filter_visits}
-                    GROUP BY x.POSTAL_CODE
-                ),
-                combined AS (
-                    SELECT 
-                        COALESCE(i.ZIP_CODE, v.ZIP_CODE) as ZIP_CODE,
-                        COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS,
-                        COALESCE(v.STORE_VISITS, 0) as S_VISITS
-                    FROM imps i
-                    FULL OUTER JOIN visits v ON i.ZIP_CODE = v.ZIP_CODE
-                    WHERE COALESCE(i.IMPRESSIONS, 0) >= 100 OR COALESCE(v.STORE_VISITS, 0) >= 5
+                    HAVING SUM(IMPRESSIONS) >= 100
                 ),
                 ranked AS (
                     SELECT *,
