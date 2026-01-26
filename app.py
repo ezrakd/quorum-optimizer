@@ -1564,3 +1564,32 @@ def creative_compat():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port, debug=False)
+
+# ============================================================================
+# FRONTEND SERVING - Serve the HTML interface
+# ============================================================================
+
+from flask import send_file
+import os
+
+@app.route('/')
+@app.route('/index.html')
+def serve_frontend():
+    """Serve the Quorum Optimizer frontend HTML"""
+    try:
+        # Look for the HTML file in the same directory as app.py
+        html_file = 'quorum-optimizer-v5.html'
+        if os.path.exists(html_file):
+            return send_file(html_file)
+        else:
+            return jsonify({
+                'error': 'Frontend not found',
+                'message': 'Please add quorum-optimizer-v5.html to the deployment',
+                'api_endpoints': {
+                    'health': '/health',
+                    'agencies': '/api/v5/agencies',
+                    'lift': '/api/v5/lift-analysis'
+                }
+            }), 404
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
