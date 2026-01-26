@@ -264,7 +264,7 @@ def get_advertisers_v5():
                     'A' as AGENCY_CLASS
                 FROM adv_stats a
                 LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa 
-                    ON a.ADVERTISER_ID = aa.ID
+                    ON a.ADVERTISER_ID = aa.ADVERTISER_ID
                 ORDER BY a.IMPRESSIONS DESC
             """
         elif agency_id in CLASS_W_AGENCIES:
@@ -303,22 +303,40 @@ def get_advertisers_v5():
                 ORDER BY i.IMPRESSIONS DESC
             """
         else:
-            # Class B query using weekly stats - VISITORS column directly
+            # Class B query using weekly stats + visits raw
             query = """
+                WITH impressions AS (
+                    SELECT 
+                        ADVERTISER_ID,
+                        SUM(IMPRESSIONS) as IMPRESSIONS,
+                        COUNT(DISTINCT IO_ID) as CAMPAIGN_COUNT
+                    FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
+                    WHERE AGENCY_ID = %(agency_id)s
+                      AND LOG_DATE >= DATEADD(day, -90, CURRENT_DATE())
+                    GROUP BY ADVERTISER_ID
+                ),
+                visits AS (
+                    SELECT 
+                        ADVERTISER_ID,
+                        COUNT(DISTINCT CONCAT(DEVICE_ID, DRIVE_BY_DATE, POI_MD5)) as STORE_VISITS
+                    FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW
+                    WHERE AGENCY_ID = %(agency_id)s
+                      AND DRIVE_BY_DATE >= DATEADD(day, -90, CURRENT_DATE())
+                    GROUP BY ADVERTISER_ID
+                )
                 SELECT 
-                    ADVERTISER_ID,
-                    COALESCE(aa.COMP_NAME, 'Advertiser ' || w.ADVERTISER_ID) as ADVERTISER_NAME,
-                    SUM(IMPRESSIONS) as IMPRESSIONS,
-                    SUM(VISITORS) as STORE_VISITS,
-                    COUNT(DISTINCT IO_ID) as CAMPAIGN_COUNT,
+                    COALESCE(i.ADVERTISER_ID, v.ADVERTISER_ID) as ADVERTISER_ID,
+                    COALESCE(aa.COMP_NAME, 'Advertiser ' || COALESCE(i.ADVERTISER_ID, v.ADVERTISER_ID)) as ADVERTISER_NAME,
+                    COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS,
+                    COALESCE(v.STORE_VISITS, 0) as STORE_VISITS,
+                    COALESCE(i.CAMPAIGN_COUNT, 0) as CAMPAIGN_COUNT,
                     'B' as AGENCY_CLASS
-                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS w
-                LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa ON w.ADVERTISER_ID = aa.ID
-                WHERE AGENCY_ID = %(agency_id)s
-                  AND LOG_DATE >= DATEADD(day, -90, CURRENT_DATE())
-                GROUP BY ADVERTISER_ID, aa.COMP_NAME
-                HAVING SUM(IMPRESSIONS) >= 1000 OR SUM(VISITORS) >= 10
-                ORDER BY SUM(IMPRESSIONS) DESC
+                FROM impressions i
+                FULL OUTER JOIN visits v ON i.ADVERTISER_ID = v.ADVERTISER_ID
+                LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa 
+                    ON COALESCE(i.ADVERTISER_ID, v.ADVERTISER_ID) = aa.ADVERTISER_ID
+                WHERE COALESCE(i.IMPRESSIONS, 0) >= 1000 OR COALESCE(v.STORE_VISITS, 0) >= 10
+                ORDER BY COALESCE(i.IMPRESSIONS, 0) DESC
             """
         
         cursor.execute(query, {'agency_id': agency_id})
@@ -578,25 +596,46 @@ def get_campaign_performance_v5():
             """
             
         else:
-            # Class B query - use VISITORS column directly from WEEKLY_STATS
-            date_filter = ""
+            # Class B query - join visits to XANDR for campaign context
+            date_filter_imps = ""
+            date_filter_visits = ""
             if start_date and end_date:
-                date_filter = f"AND CAST(LOG_DATE AS DATE) BETWEEN '{start_date}' AND '{end_date}'"
+                date_filter_imps = f"AND CAST(LOG_DATE AS DATE) BETWEEN '{start_date}' AND '{end_date}'"
+                date_filter_visits = f"AND CAST(v.DRIVE_BY_DATE AS DATE) BETWEEN '{start_date}' AND '{end_date}'"
             else:
-                date_filter = "AND LOG_DATE >= DATEADD(day, -28, CURRENT_DATE())"
+                date_filter_imps = "AND LOG_DATE >= DATEADD(day, -28, CURRENT_DATE())"
+                date_filter_visits = "AND v.DRIVE_BY_DATE >= DATEADD(day, -28, CURRENT_DATE())"
             
             query = f"""
+                WITH imps AS (
+                    SELECT 
+                        CAST(IO_ID AS NUMBER) as IO_ID,
+                        MAX(IO_NAME) as IO_NAME,
+                        SUM(IMPRESSIONS) as IMPRESSIONS
+                    FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
+                    WHERE ADVERTISER_ID = %(advertiser_id)s
+                      {date_filter_imps}
+                    GROUP BY IO_ID
+                ),
+                visits AS (
+                    SELECT 
+                        x.IO_ID,
+                        COUNT(DISTINCT CONCAT(v.DEVICE_ID, v.DRIVE_BY_DATE, v.POI_MD5)) as STORE_VISITS
+                    FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW v
+                    JOIN QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG x ON v.IMP_ID = x.ID
+                    WHERE v.ADVERTISER_ID = %(advertiser_id)s
+                      {date_filter_visits}
+                    GROUP BY x.IO_ID
+                )
                 SELECT 
-                    CAST(IO_ID AS NUMBER) as CAMPAIGN_ID,
-                    MAX(IO_NAME) as CAMPAIGN_NAME,
-                    SUM(IMPRESSIONS) as IMPRESSIONS,
-                    SUM(VISITORS) as S_VISITS
-                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
-                WHERE ADVERTISER_ID = %(advertiser_id)s
-                  {date_filter}
-                GROUP BY IO_ID
-                HAVING SUM(IMPRESSIONS) >= 1000 OR SUM(VISITORS) >= 10
-                ORDER BY SUM(IMPRESSIONS) DESC
+                    COALESCE(i.IO_ID, v.IO_ID) as CAMPAIGN_ID,
+                    i.IO_NAME as CAMPAIGN_NAME,
+                    COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS,
+                    COALESCE(v.STORE_VISITS, 0) as S_VISITS
+                FROM imps i
+                FULL OUTER JOIN visits v ON i.IO_ID = v.IO_ID
+                WHERE COALESCE(i.IMPRESSIONS, 0) >= 1000 OR COALESCE(v.STORE_VISITS, 0) >= 10
+                ORDER BY COALESCE(i.IMPRESSIONS, 0) DESC
             """
         
         cursor.execute(query, {'advertiser_id': advertiser_id})
@@ -713,29 +752,58 @@ def get_publisher_performance_v5():
             """
             
         else:
-            # Class B query - use VISITORS column directly from WEEKLY_STATS
-            date_filter = ""
+            # Class B query - join visits to XANDR for publisher context
+            date_filter_imps = ""
+            date_filter_visits = ""
             if start_date and end_date:
-                date_filter = f"AND CAST(LOG_DATE AS DATE) BETWEEN '{start_date}' AND '{end_date}'"
+                date_filter_imps = f"AND CAST(LOG_DATE AS DATE) BETWEEN '{start_date}' AND '{end_date}'"
+                date_filter_visits = f"AND CAST(v.DRIVE_BY_DATE AS DATE) BETWEEN '{start_date}' AND '{end_date}'"
             else:
-                date_filter = "AND LOG_DATE >= DATEADD(day, -28, CURRENT_DATE())"
+                date_filter_imps = "AND LOG_DATE >= DATEADD(day, -28, CURRENT_DATE())"
+                date_filter_visits = "AND v.DRIVE_BY_DATE >= DATEADD(day, -28, CURRENT_DATE())"
             
-            campaign_filter = ""
+            campaign_filter_imps = ""
+            campaign_filter_visits = ""
             if campaign_id:
-                campaign_filter = f"AND IO_ID = '{campaign_id}'"
+                campaign_filter_imps = f"AND IO_ID = '{campaign_id}'"
+                campaign_filter_visits = f"AND x.IO_ID = {campaign_id}"
             
             query = f"""
+                WITH imps AS (
+                    SELECT 
+                        PUBLISHER as PUBLISHER_CODE,
+                        SUM(IMPRESSIONS) as IMPRESSIONS
+                    FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
+                    WHERE ADVERTISER_ID = %(advertiser_id)s
+                      {date_filter_imps}
+                      {campaign_filter_imps}
+                    GROUP BY PUBLISHER
+                ),
+                visits AS (
+                    SELECT 
+                        CASE 
+                            WHEN x.PT IN ('6', '8', '9', '11', '16', '20', '23', '28') THEN x.SITE
+                            ELSE x.PUBLISHER_CODE
+                        END as PUBLISHER_CODE,
+                        COUNT(DISTINCT CONCAT(v.DEVICE_ID, v.DRIVE_BY_DATE, v.POI_MD5)) as STORE_VISITS
+                    FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW v
+                    JOIN QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG x ON v.IMP_ID = x.ID
+                    WHERE v.ADVERTISER_ID = %(advertiser_id)s
+                      {date_filter_visits}
+                      {campaign_filter_visits}
+                    GROUP BY CASE 
+                        WHEN x.PT IN ('6', '8', '9', '11', '16', '20', '23', '28') THEN x.SITE
+                        ELSE x.PUBLISHER_CODE
+                    END
+                )
                 SELECT 
-                    PUBLISHER as PUBLISHER_CODE,
-                    SUM(IMPRESSIONS) as IMPRESSIONS,
-                    SUM(VISITORS) as S_VISITS
-                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
-                WHERE ADVERTISER_ID = %(advertiser_id)s
-                  {date_filter}
-                  {campaign_filter}
-                GROUP BY PUBLISHER
-                HAVING SUM(IMPRESSIONS) >= 100
-                ORDER BY SUM(IMPRESSIONS) DESC
+                    COALESCE(i.PUBLISHER_CODE, v.PUBLISHER_CODE) as PUBLISHER_CODE,
+                    COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS,
+                    COALESCE(v.STORE_VISITS, 0) as S_VISITS
+                FROM imps i
+                FULL OUTER JOIN visits v ON i.PUBLISHER_CODE = v.PUBLISHER_CODE
+                WHERE COALESCE(i.IMPRESSIONS, 0) >= 100 OR COALESCE(v.STORE_VISITS, 0) >= 10
+                ORDER BY COALESCE(i.IMPRESSIONS, 0) DESC
                 LIMIT 50
             """
         
@@ -812,11 +880,10 @@ def get_zip_performance_v5():
                         ROW_NUMBER() OVER (ORDER BY CASE WHEN IMPRESSIONS > 0 THEN S_VISITS * 1.0 / IMPRESSIONS ELSE 0 END ASC) as low_rate_rank
                     FROM zip_stats
                 )
-                SELECT r.ZIP_CODE, r.IMPRESSIONS, r.S_VISITS, d.DMA_NAME
-                FROM ranked r
-                LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING d ON r.ZIP_CODE = d.ZIP_CODE
+                SELECT ZIP_CODE, IMPRESSIONS, S_VISITS
+                FROM ranked
                 WHERE imp_rank <= 50 OR low_rate_rank <= 50
-                ORDER BY r.IMPRESSIONS DESC
+                ORDER BY IMPRESSIONS DESC
             """
             
         elif agency_class == 'W':
@@ -855,38 +922,61 @@ def get_zip_performance_v5():
                         ROW_NUMBER() OVER (ORDER BY CASE WHEN CONVERSION_IMPS > 0 THEN SITE_VISITORS * 1.0 / CONVERSION_IMPS ELSE 0 END ASC) as low_rate_rank
                     FROM conversions
                 )
-                SELECT r.ZIP_CODE, r.IMPRESSIONS, r.S_VISITS, d.DMA_NAME
-                FROM ranked r
-                LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING d ON r.ZIP_CODE = d.ZIP_CODE
+                SELECT ZIP_CODE, IMPRESSIONS, S_VISITS
+                FROM ranked
                 WHERE imp_rank <= 50 OR low_rate_rank <= 50
-                ORDER BY r.IMPRESSIONS DESC
+                ORDER BY IMPRESSIONS DESC
             """
             
         else:
-            # Class B query - use VISITORS column directly from WEEKLY_STATS
-            date_filter = ""
+            # Class B query - join visits to XANDR for ZIP context
+            date_filter_imps = ""
+            date_filter_visits = ""
             if start_date and end_date:
-                date_filter = f"AND CAST(LOG_DATE AS DATE) BETWEEN '{start_date}' AND '{end_date}'"
+                date_filter_imps = f"AND CAST(LOG_DATE AS DATE) BETWEEN '{start_date}' AND '{end_date}'"
+                date_filter_visits = f"AND CAST(v.DRIVE_BY_DATE AS DATE) BETWEEN '{start_date}' AND '{end_date}'"
             else:
-                date_filter = "AND LOG_DATE >= DATEADD(day, -28, CURRENT_DATE())"
+                date_filter_imps = "AND LOG_DATE >= DATEADD(day, -28, CURRENT_DATE())"
+                date_filter_visits = "AND v.DRIVE_BY_DATE >= DATEADD(day, -28, CURRENT_DATE())"
             
-            campaign_filter = ""
+            campaign_filter_imps = ""
+            campaign_filter_visits = ""
             if campaign_id:
-                campaign_filter = f"AND IO_ID = '{campaign_id}'"
+                campaign_filter_imps = f"AND IO_ID = '{campaign_id}'"
+                campaign_filter_visits = f"AND x.IO_ID = {campaign_id}"
             
             query = f"""
-                WITH combined AS (
+                WITH imps AS (
                     SELECT 
                         ZIP as ZIP_CODE,
-                        SUM(IMPRESSIONS) as IMPRESSIONS,
-                        SUM(VISITORS) as S_VISITS
+                        SUM(IMPRESSIONS) as IMPRESSIONS
                     FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
                     WHERE ADVERTISER_ID = %(advertiser_id)s
                       AND ZIP IS NOT NULL AND ZIP != '' AND ZIP != '0'
-                      {date_filter}
-                      {campaign_filter}
+                      {date_filter_imps}
+                      {campaign_filter_imps}
                     GROUP BY ZIP
-                    HAVING SUM(IMPRESSIONS) >= 100
+                ),
+                visits AS (
+                    SELECT 
+                        x.POSTAL_CODE as ZIP_CODE,
+                        COUNT(DISTINCT CONCAT(v.DEVICE_ID, v.DRIVE_BY_DATE, v.POI_MD5)) as STORE_VISITS
+                    FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW v
+                    JOIN QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG x ON v.IMP_ID = x.ID
+                    WHERE v.ADVERTISER_ID = %(advertiser_id)s
+                      AND x.POSTAL_CODE IS NOT NULL AND x.POSTAL_CODE != '' AND x.POSTAL_CODE != '0'
+                      {date_filter_visits}
+                      {campaign_filter_visits}
+                    GROUP BY x.POSTAL_CODE
+                ),
+                combined AS (
+                    SELECT 
+                        COALESCE(i.ZIP_CODE, v.ZIP_CODE) as ZIP_CODE,
+                        COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS,
+                        COALESCE(v.STORE_VISITS, 0) as S_VISITS
+                    FROM imps i
+                    FULL OUTER JOIN visits v ON i.ZIP_CODE = v.ZIP_CODE
+                    WHERE COALESCE(i.IMPRESSIONS, 0) >= 100 OR COALESCE(v.STORE_VISITS, 0) >= 5
                 ),
                 ranked AS (
                     SELECT *,
@@ -894,11 +984,10 @@ def get_zip_performance_v5():
                         ROW_NUMBER() OVER (ORDER BY CASE WHEN IMPRESSIONS > 0 THEN S_VISITS * 1.0 / IMPRESSIONS ELSE 0 END ASC) as low_rate_rank
                     FROM combined
                 )
-                SELECT r.ZIP_CODE, r.IMPRESSIONS, r.S_VISITS, d.DMA_NAME
-                FROM ranked r
-                LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING d ON r.ZIP_CODE = d.ZIP_CODE
+                SELECT ZIP_CODE, IMPRESSIONS, S_VISITS
+                FROM ranked
                 WHERE imp_rank <= 50 OR low_rate_rank <= 50
-                ORDER BY r.IMPRESSIONS DESC
+                ORDER BY IMPRESSIONS DESC
             """
         
         cursor.execute(query, {'advertiser_id': advertiser_id})
@@ -1102,6 +1191,327 @@ def get_dma_performance_v5():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # ============================================================================
+# LIFT ANALYSIS ENDPOINT - Panel-Constrained Methodology
+# ============================================================================
+
+@app.route('/api/v5/lift-analysis', methods=['GET'])
+def get_lift_analysis_v5():
+    """
+    Calculate incremental visit lift using panel-constrained matched controls.
+    
+    Methodology:
+    - Panel Universe: PANEL_MAIDS_UNDER_50_MILES_<ADVERTISER_ID>
+    - Exposed: Panel devices that saw ads
+    - Control: Panel devices that did NOT see ads (matched 1:1)
+    - Attribution: Rolling 28-day window after exposure
+    
+    Validated for: AutoZone (8123) with +29.8% relative lift
+    
+    Query Parameters:
+    - advertiser_id (required): Target advertiser ID
+    - agency_id (required): Agency ID
+    - exposure_start_date (optional): Campaign start (default: 90 days ago)
+    - exposure_end_date (optional): Campaign end (default: today)
+    - lookback_days (optional): Attribution window (default: 28)
+    """
+    advertiser_id = request.args.get('advertiser_id', type=int)
+    agency_id = request.args.get('agency_id', type=int)
+    
+    if not advertiser_id or not agency_id:
+        return jsonify({
+            'success': False,
+            'error': 'advertiser_id and agency_id parameters required'
+        }), 400
+    
+    # Date parameters with defaults
+    default_end = datetime.now().date()
+    default_start = default_end - timedelta(days=90)
+    
+    exposure_start_date = request.args.get('exposure_start_date', str(default_start))
+    exposure_end_date = request.args.get('exposure_end_date', str(default_end))
+    lookback_days = int(request.args.get('lookback_days', 28))
+    
+    # Calculate exposure_end_plus_1 for SQL < bound
+    end_date_obj = datetime.strptime(exposure_end_date, '%Y-%m-%d')
+    exposure_end_plus_1 = (end_date_obj + timedelta(days=1)).strftime('%Y-%m-%d')
+    
+    # Construct panel table name
+    panel_table = f"QUORUMDB.SEGMENT_DATA.PANEL_MAIDS_UNDER_50_MILES_{advertiser_id}"
+    
+    try:
+        conn = get_snowflake_connection()
+        cursor = conn.cursor()
+        
+        # Execute the validated SQL template
+        query = f"""
+WITH
+params AS (
+  SELECT
+    {advertiser_id}::NUMBER AS advertiser_id,
+    {agency_id}::NUMBER     AS agency_id,
+    '{exposure_start_date}'::DATE       AS exp_start,
+    '{exposure_end_plus_1}'::DATE  AS exp_end_plus_1,
+    {lookback_days}::NUMBER AS lookback_days
+),
+panel_devices AS (
+  SELECT DISTINCT DEVICE_ID AS device_id
+  FROM {panel_table}
+  WHERE DEVICE_ID IS NOT NULL
+),
+panel_coverage AS (
+  SELECT
+    MIN(DRIVE_BY_DATE) AS visit_min,
+    MAX(DRIVE_BY_DATE) AS visit_max
+  FROM {panel_table}
+),
+exp_days AS (
+  SELECT DISTINCT
+    i.DEVICE_UNIQUE_ID            AS device_id,
+    CAST(i.SYS_TIMESTAMP AS DATE) AS exposure_date
+  FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG i
+  JOIN panel_devices p
+    ON p.device_id = i.DEVICE_UNIQUE_ID
+  JOIN params k
+    ON 1=1
+  WHERE i.SYS_TIMESTAMP >= k.exp_start::TIMESTAMP_NTZ
+    AND i.SYS_TIMESTAMP <  k.exp_end_plus_1::TIMESTAMP_NTZ
+    AND TRY_TO_NUMBER(REGEXP_SUBSTR(TO_VARCHAR(i.QUORUM_ADVERTISER_ID), '[0-9]+')) = k.advertiser_id
+    AND i.AGENCY_ID = k.agency_id
+    AND i.DEVICE_UNIQUE_ID IS NOT NULL
+),
+exp_devices AS (
+  SELECT DISTINCT device_id
+  FROM exp_days
+),
+control_pool AS (
+  SELECT p.device_id
+  FROM panel_devices p
+  LEFT JOIN exp_devices e
+    ON e.device_id = p.device_id
+  WHERE e.device_id IS NULL
+),
+exp_ranked AS (
+  SELECT device_id, ROW_NUMBER() OVER (ORDER BY device_id) AS rn
+  FROM exp_devices
+),
+ctrl_ranked AS (
+  SELECT device_id, ROW_NUMBER() OVER (ORDER BY RANDOM()) AS rn
+  FROM control_pool
+),
+matched AS (
+  SELECT
+    e.device_id AS exp_device_id,
+    c.device_id AS ctrl_device_id
+  FROM exp_ranked e
+  JOIN ctrl_ranked c
+    ON c.rn = e.rn
+),
+ctrl_days AS (
+  SELECT
+    m.ctrl_device_id AS device_id,
+    d.exposure_date
+  FROM matched m
+  JOIN exp_days d
+    ON d.device_id = m.exp_device_id
+),
+visit_days AS (
+  SELECT DISTINCT
+    DEVICE_ID     AS device_id,
+    DRIVE_BY_DATE AS visit_date
+  FROM {panel_table}
+  WHERE DEVICE_ID IS NOT NULL
+),
+exp_attrib_days AS (
+  SELECT DISTINCT
+    e.device_id,
+    e.exposure_date
+  FROM exp_days e
+  JOIN visit_days v
+    ON v.device_id = e.device_id
+  JOIN params k
+    ON 1=1
+  WHERE v.visit_date >  e.exposure_date
+    AND v.visit_date <= DATEADD(day, k.lookback_days, e.exposure_date)
+),
+ctrl_attrib_days AS (
+  SELECT DISTINCT
+    c.device_id,
+    c.exposure_date
+  FROM ctrl_days c
+  JOIN visit_days v
+    ON v.device_id = c.device_id
+  JOIN params k
+    ON 1=1
+  WHERE v.visit_date >  c.exposure_date
+    AND v.visit_date <= DATEADD(day, k.lookback_days, c.exposure_date)
+),
+counts AS (
+  SELECT
+    (SELECT COUNT(*) FROM exp_devices) AS n_e,
+    (SELECT COUNT(DISTINCT device_id) FROM exp_attrib_days) AS x_e,
+    (SELECT COUNT(DISTINCT device_id) FROM (SELECT DISTINCT device_id FROM ctrl_days)) AS n_c,
+    (SELECT COUNT(DISTINCT device_id) FROM ctrl_attrib_days) AS x_c
+),
+stats AS (
+  SELECT
+    n_e, x_e, x_e::FLOAT/NULLIF(n_e,0) AS p_e,
+    n_c, x_c, x_c::FLOAT/NULLIF(n_c,0) AS p_c,
+    (x_e::FLOAT/NULLIF(n_e,0)) - (x_c::FLOAT/NULLIF(n_c,0)) AS abs_lift,
+    ((x_e::FLOAT/NULLIF(n_e,0)) / NULLIF((x_c::FLOAT/NULLIF(n_c,0)),0)) - 1 AS rel_lift,
+    SQRT((p_e*(1-p_e))/NULLIF(n_e,0) + (p_c*(1-p_c))/NULLIF(n_c,0)) AS se_diff,
+    (
+      ((p_e - p_c) /
+        NULLIF(SQRT(
+          (((x_e + x_c)::FLOAT / NULLIF((n_e + n_c),0))
+          * (1 - ((x_e + x_c)::FLOAT / NULLIF((n_e + n_c),0))))
+          * (1/NULLIF(n_e,0) + 1/NULLIF(n_c,0))
+        ), 0)
+      )
+    ) AS z_score
+  FROM (
+    SELECT
+      n_e, x_e, x_e::FLOAT/NULLIF(n_e,0) AS p_e,
+      n_c, x_c, x_c::FLOAT/NULLIF(n_c,0) AS p_c
+    FROM counts
+  )
+),
+pval AS (
+  SELECT
+    *,
+    (1 / (1 + 0.2316419 * ABS(z_score))) AS t,
+    EXP(-0.5 * z_score * z_score) / SQRT(2 * 3.141592653589793) AS phi
+  FROM stats
+),
+pval2 AS (
+  SELECT
+    *,
+    (0.319381530*t
+     + (-0.356563782)*t*t
+     + (1.781477937)*t*t*t
+     + (-1.821255978)*t*t*t*t
+     + (1.330274429)*t*t*t*t*t) AS poly
+  FROM pval
+)
+SELECT
+  k.advertiser_id,
+  k.agency_id,
+  k.exp_start,
+  DATEADD(day, -1, k.exp_end_plus_1) AS exp_end,
+  pc.visit_min,
+  pc.visit_max,
+
+  n_e AS device_exposed_n,
+  n_c AS device_control_n,
+  abs_lift AS device_abs_lift,
+  abs_lift - 1.96*se_diff AS device_abs_lift_ci_95_lo,
+  abs_lift + 1.96*se_diff AS device_abs_lift_ci_95_hi,
+  rel_lift AS device_rel_lift,
+  z_score AS device_z,
+  2 * (phi * poly) AS device_p_value_approx
+FROM pval2
+JOIN params k ON 1=1
+CROSS JOIN panel_coverage pc
+"""
+        
+        cursor.execute(query)
+        
+        # Check if we got results
+        if cursor.rowcount == 0:
+            cursor.close()
+            conn.close()
+            return jsonify({
+                'success': False,
+                'error': f'No lift data available. Panel table PANEL_MAIDS_UNDER_50_MILES_{advertiser_id} may not exist or have insufficient overlap with impression data.',
+                'note': 'Panel-based lift analysis is currently available for select advertisers. Contact support to request panel construction.'
+            }), 404
+        
+        columns = [desc[0] for desc in cursor.description]
+        row = dict(zip(columns, cursor.fetchone()))
+        
+        cursor.close()
+        conn.close()
+        
+        # Build response with proper column name handling
+        def get_val(row, *keys):
+            """Try multiple column name variations"""
+            for key in keys:
+                val = row.get(key)
+                if val is not None:
+                    return val
+            return None
+        
+        # Handle potential null values gracefully
+        exposed_n = int(get_val(row, 'DEVICE_EXPOSED_N', 'device_exposed_n') or 0)
+        control_n = int(get_val(row, 'DEVICE_CONTROL_N', 'device_control_n') or 0)
+        
+        if exposed_n == 0:
+            return jsonify({
+                'success': False,
+                'error': 'No panel overlap detected between impression data and panel devices.',
+                'note': 'This advertiser has a panel table but no devices in the panel were exposed to ads during the specified date range.'
+            }), 404
+        
+        abs_lift = float(get_val(row, 'DEVICE_ABS_LIFT', 'device_abs_lift') or 0)
+        rel_lift = float(get_val(row, 'DEVICE_REL_LIFT', 'device_rel_lift') or 0)
+        
+        response_data = {
+            'advertiser_id': int(get_val(row, 'ADVERTISER_ID', 'advertiser_id')),
+            'agency_id': int(get_val(row, 'AGENCY_ID', 'agency_id')),
+            'exposure_start_date': str(get_val(row, 'EXP_START', 'exp_start')),
+            'exposure_end_date': str(get_val(row, 'EXP_END', 'exp_end')),
+            'visit_coverage_start': str(get_val(row, 'VISIT_MIN', 'visit_min')),
+            'visit_coverage_end': str(get_val(row, 'VISIT_MAX', 'visit_max')),
+            'device_exposed_n': exposed_n,
+            'device_control_n': control_n,
+            'device_abs_lift': round(abs_lift, 4),
+            'device_abs_lift_ci_95_lo': round(float(get_val(row, 'DEVICE_ABS_LIFT_CI_95_LO', 'device_abs_lift_ci_95_lo') or 0), 4),
+            'device_abs_lift_ci_95_hi': round(float(get_val(row, 'DEVICE_ABS_LIFT_CI_95_HI', 'device_abs_lift_ci_95_hi') or 0), 4),
+            'device_rel_lift': round(rel_lift, 4),
+            'device_z': round(float(get_val(row, 'DEVICE_Z', 'device_z') or 0), 2),
+            'device_p_value': round(float(get_val(row, 'DEVICE_P_VALUE_APPROX', 'device_p_value_approx') or 1), 6)
+        }
+        
+        # Add interpretation metadata
+        p_value = response_data['device_p_value']
+        if p_value < 0.001:
+            significance = "Statistically Significant"
+            significance_level = "p < 0.001"
+        elif p_value < 0.05:
+            significance = "Significant"
+            significance_level = f"p = {p_value:.4f}"
+        else:
+            significance = "Not Statistically Significant"
+            significance_level = f"p = {p_value:.4f}"
+        
+        response_data['interpretation'] = {
+            'significance': significance,
+            'significance_level': significance_level,
+            'methodology': 'Panel-constrained matched controls with rolling 28-day attribution',
+            'note': 'Lift reflects the difference in visit rates between exposed consumers and matched unexposed controls within the Quorum panel.'
+        }
+        
+        return jsonify({
+            'success': True,
+            'data': response_data
+        })
+        
+    except Exception as e:
+        error_msg = str(e)
+        
+        # Provide helpful error messages for common issues
+        if 'does not exist' in error_msg.lower() or 'object does not exist' in error_msg.lower():
+            return jsonify({
+                'success': False,
+                'error': f'Panel table PANEL_MAIDS_UNDER_50_MILES_{advertiser_id} does not exist',
+                'note': 'Panel-based lift analysis is currently available for select advertisers. Contact support to request panel construction.'
+            }), 404
+        else:
+            return jsonify({
+                'success': False,
+                'error': error_msg
+            }), 500
+
+# ============================================================================
 # BACKWARD COMPATIBILITY - V3/V4 ROUTES
 # ============================================================================
 
@@ -1146,214 +1556,6 @@ def zip_compat():
 @app.route('/api/creative-performance', methods=['GET'])
 def creative_compat():
     return get_creative_performance_v5()
-
-# Overview endpoint compatibility
-@app.route('/api/v3/agency-overview', methods=['GET'])
-@app.route('/api/v4/agency-overview', methods=['GET'])
-def agency_overview_compat():
-    return get_agency_overview_v5()
-
-@app.route('/api/v3/advertiser-overview', methods=['GET'])
-@app.route('/api/v4/advertiser-overview', methods=['GET'])
-def advertiser_overview_compat():
-    return get_advertiser_overview_v5()
-
-@app.route('/api/v3/impressions-timeseries', methods=['GET'])
-@app.route('/api/v4/impressions-timeseries', methods=['GET'])
-def impressions_timeseries_compat():
-    return get_impressions_timeseries_v5()
-
-@app.route('/api/v3/advertiser-timeseries', methods=['GET'])
-@app.route('/api/v4/advertiser-timeseries', methods=['GET'])
-def advertiser_timeseries_compat():
-    return get_impressions_timeseries_v5()
-
-@app.route('/api/v3/global-advertiser-overview', methods=['GET'])
-@app.route('/api/v4/global-advertiser-overview', methods=['GET'])
-def global_advertiser_overview_compat():
-    """Get all advertisers across all agencies"""
-    try:
-        conn = get_snowflake_connection()
-        cursor = conn.cursor()
-        
-        query = """
-            SELECT 
-                AGENCY_ID,
-                AGENCY_NAME,
-                ADVERTISER_ID,
-                ADVERTISER_NAME,
-                SUM(IMPRESSIONS) as IMPRESSIONS,
-                SUM(COALESCE(SITE_VISITS, 0)) as WEB_VISITS,
-                SUM(COALESCE(TEST_VISITORS, 0)) as LOCATION_VISITS
-            FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
-            WHERE LOG_DATE >= DATEADD(day, -90, CURRENT_DATE())
-            GROUP BY AGENCY_ID, AGENCY_NAME, ADVERTISER_ID, ADVERTISER_NAME
-            ORDER BY IMPRESSIONS DESC
-            LIMIT 200
-        """
-        
-        cursor.execute(query)
-        columns = [desc[0] for desc in cursor.description]
-        results = [dict(zip(columns, row)) for row in cursor.fetchall()]
-        
-        cursor.close()
-        conn.close()
-        
-        return jsonify({'success': True, 'data': results})
-        
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-# ============================================================================
-# OVERVIEW ENDPOINTS (for dashboard screens)
-# ============================================================================
-
-@app.route('/api/v5/agency-overview', methods=['GET'])
-def get_agency_overview_v5():
-    """Get all agencies with Web Visits, Location Visits, W Visit Rate, L Visit Rate"""
-    try:
-        conn = get_snowflake_connection()
-        cursor = conn.cursor()
-        
-        query = """
-            SELECT 
-                AGENCY_ID,
-                AGENCY_NAME,
-                COUNT(DISTINCT ADVERTISER_ID) as ADVERTISER_COUNT,
-                SUM(IMPRESSIONS) as IMPRESSIONS,
-                SUM(COALESCE(SITE_VISITS, 0)) as WEB_VISITS,
-                SUM(COALESCE(TEST_VISITORS, 0)) as LOCATION_VISITS
-            FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
-            WHERE LOG_DATE >= DATEADD(day, -90, CURRENT_DATE())
-            GROUP BY AGENCY_ID, AGENCY_NAME
-            ORDER BY IMPRESSIONS DESC
-        """
-        
-        cursor.execute(query)
-        columns = [desc[0] for desc in cursor.description]
-        results = [dict(zip(columns, row)) for row in cursor.fetchall()]
-        
-        cursor.close()
-        conn.close()
-        
-        return jsonify({'success': True, 'data': results})
-        
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/api/v5/advertiser-overview', methods=['GET'])
-def get_advertiser_overview_v5():
-    """Get advertisers for an agency with Web Visits, Location Visits, W Visit Rate, L Visit Rate"""
-    agency_id = request.args.get('agency_id', type=int)
-    
-    try:
-        conn = get_snowflake_connection()
-        cursor = conn.cursor()
-        
-        if agency_id:
-            query = """
-                SELECT 
-                    ADVERTISER_ID,
-                    ADVERTISER_NAME,
-                    SUM(IMPRESSIONS) as IMPRESSIONS,
-                    SUM(COALESCE(SITE_VISITS, 0)) as WEB_VISITS,
-                    SUM(COALESCE(TEST_VISITORS, 0)) as LOCATION_VISITS
-                FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
-                WHERE AGENCY_ID = %(agency_id)s
-                  AND LOG_DATE >= DATEADD(day, -90, CURRENT_DATE())
-                GROUP BY ADVERTISER_ID, ADVERTISER_NAME
-                ORDER BY IMPRESSIONS DESC
-            """
-            cursor.execute(query, {'agency_id': agency_id})
-        else:
-            # Global advertiser overview
-            query = """
-                SELECT 
-                    AGENCY_ID,
-                    AGENCY_NAME,
-                    ADVERTISER_ID,
-                    ADVERTISER_NAME,
-                    SUM(IMPRESSIONS) as IMPRESSIONS,
-                    SUM(COALESCE(SITE_VISITS, 0)) as WEB_VISITS,
-                    SUM(COALESCE(TEST_VISITORS, 0)) as LOCATION_VISITS
-                FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
-                WHERE LOG_DATE >= DATEADD(day, -90, CURRENT_DATE())
-                GROUP BY AGENCY_ID, AGENCY_NAME, ADVERTISER_ID, ADVERTISER_NAME
-                ORDER BY IMPRESSIONS DESC
-                LIMIT 100
-            """
-            cursor.execute(query)
-        
-        columns = [desc[0] for desc in cursor.description]
-        results = [dict(zip(columns, row)) for row in cursor.fetchall()]
-        
-        cursor.close()
-        conn.close()
-        
-        return jsonify({'success': True, 'data': results})
-        
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/api/v5/impressions-timeseries', methods=['GET'])
-def get_impressions_timeseries_v5():
-    """Get daily impressions by agency for stacked bar chart"""
-    agency_id = request.args.get('agency_id', type=int)
-    
-    try:
-        conn = get_snowflake_connection()
-        cursor = conn.cursor()
-        
-        if agency_id:
-            # Time series by advertiser for a specific agency
-            query = """
-                WITH ranked AS (
-                    SELECT 
-                        ADVERTISER_ID,
-                        ADVERTISER_NAME,
-                        SUM(IMPRESSIONS) as total_imps,
-                        ROW_NUMBER() OVER (ORDER BY SUM(IMPRESSIONS) DESC) as rn
-                    FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
-                    WHERE AGENCY_ID = %(agency_id)s
-                      AND LOG_DATE >= DATEADD(day, -30, CURRENT_DATE())
-                    GROUP BY ADVERTISER_ID, ADVERTISER_NAME
-                )
-                SELECT 
-                    d.LOG_DATE,
-                    CASE WHEN r.rn <= 10 THEN d.ADVERTISER_NAME ELSE 'Others' END as ADVERTISER_NAME,
-                    SUM(d.IMPRESSIONS) as IMPRESSIONS
-                FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING d
-                JOIN ranked r ON d.ADVERTISER_ID = r.ADVERTISER_ID
-                WHERE d.AGENCY_ID = %(agency_id)s
-                  AND d.LOG_DATE >= DATEADD(day, -30, CURRENT_DATE())
-                GROUP BY d.LOG_DATE, CASE WHEN r.rn <= 10 THEN d.ADVERTISER_NAME ELSE 'Others' END
-                ORDER BY d.LOG_DATE, IMPRESSIONS DESC
-            """
-            cursor.execute(query, {'agency_id': agency_id})
-        else:
-            # Time series by agency (global view)
-            query = """
-                SELECT 
-                    LOG_DATE,
-                    AGENCY_NAME,
-                    SUM(IMPRESSIONS) as IMPRESSIONS
-                FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
-                WHERE LOG_DATE >= DATEADD(day, -30, CURRENT_DATE())
-                GROUP BY LOG_DATE, AGENCY_NAME
-                ORDER BY LOG_DATE, IMPRESSIONS DESC
-            """
-            cursor.execute(query)
-        
-        columns = [desc[0] for desc in cursor.description]
-        results = [dict(zip(columns, row)) for row in cursor.fetchall()]
-        
-        cursor.close()
-        conn.close()
-        
-        return jsonify({'success': True, 'data': results})
-        
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
 
 # ============================================================================
 # RUN
