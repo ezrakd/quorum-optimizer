@@ -1191,327 +1191,6 @@ def get_dma_performance_v5():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # ============================================================================
-# LIFT ANALYSIS ENDPOINT - Panel-Constrained Methodology
-# ============================================================================
-
-@app.route('/api/v5/lift-analysis', methods=['GET'])
-def get_lift_analysis_v5():
-    """
-    Calculate incremental visit lift using panel-constrained matched controls.
-    
-    Methodology:
-    - Panel Universe: PANEL_MAIDS_UNDER_50_MILES_<ADVERTISER_ID>
-    - Exposed: Panel devices that saw ads
-    - Control: Panel devices that did NOT see ads (matched 1:1)
-    - Attribution: Rolling 28-day window after exposure
-    
-    Validated for: AutoZone (8123) with +29.8% relative lift
-    
-    Query Parameters:
-    - advertiser_id (required): Target advertiser ID
-    - agency_id (required): Agency ID
-    - exposure_start_date (optional): Campaign start (default: 90 days ago)
-    - exposure_end_date (optional): Campaign end (default: today)
-    - lookback_days (optional): Attribution window (default: 28)
-    """
-    advertiser_id = request.args.get('advertiser_id', type=int)
-    agency_id = request.args.get('agency_id', type=int)
-    
-    if not advertiser_id or not agency_id:
-        return jsonify({
-            'success': False,
-            'error': 'advertiser_id and agency_id parameters required'
-        }), 400
-    
-    # Date parameters with defaults
-    default_end = datetime.now().date()
-    default_start = default_end - timedelta(days=90)
-    
-    exposure_start_date = request.args.get('exposure_start_date', str(default_start))
-    exposure_end_date = request.args.get('exposure_end_date', str(default_end))
-    lookback_days = int(request.args.get('lookback_days', 28))
-    
-    # Calculate exposure_end_plus_1 for SQL < bound
-    end_date_obj = datetime.strptime(exposure_end_date, '%Y-%m-%d')
-    exposure_end_plus_1 = (end_date_obj + timedelta(days=1)).strftime('%Y-%m-%d')
-    
-    # Construct panel table name
-    panel_table = f"QUORUMDB.SEGMENT_DATA.PANEL_MAIDS_UNDER_50_MILES_{advertiser_id}"
-    
-    try:
-        conn = get_snowflake_connection()
-        cursor = conn.cursor()
-        
-        # Execute the validated SQL template
-        query = f"""
-WITH
-params AS (
-  SELECT
-    {advertiser_id}::NUMBER AS advertiser_id,
-    {agency_id}::NUMBER     AS agency_id,
-    '{exposure_start_date}'::DATE       AS exp_start,
-    '{exposure_end_plus_1}'::DATE  AS exp_end_plus_1,
-    {lookback_days}::NUMBER AS lookback_days
-),
-panel_devices AS (
-  SELECT DISTINCT DEVICE_ID AS device_id
-  FROM {panel_table}
-  WHERE DEVICE_ID IS NOT NULL
-),
-panel_coverage AS (
-  SELECT
-    MIN(DRIVE_BY_DATE) AS visit_min,
-    MAX(DRIVE_BY_DATE) AS visit_max
-  FROM {panel_table}
-),
-exp_days AS (
-  SELECT DISTINCT
-    i.DEVICE_UNIQUE_ID            AS device_id,
-    CAST(i.SYS_TIMESTAMP AS DATE) AS exposure_date
-  FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG i
-  JOIN panel_devices p
-    ON p.device_id = i.DEVICE_UNIQUE_ID
-  JOIN params k
-    ON 1=1
-  WHERE i.SYS_TIMESTAMP >= k.exp_start::TIMESTAMP_NTZ
-    AND i.SYS_TIMESTAMP <  k.exp_end_plus_1::TIMESTAMP_NTZ
-    AND TRY_TO_NUMBER(REGEXP_SUBSTR(TO_VARCHAR(i.QUORUM_ADVERTISER_ID), '[0-9]+')) = k.advertiser_id
-    AND i.AGENCY_ID = k.agency_id
-    AND i.DEVICE_UNIQUE_ID IS NOT NULL
-),
-exp_devices AS (
-  SELECT DISTINCT device_id
-  FROM exp_days
-),
-control_pool AS (
-  SELECT p.device_id
-  FROM panel_devices p
-  LEFT JOIN exp_devices e
-    ON e.device_id = p.device_id
-  WHERE e.device_id IS NULL
-),
-exp_ranked AS (
-  SELECT device_id, ROW_NUMBER() OVER (ORDER BY device_id) AS rn
-  FROM exp_devices
-),
-ctrl_ranked AS (
-  SELECT device_id, ROW_NUMBER() OVER (ORDER BY RANDOM()) AS rn
-  FROM control_pool
-),
-matched AS (
-  SELECT
-    e.device_id AS exp_device_id,
-    c.device_id AS ctrl_device_id
-  FROM exp_ranked e
-  JOIN ctrl_ranked c
-    ON c.rn = e.rn
-),
-ctrl_days AS (
-  SELECT
-    m.ctrl_device_id AS device_id,
-    d.exposure_date
-  FROM matched m
-  JOIN exp_days d
-    ON d.device_id = m.exp_device_id
-),
-visit_days AS (
-  SELECT DISTINCT
-    DEVICE_ID     AS device_id,
-    DRIVE_BY_DATE AS visit_date
-  FROM {panel_table}
-  WHERE DEVICE_ID IS NOT NULL
-),
-exp_attrib_days AS (
-  SELECT DISTINCT
-    e.device_id,
-    e.exposure_date
-  FROM exp_days e
-  JOIN visit_days v
-    ON v.device_id = e.device_id
-  JOIN params k
-    ON 1=1
-  WHERE v.visit_date >  e.exposure_date
-    AND v.visit_date <= DATEADD(day, k.lookback_days, e.exposure_date)
-),
-ctrl_attrib_days AS (
-  SELECT DISTINCT
-    c.device_id,
-    c.exposure_date
-  FROM ctrl_days c
-  JOIN visit_days v
-    ON v.device_id = c.device_id
-  JOIN params k
-    ON 1=1
-  WHERE v.visit_date >  c.exposure_date
-    AND v.visit_date <= DATEADD(day, k.lookback_days, c.exposure_date)
-),
-counts AS (
-  SELECT
-    (SELECT COUNT(*) FROM exp_devices) AS n_e,
-    (SELECT COUNT(DISTINCT device_id) FROM exp_attrib_days) AS x_e,
-    (SELECT COUNT(DISTINCT device_id) FROM (SELECT DISTINCT device_id FROM ctrl_days)) AS n_c,
-    (SELECT COUNT(DISTINCT device_id) FROM ctrl_attrib_days) AS x_c
-),
-stats AS (
-  SELECT
-    n_e, x_e, x_e::FLOAT/NULLIF(n_e,0) AS p_e,
-    n_c, x_c, x_c::FLOAT/NULLIF(n_c,0) AS p_c,
-    (x_e::FLOAT/NULLIF(n_e,0)) - (x_c::FLOAT/NULLIF(n_c,0)) AS abs_lift,
-    ((x_e::FLOAT/NULLIF(n_e,0)) / NULLIF((x_c::FLOAT/NULLIF(n_c,0)),0)) - 1 AS rel_lift,
-    SQRT((p_e*(1-p_e))/NULLIF(n_e,0) + (p_c*(1-p_c))/NULLIF(n_c,0)) AS se_diff,
-    (
-      ((p_e - p_c) /
-        NULLIF(SQRT(
-          (((x_e + x_c)::FLOAT / NULLIF((n_e + n_c),0))
-          * (1 - ((x_e + x_c)::FLOAT / NULLIF((n_e + n_c),0))))
-          * (1/NULLIF(n_e,0) + 1/NULLIF(n_c,0))
-        ), 0)
-      )
-    ) AS z_score
-  FROM (
-    SELECT
-      n_e, x_e, x_e::FLOAT/NULLIF(n_e,0) AS p_e,
-      n_c, x_c, x_c::FLOAT/NULLIF(n_c,0) AS p_c
-    FROM counts
-  )
-),
-pval AS (
-  SELECT
-    *,
-    (1 / (1 + 0.2316419 * ABS(z_score))) AS t,
-    EXP(-0.5 * z_score * z_score) / SQRT(2 * 3.141592653589793) AS phi
-  FROM stats
-),
-pval2 AS (
-  SELECT
-    *,
-    (0.319381530*t
-     + (-0.356563782)*t*t
-     + (1.781477937)*t*t*t
-     + (-1.821255978)*t*t*t*t
-     + (1.330274429)*t*t*t*t*t) AS poly
-  FROM pval
-)
-SELECT
-  k.advertiser_id,
-  k.agency_id,
-  k.exp_start,
-  DATEADD(day, -1, k.exp_end_plus_1) AS exp_end,
-  pc.visit_min,
-  pc.visit_max,
-
-  n_e AS device_exposed_n,
-  n_c AS device_control_n,
-  abs_lift AS device_abs_lift,
-  abs_lift - 1.96*se_diff AS device_abs_lift_ci_95_lo,
-  abs_lift + 1.96*se_diff AS device_abs_lift_ci_95_hi,
-  rel_lift AS device_rel_lift,
-  z_score AS device_z,
-  2 * (phi * poly) AS device_p_value_approx
-FROM pval2
-JOIN params k ON 1=1
-CROSS JOIN panel_coverage pc
-"""
-        
-        cursor.execute(query)
-        
-        # Check if we got results
-        if cursor.rowcount == 0:
-            cursor.close()
-            conn.close()
-            return jsonify({
-                'success': False,
-                'error': f'No lift data available. Panel table PANEL_MAIDS_UNDER_50_MILES_{advertiser_id} may not exist or have insufficient overlap with impression data.',
-                'note': 'Panel-based lift analysis is currently available for select advertisers. Contact support to request panel construction.'
-            }), 404
-        
-        columns = [desc[0] for desc in cursor.description]
-        row = dict(zip(columns, cursor.fetchone()))
-        
-        cursor.close()
-        conn.close()
-        
-        # Build response with proper column name handling
-        def get_val(row, *keys):
-            """Try multiple column name variations"""
-            for key in keys:
-                val = row.get(key)
-                if val is not None:
-                    return val
-            return None
-        
-        # Handle potential null values gracefully
-        exposed_n = int(get_val(row, 'DEVICE_EXPOSED_N', 'device_exposed_n') or 0)
-        control_n = int(get_val(row, 'DEVICE_CONTROL_N', 'device_control_n') or 0)
-        
-        if exposed_n == 0:
-            return jsonify({
-                'success': False,
-                'error': 'No panel overlap detected between impression data and panel devices.',
-                'note': 'This advertiser has a panel table but no devices in the panel were exposed to ads during the specified date range.'
-            }), 404
-        
-        abs_lift = float(get_val(row, 'DEVICE_ABS_LIFT', 'device_abs_lift') or 0)
-        rel_lift = float(get_val(row, 'DEVICE_REL_LIFT', 'device_rel_lift') or 0)
-        
-        response_data = {
-            'advertiser_id': int(get_val(row, 'ADVERTISER_ID', 'advertiser_id')),
-            'agency_id': int(get_val(row, 'AGENCY_ID', 'agency_id')),
-            'exposure_start_date': str(get_val(row, 'EXP_START', 'exp_start')),
-            'exposure_end_date': str(get_val(row, 'EXP_END', 'exp_end')),
-            'visit_coverage_start': str(get_val(row, 'VISIT_MIN', 'visit_min')),
-            'visit_coverage_end': str(get_val(row, 'VISIT_MAX', 'visit_max')),
-            'device_exposed_n': exposed_n,
-            'device_control_n': control_n,
-            'device_abs_lift': round(abs_lift, 4),
-            'device_abs_lift_ci_95_lo': round(float(get_val(row, 'DEVICE_ABS_LIFT_CI_95_LO', 'device_abs_lift_ci_95_lo') or 0), 4),
-            'device_abs_lift_ci_95_hi': round(float(get_val(row, 'DEVICE_ABS_LIFT_CI_95_HI', 'device_abs_lift_ci_95_hi') or 0), 4),
-            'device_rel_lift': round(rel_lift, 4),
-            'device_z': round(float(get_val(row, 'DEVICE_Z', 'device_z') or 0), 2),
-            'device_p_value': round(float(get_val(row, 'DEVICE_P_VALUE_APPROX', 'device_p_value_approx') or 1), 6)
-        }
-        
-        # Add interpretation metadata
-        p_value = response_data['device_p_value']
-        if p_value < 0.001:
-            significance = "Statistically Significant"
-            significance_level = "p < 0.001"
-        elif p_value < 0.05:
-            significance = "Significant"
-            significance_level = f"p = {p_value:.4f}"
-        else:
-            significance = "Not Statistically Significant"
-            significance_level = f"p = {p_value:.4f}"
-        
-        response_data['interpretation'] = {
-            'significance': significance,
-            'significance_level': significance_level,
-            'methodology': 'Panel-constrained matched controls with rolling 28-day attribution',
-            'note': 'Lift reflects the difference in visit rates between exposed consumers and matched unexposed controls within the Quorum panel.'
-        }
-        
-        return jsonify({
-            'success': True,
-            'data': response_data
-        })
-        
-    except Exception as e:
-        error_msg = str(e)
-        
-        # Provide helpful error messages for common issues
-        if 'does not exist' in error_msg.lower() or 'object does not exist' in error_msg.lower():
-            return jsonify({
-                'success': False,
-                'error': f'Panel table PANEL_MAIDS_UNDER_50_MILES_{advertiser_id} does not exist',
-                'note': 'Panel-based lift analysis is currently available for select advertisers. Contact support to request panel construction.'
-            }), 404
-        else:
-            return jsonify({
-                'success': False,
-                'error': error_msg
-            }), 500
-
-# ============================================================================
 # BACKWARD COMPATIBILITY - V3/V4 ROUTES
 # ============================================================================
 
@@ -1557,6 +1236,332 @@ def zip_compat():
 def creative_compat():
     return get_creative_performance_v5()
 
+
+# ============================================================================
+# LIFT ANALYSIS - POI Visit Lift Calculation
+# ============================================================================
+
+import math
+
+# Agency configuration for lift analysis
+LIFT_AGENCY_CONFIGS = {
+    # PT 22 - MNTN (Direct MAID)
+    2514: {'name': 'MNTN', 'pt': '22', 'method': 'direct', 'table': 'QUORUM_ADV_STORE_VISITS', 'device_field': 'IMP_MAID'},
+    # PT 13 - Adelphic agencies (Direct MAID)
+    1950: {'name': 'Byrider', 'pt': '13', 'method': 'direct', 'table': 'QUORUM_ADV_STORE_VISITS', 'device_field': 'IMP_MAID'},
+    1955: {'name': 'Marine/Boat', 'pt': '13', 'method': 'direct', 'table': 'QUORUM_ADV_STORE_VISITS', 'device_field': 'IMP_MAID'},
+    1956: {'name': 'Dealer Spike', 'pt': '13', 'method': 'direct', 'table': 'QUORUM_ADV_STORE_VISITS', 'device_field': 'IMP_MAID'},
+    2086: {'name': 'Level5', 'pt': '13', 'method': 'direct', 'table': 'QUORUM_ADV_STORE_VISITS', 'device_field': 'IMP_MAID'},
+    2298: {'name': 'InteractRV', 'pt': '13', 'method': 'direct', 'table': 'QUORUM_ADV_STORE_VISITS', 'device_field': 'IMP_MAID'},
+    # Variable PT - IP-to-MAID agencies
+    1813: {'name': 'Causal iQ', 'pt': 'variable', 'method': 'ip_to_maid', 'table': 'XANDR_IMPRESSION_LOG', 'device_field': 'CLIENT_IP'},
+    1972: {'name': 'Hearst', 'pt': 'variable', 'method': 'ip_to_maid', 'table': 'XANDR_IMPRESSION_LOG', 'device_field': 'CLIENT_IP'},
+    2234: {'name': 'Magnite', 'pt': 'variable', 'method': 'ip_to_maid', 'table': 'XANDR_IMPRESSION_LOG', 'device_field': 'CLIENT_IP'},
+    # PT 28 - Paramount CTV (IP-to-MAID)
+    1480: {'name': 'Paramount', 'pt': '28', 'method': 'ip_to_maid', 'table': 'PARAMOUNT_IMP_STORE_VISITS', 'device_field': 'IP', 'agency_filter': True},
+}
+
+def calculate_lift_stats(n_e, x_e, n_c, x_c):
+    """Calculate z-score, p-value, and confidence intervals for two-proportion test."""
+    if n_e == 0 or n_c == 0:
+        return {'z': 0.0, 'p': 1.0, 'ci_lower': 0.0, 'ci_upper': 0.0}
+    
+    p_e = x_e / n_e
+    p_c = x_c / n_c
+    p_pooled = (x_e + x_c) / (n_e + n_c)
+    
+    if p_pooled == 0 or p_pooled == 1:
+        return {'z': 0.0, 'p': 1.0, 'ci_lower': 0.0, 'ci_upper': 0.0}
+    
+    se = math.sqrt(p_pooled * (1 - p_pooled) * (1/n_e + 1/n_c))
+    if se == 0:
+        return {'z': 0.0, 'p': 1.0, 'ci_lower': 0.0, 'ci_upper': 0.0}
+    
+    z = (p_e - p_c) / se
+    p_value = 2 * (1 - 0.5 * (1 + math.erf(abs(z) / math.sqrt(2))))
+    
+    # Calculate 95% CI for relative lift
+    if p_c > 0:
+        relative_lift = ((p_e / p_c) - 1) * 100
+        se_relative = math.sqrt((p_e * (1-p_e) / n_e + p_c * (1-p_c) / n_c)) / p_c * 100
+        ci_lower = relative_lift - 1.96 * se_relative
+        ci_upper = relative_lift + 1.96 * se_relative
+    else:
+        relative_lift = 0
+        ci_lower = 0
+        ci_upper = 0
+    
+    return {
+        'z': round(z, 2),
+        'p': round(p_value, 4),
+        'ci_lower': round(ci_lower, 2),
+        'ci_upper': round(ci_upper, 2)
+    }
+
+@app.route('/api/v5/lift-analysis', methods=['GET'])
+def calculate_lift():
+    """
+    Calculate store visit lift for an advertiser.
+    Returns data in format expected by frontend.
+    """
+    agency_id = request.args.get('agency_id', type=int)
+    advertiser_id = request.args.get('advertiser_id', type=int)
+    
+    if not agency_id or not advertiser_id:
+        return jsonify({'success': False, 'error': 'agency_id and advertiser_id required'}), 400
+    
+    config = LIFT_AGENCY_CONFIGS.get(agency_id)
+    if not config:
+        return jsonify({'success': False, 'error': f'Agency {agency_id} not configured for lift analysis'}), 400
+    
+    try:
+        conn = get_snowflake_connection()
+        cursor = conn.cursor()
+        
+        # Build exposed devices query based on method
+        if config['method'] == 'direct':
+            exposed_query = f"""
+                SELECT DISTINCT {config['device_field']} as DEVICE_ID
+                FROM QUORUMDB.SEGMENT_DATA.{config['table']}
+                WHERE QUORUM_ADVERTISER_ID = '{advertiser_id}'
+                  AND {config['device_field']} IS NOT NULL
+                  AND LENGTH({config['device_field']}) = 36
+            """
+        else:  # ip_to_maid
+            exposed_query = f"""
+                WITH impression_ips AS (
+                    SELECT DISTINCT {config['device_field']} as IP
+                    FROM QUORUMDB.SEGMENT_DATA.{config['table']}
+                    WHERE QUORUM_ADVERTISER_ID = '{advertiser_id}'
+                      AND {config['device_field']} IS NOT NULL
+                      AND {config['device_field']} != ''
+                      AND {config['device_field']} NOT LIKE '2%'
+                )
+                SELECT DISTINCT ipm.MAID as DEVICE_ID
+                FROM impression_ips ii
+                INNER JOIN QUORUMDB.SEGMENT_DATA.IP_MAID_MAPPING ipm ON ii.IP = ipm.IP
+                WHERE ipm.MAID IS NOT NULL AND LENGTH(ipm.MAID) = 36
+            """
+        
+        panel_table = f"QUORUMDB.DNA_CORE.PANEL_MAIDS_UNDER_50_MILES_{advertiser_id}"
+        
+        # Full lift calculation query
+        lift_query = f"""
+            WITH 
+            panel_visits AS (
+                SELECT DEVICE_ID, DRIVE_BY_DATE as VISIT_DATE 
+                FROM {panel_table}
+            ),
+            exposed_devices AS (
+                {exposed_query}
+            ),
+            exposed_in_panel AS (
+                SELECT DISTINCT p.DEVICE_ID 
+                FROM panel_visits p 
+                INNER JOIN exposed_devices e ON UPPER(p.DEVICE_ID) = UPPER(e.DEVICE_ID)
+            ),
+            control_in_panel AS (
+                SELECT DISTINCT p.DEVICE_ID 
+                FROM panel_visits p 
+                LEFT JOIN exposed_devices e ON UPPER(p.DEVICE_ID) = UPPER(e.DEVICE_ID) 
+                WHERE e.DEVICE_ID IS NULL
+            ),
+            visitor_devices AS (
+                SELECT DEVICE_ID 
+                FROM panel_visits 
+                GROUP BY DEVICE_ID 
+                HAVING COUNT(DISTINCT VISIT_DATE) >= 2
+            )
+            SELECT
+                (SELECT COUNT(*) FROM exposed_in_panel) as n_e,
+                (SELECT COUNT(*) FROM exposed_in_panel e INNER JOIN visitor_devices v ON UPPER(e.DEVICE_ID) = UPPER(v.DEVICE_ID)) as x_e,
+                (SELECT COUNT(*) FROM control_in_panel) as n_c,
+                (SELECT COUNT(*) FROM control_in_panel c INNER JOIN visitor_devices v ON UPPER(c.DEVICE_ID) = UPPER(v.DEVICE_ID)) as x_c
+        """
+        
+        cursor.execute(lift_query)
+        row = cursor.fetchone()
+        
+        if not row:
+            cursor.close()
+            conn.close()
+            return jsonify({'success': False, 'error': 'No data returned'}), 500
+        
+        n_e, x_e, n_c, x_c = row
+        n_e = n_e or 0
+        x_e = x_e or 0
+        n_c = n_c or 0
+        x_c = x_c or 0
+        
+        # Calculate rates and lift
+        exposed_rate = (x_e / n_e * 100) if n_e > 0 else 0
+        control_rate = (x_c / n_c * 100) if n_c > 0 else 0
+        relative_lift = ((exposed_rate / control_rate) - 1) * 100 if control_rate > 0 else 0
+        absolute_lift = exposed_rate - control_rate
+        
+        stats = calculate_lift_stats(n_e, x_e, n_c, x_c)
+        
+        # Determine significance
+        if n_e < 30:
+            is_significant = False
+            significance_level = 'Insufficient sample size'
+        elif abs(stats['z']) >= 1.96:
+            is_significant = True
+            significance_level = 'p < 0.05 (95% confidence)'
+        elif abs(stats['z']) >= 1.65:
+            is_significant = False
+            significance_level = 'p < 0.10 (marginal)'
+        else:
+            is_significant = False
+            significance_level = 'Not statistically significant'
+        
+        # Build interpretation
+        if is_significant and relative_lift > 0:
+            interpretation = f"Ad-exposed users show {relative_lift:.1f}% higher store visit rate vs unexposed panel. This lift is statistically significant at 95% confidence."
+        elif relative_lift > 0:
+            interpretation = f"Ad-exposed users show {relative_lift:.1f}% higher store visit rate, but the result is not statistically significant. Consider running longer or with larger samples."
+        elif relative_lift < 0:
+            interpretation = f"Control group shows higher visit rate than exposed group. This may indicate targeting or measurement issues."
+        else:
+            interpretation = "No measurable lift detected between exposed and control groups."
+        
+        cursor.close()
+        conn.close()
+        
+        # Return in format frontend expects
+        return jsonify({
+            'success': True,
+            'data': {
+                'filter_level': 'advertiser',
+                'methodology': f'{config["method"].replace("_", " ").title()} device matching via {config["table"]}',
+                'exposed_group': {
+                    'n': n_e,
+                    'visitors': x_e,
+                    'rate': round(exposed_rate, 2)
+                },
+                'control_group': {
+                    'n': n_c,
+                    'visitors': x_c,
+                    'rate': round(control_rate, 2)
+                },
+                'lift': {
+                    'relative': round(relative_lift, 2),
+                    'absolute': round(absolute_lift, 2),
+                    'ci_95_lower': stats['ci_lower'],
+                    'ci_95_upper': stats['ci_upper']
+                },
+                'significance': {
+                    'is_significant': is_significant,
+                    'significance_level': significance_level,
+                    'z_score': stats['z'],
+                    'p_value': stats['p']
+                },
+                'interpretation': {
+                    'summary': interpretation
+                }
+            }
+        })
+        
+    except Exception as e:
+        error_msg = str(e)
+        if 'does not exist' in error_msg.lower() or 'invalid identifier' in error_msg.lower():
+            return jsonify({'success': False, 'error': f'Panel table not found for advertiser {advertiser_id}'})
+        return jsonify({'success': False, 'error': error_msg}), 500
+
+@app.route('/api/v5/lift/panel/<int:advertiser_id>/status', methods=['GET'])
+def check_panel_status(advertiser_id):
+    """Check if panel exists for an advertiser."""
+    try:
+        conn = get_snowflake_connection()
+        cursor = conn.cursor()
+        
+        query = f"""
+            SELECT COUNT(DISTINCT DEVICE_ID) as panel_size,
+                   MIN(DRIVE_BY_DATE) as min_date,
+                   MAX(DRIVE_BY_DATE) as max_date
+            FROM QUORUMDB.DNA_CORE.PANEL_MAIDS_UNDER_50_MILES_{advertiser_id}
+        """
+        
+        cursor.execute(query)
+        row = cursor.fetchone()
+        
+        cursor.close()
+        conn.close()
+        
+        if row and row[0] > 0:
+            return jsonify({
+                'success': True,
+                'exists': True,
+                'data': {
+                    'advertiser_id': advertiser_id,
+                    'panel_size': row[0],
+                    'min_date': str(row[1]),
+                    'max_date': str(row[2])
+                }
+            })
+        else:
+            return jsonify({'success': True, 'exists': False})
+            
+    except Exception as e:
+        return jsonify({'success': True, 'exists': False, 'error': str(e)})
+
+@app.route('/api/v5/lift/panel/<int:advertiser_id>', methods=['POST'])
+def create_panel(advertiser_id):
+    """Create panel table for an advertiser."""
+    data = request.get_json() or {}
+    agency_id = data.get('agency_id')
+    lookback_days = data.get('lookback_days', 90)
+    
+    agency_filter = ""
+    if agency_id:
+        agency_filter = f"AND sm.AGENCY_ID = {agency_id}"
+    
+    try:
+        conn = get_snowflake_connection()
+        cursor = conn.cursor()
+        
+        query = f"""
+            CREATE OR REPLACE TABLE QUORUMDB.DNA_CORE.PANEL_MAIDS_UNDER_50_MILES_{advertiser_id} AS
+            WITH advertiser_segments AS (
+                SELECT DISTINCT SEGMENT_MD5 
+                FROM QUORUMDB.SEGMENT_DATA.SEGMENT_MD5_MAPPING sm
+                WHERE sm.ADVERTISER_ID = {advertiser_id}
+                {agency_filter}
+            )
+            SELECT DISTINCT sdc.DEVICE_ID, sdc.DRIVE_BY_DATE
+            FROM QUORUMDB.SEGMENT_DATA.SEGMENT_DEVICES_CAPTURED sdc
+            INNER JOIN advertiser_segments s ON sdc.SEGMENT_MD5 = s.SEGMENT_MD5
+            WHERE sdc.DRIVE_BY_DATE >= DATEADD(day, -{lookback_days}, CURRENT_DATE())
+              AND sdc.DEVICE_ID IS NOT NULL
+              AND LENGTH(sdc.DEVICE_ID) = 36
+        """
+        
+        cursor.execute(query)
+        
+        # Get panel stats
+        stats_query = f"""
+            SELECT COUNT(DISTINCT DEVICE_ID), MIN(DRIVE_BY_DATE), MAX(DRIVE_BY_DATE)
+            FROM QUORUMDB.DNA_CORE.PANEL_MAIDS_UNDER_50_MILES_{advertiser_id}
+        """
+        cursor.execute(stats_query)
+        row = cursor.fetchone()
+        
+        cursor.close()
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'advertiser_id': advertiser_id,
+                'panel_size': row[0] if row else 0,
+                'min_date': str(row[1]) if row else None,
+                'max_date': str(row[2]) if row else None
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 # ============================================================================
 # RUN
 # ============================================================================
@@ -1564,32 +1569,3 @@ def creative_compat():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port, debug=False)
-
-# ============================================================================
-# FRONTEND SERVING - Serve the HTML interface
-# ============================================================================
-
-from flask import send_file
-import os
-
-@app.route('/')
-@app.route('/index.html')
-def serve_frontend():
-    """Serve the Quorum Optimizer frontend HTML"""
-    try:
-        # Look for the HTML file in the same directory as app.py
-        html_file = 'quorum-optimizer-v5.html'
-        if os.path.exists(html_file):
-            return send_file(html_file)
-        else:
-            return jsonify({
-                'error': 'Frontend not found',
-                'message': 'Please add quorum-optimizer-v5.html to the deployment',
-                'api_endpoints': {
-                    'health': '/health',
-                    'agencies': '/api/v5/agencies',
-                    'lift': '/api/v5/lift-analysis'
-                }
-            }), 404
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
