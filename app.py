@@ -49,6 +49,24 @@ def get_snowflake_connection():
         schema='SEGMENT_DATA'
     )
 
+def parse_date(date_str):
+    """Parse date string in multiple formats to YYYY-MM-DD"""
+    if not date_str:
+        return None
+    
+    from datetime import datetime
+    
+    # Try different date formats
+    for fmt in ['%Y-%m-%d', '%m/%d/%Y', '%Y/%m/%d', '%m-%d-%Y']:
+        try:
+            dt = datetime.strptime(date_str, fmt)
+            return dt.strftime('%Y-%m-%d')
+        except ValueError:
+            continue
+    
+    # If all fail, return as-is and let SQL handle it
+    return date_str
+
 # ============================================================================
 # HEALTH CHECK
 # ============================================================================
@@ -350,8 +368,8 @@ def get_advertiser_summary_v5():
     if not advertiser_id:
         return jsonify({'success': False, 'error': 'advertiser_id required'}), 400
     
-    start_date = request.args.get('start_date')
-    end_date = request.args.get('end_date')
+    start_date = parse_date(request.args.get('start_date'))
+    end_date = parse_date(request.args.get('end_date'))
     
     try:
         conn = get_snowflake_connection()
@@ -511,8 +529,8 @@ def get_campaign_performance_v5():
     if not advertiser_id:
         return jsonify({'success': False, 'error': 'advertiser_id required'}), 400
     
-    start_date = request.args.get('start_date')
-    end_date = request.args.get('end_date')
+    start_date = parse_date(request.args.get('start_date'))
+    end_date = parse_date(request.args.get('end_date'))
     
     try:
         conn = get_snowflake_connection()
@@ -638,8 +656,8 @@ def get_publisher_performance_v5():
     if not advertiser_id:
         return jsonify({'success': False, 'error': 'advertiser_id required'}), 400
     
-    start_date = request.args.get('start_date')
-    end_date = request.args.get('end_date')
+    start_date = parse_date(request.args.get('start_date'))
+    end_date = parse_date(request.args.get('end_date'))
     
     try:
         conn = get_snowflake_connection()
@@ -779,8 +797,8 @@ def get_zip_performance_v5():
     if not advertiser_id:
         return jsonify({'success': False, 'error': 'advertiser_id required'}), 400
     
-    start_date = request.args.get('start_date')
-    end_date = request.args.get('end_date')
+    start_date = parse_date(request.args.get('start_date'))
+    end_date = parse_date(request.args.get('end_date'))
     
     try:
         conn = get_snowflake_connection()
@@ -940,8 +958,8 @@ def get_creative_performance_v5():
     if not advertiser_id:
         return jsonify({'success': False, 'error': 'advertiser_id required'}), 400
     
-    start_date = request.args.get('start_date')
-    end_date = request.args.get('end_date')
+    start_date = parse_date(request.args.get('start_date'))
+    end_date = parse_date(request.args.get('end_date'))
     
     try:
         conn = get_snowflake_connection()
@@ -999,8 +1017,8 @@ def get_lineitem_performance_v5():
     if not advertiser_id:
         return jsonify({'success': False, 'error': 'advertiser_id required'}), 400
     
-    start_date = request.args.get('start_date')
-    end_date = request.args.get('end_date')
+    start_date = parse_date(request.args.get('start_date'))
+    end_date = parse_date(request.args.get('end_date'))
     
     try:
         conn = get_snowflake_connection()
@@ -1060,8 +1078,8 @@ def get_dma_performance_v5():
     if not advertiser_id:
         return jsonify({'success': False, 'error': 'advertiser_id required'}), 400
     
-    start_date = request.args.get('start_date')
-    end_date = request.args.get('end_date')
+    start_date = parse_date(request.args.get('start_date'))
+    end_date = parse_date(request.args.get('end_date'))
     
     try:
         conn = get_snowflake_connection()
@@ -1227,8 +1245,8 @@ def get_agency_overview_v5():
     """Get all agencies for overview with date filtering"""
     try:
         # Accept date parameters from query string
-        start_date = request.args.get('start_date')
-        end_date = request.args.get('end_date')
+        start_date = parse_date(request.args.get('start_date'))
+        end_date = parse_date(request.args.get('end_date'))
         
         # Calculate default date range if not provided (last 30 days)
         if not start_date or not end_date:
@@ -1244,6 +1262,9 @@ def get_agency_overview_v5():
         
         all_results = []
         errors = []
+        
+        # Log the dates being used for debugging
+        print(f"[OVERVIEW DEBUG] Date range: {start_date} to {end_date}")
         
         # Class A - with date filter and lower threshold
         query_a = f"""
@@ -1279,9 +1300,11 @@ def get_agency_overview_v5():
             cursor.execute(query_a)
             results = [dict(zip([d[0] for d in cursor.description], row)) for row in cursor.fetchall()]
             all_results.extend(results)
+            print(f"[CLASS A] Returned {len(results)} agencies")
             if not results:
-                errors.append(f"Class A: Query executed but returned 0 results")
+                errors.append(f"Class A: Query executed but returned 0 results (Date range: {start_date} to {end_date})")
         except Exception as e:
+            print(f"[CLASS A ERROR] {str(e)}")
             errors.append(f"Class A ERROR: {str(e)}")
         
         # Class B - with date filter and lower threshold
@@ -1377,9 +1400,11 @@ def get_agency_overview_v5():
             cursor.execute(query_w)
             results = [dict(zip([d[0] for d in cursor.description], row)) for row in cursor.fetchall()]
             all_results.extend(results)
+            print(f"[CLASS W] Returned {len(results)} agencies")
             if not results:
-                errors.append(f"Class W: Query executed but returned 0 results")
+                errors.append(f"Class W: Query executed but returned 0 results (Date range: {start_date} to {end_date})")
         except Exception as e:
+            print(f"[CLASS W ERROR] {str(e)}")
             errors.append(f"Class W ERROR: {str(e)}")
         
         cursor.close()
@@ -1399,61 +1424,44 @@ def get_agency_overview_v5():
 
 @app.route('/api/v5/advertiser-overview', methods=['GET'])
 def get_advertiser_overview_v5():
-    """Get advertisers for an agency with Web Visits, Location Visits, W Visit Rate, L Visit Rate"""
+    """Get advertisers for an agency - delegates to /advertisers endpoint"""
     agency_id = request.args.get('agency_id', type=int)
     
+    if not agency_id:
+        # Global view not supported, return empty
+        return jsonify({'success': True, 'data': []})
+    
     try:
-        conn = get_snowflake_connection()
-        cursor = conn.cursor()
+        # Reuse the advertisers endpoint which has the correct logic
+        advertisers_response = get_advertisers_v5()
+        advertisers_data = advertisers_response.get_json()
         
-        if agency_id:
-            query = """
-                SELECT 
-                    ADVERTISER_ID,
-                    ADVERTISER_NAME,
-                    SUM(IMPRESSIONS) as IMPRESSIONS,
-                    SUM(COALESCE(SITE_VISITS, 0)) as WEB_VISITS,
-                    SUM(COALESCE(TEST_VISITORS, 0)) as LOCATION_VISITS
-                FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
-                WHERE AGENCY_ID = %(agency_id)s
-                  AND LOG_DATE >= DATEADD(day, -90, CURRENT_DATE())
-                GROUP BY ADVERTISER_ID, ADVERTISER_NAME
-                ORDER BY IMPRESSIONS DESC
-            """
-            cursor.execute(query, {'agency_id': agency_id})
-        else:
-            # Global advertiser overview
-            query = """
-                SELECT 
-                    AGENCY_ID,
-                    AGENCY_NAME,
-                    ADVERTISER_ID,
-                    ADVERTISER_NAME,
-                    SUM(IMPRESSIONS) as IMPRESSIONS,
-                    SUM(COALESCE(SITE_VISITS, 0)) as WEB_VISITS,
-                    SUM(COALESCE(TEST_VISITORS, 0)) as LOCATION_VISITS
-                FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
-                WHERE LOG_DATE >= DATEADD(day, -90, CURRENT_DATE())
-                GROUP BY AGENCY_ID, AGENCY_NAME, ADVERTISER_ID, ADVERTISER_NAME
-                ORDER BY IMPRESSIONS DESC
-                LIMIT 100
-            """
-            cursor.execute(query)
+        if not advertisers_data.get('success'):
+            return advertisers_response
         
-        columns = [desc[0] for desc in cursor.description]
-        results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        # Transform to overview format (STORE_VISITS becomes WEB_VISITS or LOCATION_VISITS)
+        overview_data = []
+        for adv in advertisers_data.get('data', []):
+            agency_class = adv.get('AGENCY_CLASS', 'A')
+            store_visits = adv.get('STORE_VISITS', 0)
+            
+            overview_data.append({
+                'ADVERTISER_ID': adv['ADVERTISER_ID'],
+                'ADVERTISER_NAME': adv['ADVERTISER_NAME'],
+                'IMPRESSIONS': adv.get('IMPRESSIONS', 0),
+                # Class W = web visits, others = location visits
+                'WEB_VISITS': store_visits if agency_class == 'W' else 0,
+                'LOCATION_VISITS': store_visits if agency_class != 'W' else 0,
+            })
         
-        cursor.close()
-        conn.close()
-        
-        return jsonify({'success': True, 'data': results})
+        return jsonify({'success': True, 'data': overview_data})
         
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/v5/impressions-timeseries', methods=['GET'])
 def get_impressions_timeseries_v5():
-    """Get daily impressions by agency for stacked bar chart"""
+    """Get daily impressions by agency/advertiser - queries correct source tables"""
     agency_id = request.args.get('agency_id', type=int)
     start_date = request.args.get('start_date')
     end_date = request.args.get('end_date')
@@ -1471,33 +1479,92 @@ def get_impressions_timeseries_v5():
             end_date = end.strftime('%Y-%m-%d')
         
         if agency_id:
-            # Time series by advertiser for a specific agency
-            query = f"""
-                WITH ranked AS (
+            # Determine agency class
+            if agency_id in CLASS_A_AGENCIES:
+                # Class A - Query QUORUM_ADV_STORE_VISITS
+                query = f"""
+                    WITH ranked AS (
+                        SELECT 
+                            QUORUM_ADVERTISER_ID,
+                            MAX(aa.COMP_NAME) as ADVERTISER_NAME,
+                            COUNT(DISTINCT AD_IMP_ID) as total_imps,
+                            ROW_NUMBER() OVER (ORDER BY COUNT(DISTINCT AD_IMP_ID) DESC) as rn
+                        FROM QUORUMDB.SEGMENT_DATA.QUORUM_ADV_STORE_VISITS v
+                        LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa ON v.QUORUM_ADVERTISER_ID = aa.ID
+                        WHERE AGENCY_ID = %(agency_id)s
+                          AND IMP_TIMESTAMP >= TO_DATE('{start_date}', 'YYYY-MM-DD')
+                          AND IMP_TIMESTAMP < DATEADD(day, 1, TO_DATE('{end_date}', 'YYYY-MM-DD'))
+                        GROUP BY QUORUM_ADVERTISER_ID
+                    )
                     SELECT 
-                        ADVERTISER_ID,
-                        ADVERTISER_NAME,
-                        SUM(IMPRESSIONS) as total_imps,
-                        ROW_NUMBER() OVER (ORDER BY SUM(IMPRESSIONS) DESC) as rn
-                    FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
-                    WHERE AGENCY_ID = %(agency_id)s
-                      AND CAST(LOG_DATE AS DATE) BETWEEN '{start_date}' AND '{end_date}'
-                    GROUP BY ADVERTISER_ID, ADVERTISER_NAME
-                )
-                SELECT 
-                    d.LOG_DATE,
-                    CASE WHEN r.rn <= 10 THEN d.ADVERTISER_NAME ELSE 'Others' END as ENTITY_NAME,
-                    SUM(d.IMPRESSIONS) as IMPRESSIONS
-                FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING d
-                JOIN ranked r ON d.ADVERTISER_ID = r.ADVERTISER_ID
-                WHERE d.AGENCY_ID = %(agency_id)s
-                  AND CAST(d.LOG_DATE AS DATE) BETWEEN '{start_date}' AND '{end_date}'
-                GROUP BY d.LOG_DATE, CASE WHEN r.rn <= 10 THEN d.ADVERTISER_NAME ELSE 'Others' END
-                ORDER BY d.LOG_DATE, SUM(d.IMPRESSIONS) DESC
-            """
-            cursor.execute(query, {'agency_id': agency_id})
+                        CAST(v.IMP_TIMESTAMP AS DATE) as LOG_DATE,
+                        CASE WHEN r.rn <= 10 THEN r.ADVERTISER_NAME ELSE 'Others' END as ENTITY_NAME,
+                        COUNT(DISTINCT v.AD_IMP_ID) as IMPRESSIONS
+                    FROM QUORUMDB.SEGMENT_DATA.QUORUM_ADV_STORE_VISITS v
+                    JOIN ranked r ON v.QUORUM_ADVERTISER_ID = r.QUORUM_ADVERTISER_ID
+                    WHERE v.AGENCY_ID = %(agency_id)s
+                      AND v.IMP_TIMESTAMP >= TO_DATE('{start_date}', 'YYYY-MM-DD')
+                      AND v.IMP_TIMESTAMP < DATEADD(day, 1, TO_DATE('{end_date}', 'YYYY-MM-DD'))
+                    GROUP BY CAST(v.IMP_TIMESTAMP AS DATE), CASE WHEN r.rn <= 10 THEN r.ADVERTISER_NAME ELSE 'Others' END
+                    ORDER BY LOG_DATE, IMPRESSIONS DESC
+                """
+                cursor.execute(query, {'agency_id': agency_id})
+                
+            elif agency_id in CLASS_W_AGENCIES:
+                # Class W (Paramount) - Query PARAMOUNT_MAPPED_IMPRESSIONS
+                query = f"""
+                    WITH ranked AS (
+                        SELECT 
+                            QUORUM_ADVERTISER_ID,
+                            MAX(ADVERTISER_NAME) as ADVERTISER_NAME,
+                            COUNT(*) as total_imps,
+                            ROW_NUMBER() OVER (ORDER BY COUNT(*) DESC) as rn
+                        FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_MAPPED_IMPRESSIONS
+                        WHERE IMP_DATE >= TO_DATE('{start_date}', 'YYYY-MM-DD')
+                          AND IMP_DATE <= TO_DATE('{end_date}', 'YYYY-MM-DD')
+                        GROUP BY QUORUM_ADVERTISER_ID
+                    )
+                    SELECT 
+                        CAST(p.IMP_DATE AS DATE) as LOG_DATE,
+                        CASE WHEN r.rn <= 10 THEN r.ADVERTISER_NAME ELSE 'Others' END as ENTITY_NAME,
+                        COUNT(*) as IMPRESSIONS
+                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_MAPPED_IMPRESSIONS p
+                    JOIN ranked r ON p.QUORUM_ADVERTISER_ID = r.QUORUM_ADVERTISER_ID
+                    WHERE p.IMP_DATE >= TO_DATE('{start_date}', 'YYYY-MM-DD')
+                      AND p.IMP_DATE <= TO_DATE('{end_date}', 'YYYY-MM-DD')
+                    GROUP BY CAST(p.IMP_DATE AS DATE), CASE WHEN r.rn <= 10 THEN r.ADVERTISER_NAME ELSE 'Others' END
+                    ORDER BY LOG_DATE, IMPRESSIONS DESC
+                """
+                cursor.execute(query)
+                
+            else:
+                # Class B - Query DAILY_ADVERTISER_REPORTING (works for them)
+                query = f"""
+                    WITH ranked AS (
+                        SELECT 
+                            ADVERTISER_ID,
+                            ADVERTISER_NAME,
+                            SUM(IMPRESSIONS) as total_imps,
+                            ROW_NUMBER() OVER (ORDER BY SUM(IMPRESSIONS) DESC) as rn
+                        FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
+                        WHERE AGENCY_ID = %(agency_id)s
+                          AND CAST(LOG_DATE AS DATE) BETWEEN '{start_date}' AND '{end_date}'
+                        GROUP BY ADVERTISER_ID, ADVERTISER_NAME
+                    )
+                    SELECT 
+                        d.LOG_DATE,
+                        CASE WHEN r.rn <= 10 THEN d.ADVERTISER_NAME ELSE 'Others' END as ENTITY_NAME,
+                        SUM(d.IMPRESSIONS) as IMPRESSIONS
+                    FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING d
+                    JOIN ranked r ON d.ADVERTISER_ID = r.ADVERTISER_ID
+                    WHERE d.AGENCY_ID = %(agency_id)s
+                      AND CAST(d.LOG_DATE AS DATE) BETWEEN '{start_date}' AND '{end_date}'
+                    GROUP BY d.LOG_DATE, CASE WHEN r.rn <= 10 THEN d.ADVERTISER_NAME ELSE 'Others' END
+                    ORDER BY d.LOG_DATE, SUM(d.IMPRESSIONS) DESC
+                """
+                cursor.execute(query, {'agency_id': agency_id})
         else:
-            # Time series by agency (global view)
+            # Global view - use DAILY_ADVERTISER_REPORTING (best we can do for overview)
             query = f"""
                 SELECT 
                     LOG_DATE,
@@ -1509,6 +1576,26 @@ def get_impressions_timeseries_v5():
                 ORDER BY LOG_DATE, SUM(IMPRESSIONS) DESC
             """
             cursor.execute(query)
+        
+        columns = [desc[0] for desc in cursor.description]
+        results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        
+        cursor.close()
+        conn.close()
+        
+        # Return empty array if no data (instead of error)
+        return jsonify({
+            'success': True, 
+            'data': results if results else []
+        })
+        
+    except Exception as e:
+        # Return empty data on error instead of failing
+        return jsonify({
+            'success': True, 
+            'data': [], 
+            'warning': str(e)
+        })
         
         columns = [desc[0] for desc in cursor.description]
         results = [dict(zip(columns, row)) for row in cursor.fetchall()]
