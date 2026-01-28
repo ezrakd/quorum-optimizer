@@ -1320,14 +1320,14 @@ def get_impressions_timeseries_v5():
                 )
                 SELECT 
                     d.LOG_DATE,
-                    CASE WHEN r.rn <= 10 THEN d.ADVERTISER_NAME ELSE 'Others' END as ENTITY_NAME,
+                    CASE WHEN r.rn <= 10 THEN d.ADVERTISER_NAME ELSE 'Others' END as ADVERTISER_NAME,
                     SUM(d.IMPRESSIONS) as IMPRESSIONS
                 FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING d
                 JOIN ranked r ON d.ADVERTISER_ID = r.ADVERTISER_ID
                 WHERE d.AGENCY_ID = %(agency_id)s
                   AND d.LOG_DATE >= DATEADD(day, -30, CURRENT_DATE())
                 GROUP BY d.LOG_DATE, CASE WHEN r.rn <= 10 THEN d.ADVERTISER_NAME ELSE 'Others' END
-                ORDER BY d.LOG_DATE, SUM(d.IMPRESSIONS) DESC
+                ORDER BY d.LOG_DATE, IMPRESSIONS DESC
             """
             cursor.execute(query, {'agency_id': agency_id})
         else:
@@ -1335,12 +1335,12 @@ def get_impressions_timeseries_v5():
             query = """
                 SELECT 
                     LOG_DATE,
-                    AGENCY_NAME as ENTITY_NAME,
+                    AGENCY_NAME,
                     SUM(IMPRESSIONS) as IMPRESSIONS
                 FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
                 WHERE LOG_DATE >= DATEADD(day, -30, CURRENT_DATE())
                 GROUP BY LOG_DATE, AGENCY_NAME
-                ORDER BY LOG_DATE, SUM(IMPRESSIONS) DESC
+                ORDER BY LOG_DATE, IMPRESSIONS DESC
             """
             cursor.execute(query)
         
