@@ -1243,8 +1243,9 @@ def get_agency_overview_v5():
         cursor = conn.cursor()
         
         all_results = []
+        errors = []
         
-        # Class A - with date filter
+        # Class A - with date filter and lower threshold
         query_a = f"""
             WITH store_stats AS (
                 SELECT 
@@ -1253,7 +1254,8 @@ def get_agency_overview_v5():
                     COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = TRUE THEN DEVICE_ID_QU END) as STORE_VISITS,
                     COUNT(DISTINCT QUORUM_ADVERTISER_ID) as ADVERTISER_COUNT
                 FROM QUORUMDB.SEGMENT_DATA.QUORUM_ADV_STORE_VISITS
-                WHERE CAST(IMP_TIMESTAMP AS DATE) BETWEEN '{start_date}' AND '{end_date}'
+                WHERE IMP_TIMESTAMP >= TO_DATE('{start_date}', 'YYYY-MM-DD')
+                  AND IMP_TIMESTAMP < DATEADD(day, 1, TO_DATE('{end_date}', 'YYYY-MM-DD'))
                 GROUP BY AGENCY_ID
             ),
             agency_names AS (
@@ -1270,28 +1272,34 @@ def get_agency_overview_v5():
                 s.ADVERTISER_COUNT
             FROM store_stats s
             LEFT JOIN agency_names an ON s.AGENCY_ID = an.AGENCY_ID
-            WHERE s.IMPRESSIONS >= 100000
+            WHERE s.IMPRESSIONS >= 1000
         """
         
         try:
             cursor.execute(query_a)
-            all_results.extend([dict(zip([d[0] for d in cursor.description], row)) for row in cursor.fetchall()])
-        except: pass
+            results = [dict(zip([d[0] for d in cursor.description], row)) for row in cursor.fetchall()]
+            all_results.extend(results)
+            if not results:
+                errors.append(f"Class A: Query executed but returned 0 results")
+        except Exception as e:
+            errors.append(f"Class A ERROR: {str(e)}")
         
-        # Class B - with date filter
+        # Class B - with date filter and lower threshold
         query_b = f"""
             WITH impressions AS (
                 SELECT AGENCY_ID, ADVERTISER_ID, SUM(IMPRESSIONS) as TOTAL_IMPRESSIONS
                 FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
                 WHERE AGENCY_ID IN (1813, 2234, 1972, 2379, 1445, 1880, 2744)
-                  AND CAST(LOG_DATE AS DATE) BETWEEN '{start_date}' AND '{end_date}'
+                  AND LOG_DATE >= TO_DATE('{start_date}', 'YYYY-MM-DD')
+                  AND LOG_DATE <= TO_DATE('{end_date}', 'YYYY-MM-DD')
                 GROUP BY AGENCY_ID, ADVERTISER_ID
             ),
             visits AS (
                 SELECT AGENCY_ID, ADVERTISER_ID, COUNT(DISTINCT CONCAT(DEVICE_ID, DRIVE_BY_DATE, POI_MD5)) as STORE_VISITS
                 FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW
                 WHERE AGENCY_ID IN (1813, 2234, 1972, 2379, 1445, 1880, 2744)
-                  AND CAST(DRIVE_BY_DATE AS DATE) BETWEEN '{start_date}' AND '{end_date}'
+                  AND DRIVE_BY_DATE >= TO_DATE('{start_date}', 'YYYY-MM-DD')
+                  AND DRIVE_BY_DATE <= TO_DATE('{end_date}', 'YYYY-MM-DD')
                 GROUP BY AGENCY_ID, ADVERTISER_ID
             ),
             combined AS (
@@ -1325,12 +1333,17 @@ def get_agency_overview_v5():
                 t.ADVERTISER_COUNT
             FROM agency_totals t
             LEFT JOIN agency_names an ON t.AGENCY_ID = an.AGENCY_ID
+            WHERE t.IMPRESSIONS >= 1000 OR t.STORE_VISITS >= 10
         """
         
         try:
             cursor.execute(query_b)
-            all_results.extend([dict(zip([d[0] for d in cursor.description], row)) for row in cursor.fetchall()])
-        except: pass
+            results = [dict(zip([d[0] for d in cursor.description], row)) for row in cursor.fetchall()]
+            all_results.extend(results)
+            if not results:
+                errors.append(f"Class B: Query executed but returned 0 results")
+        except Exception as e:
+            errors.append(f"Class B ERROR: {str(e)}")
         
         # Class W (Paramount) - with date filter
         query_w = f"""
@@ -1357,12 +1370,17 @@ def get_agency_overview_v5():
                 i.ADVERTISER_COUNT
             FROM impressions i
             CROSS JOIN conversions c
+            WHERE i.IMPRESSIONS >= 1000
         """
         
         try:
             cursor.execute(query_w)
-            all_results.extend([dict(zip([d[0] for d in cursor.description], row)) for row in cursor.fetchall()])
-        except: pass
+            results = [dict(zip([d[0] for d in cursor.description], row)) for row in cursor.fetchall()]
+            all_results.extend(results)
+            if not results:
+                errors.append(f"Class W: Query executed but returned 0 results")
+        except Exception as e:
+            errors.append(f"Class W ERROR: {str(e)}")
         
         cursor.close()
         conn.close()
@@ -1370,7 +1388,11 @@ def get_agency_overview_v5():
         # Sort by impressions
         all_results.sort(key=lambda x: x.get('IMPRESSIONS', 0) or 0, reverse=True)
         
-        return jsonify({'success': True, 'data': all_results})
+        response = {'success': True, 'data': all_results}
+        if errors:
+            response['warnings'] = errors
+        
+        return jsonify(response)
         
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
