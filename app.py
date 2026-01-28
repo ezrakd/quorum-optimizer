@@ -103,7 +103,8 @@ def get_agencies_v5():
                 s.AGENCY_ID,
                 COALESCE(an.AGENCY_NAME, 'Agency ' || s.AGENCY_ID) as AGENCY_NAME,
                 s.IMPRESSIONS,
-                s.STORE_VISITS,
+                0 as WEB_VISITS,
+                s.STORE_VISITS as LOCATION_VISITS,
                 s.ADVERTISER_COUNT,
                 'A' as AGENCY_CLASS
             FROM store_stats s
@@ -154,14 +155,15 @@ def get_agencies_v5():
                 t.AGENCY_ID,
                 COALESCE(an.AGENCY_NAME, 'Agency ' || t.AGENCY_ID) as AGENCY_NAME,
                 t.IMPRESSIONS,
-                t.STORE_VISITS,
+                0 as WEB_VISITS,
+                t.STORE_VISITS as LOCATION_VISITS,
                 t.ADVERTISER_COUNT,
                 'B' as AGENCY_CLASS
             FROM agency_totals t
             LEFT JOIN agency_names an ON t.AGENCY_ID = an.AGENCY_ID
         """
         
-        # Query Class W (ViacomCBS/Paramount) from Paramount tables
+        # Query Class W (ViacomCBS/Paramount) from Paramount tables - BOTH web and location visits
         query_class_w = """
             WITH impressions AS (
                 SELECT 
@@ -173,7 +175,8 @@ def get_agencies_v5():
             ),
             conversions AS (
                 SELECT 
-                    COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as SITE_VISITORS
+                    COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as SITE_VISITORS,
+                    COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITORS
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
                 WHERE IMP_DATE >= DATEADD(day, -90, CURRENT_DATE())
             )
@@ -181,7 +184,8 @@ def get_agencies_v5():
                 1480 as AGENCY_ID,
                 'ViacomCBS / Paramount' as AGENCY_NAME,
                 i.IMPRESSIONS,
-                c.SITE_VISITORS as STORE_VISITS,
+                c.SITE_VISITORS as WEB_VISITS,
+                c.STORE_VISITORS as LOCATION_VISITS,
                 i.ADVERTISER_COUNT,
                 'W' as AGENCY_CLASS
             FROM impressions i
@@ -268,7 +272,7 @@ def get_advertisers_v5():
                 ORDER BY a.IMPRESSIONS DESC
             """
         elif agency_id in CLASS_W_AGENCIES:
-            # Class W (ViacomCBS/Paramount) query
+            # Class W (ViacomCBS/Paramount) query - both web and store visits
             query = """
                 WITH impressions AS (
                     SELECT 
@@ -284,6 +288,7 @@ def get_advertisers_v5():
                     SELECT 
                         QUORUM_ADVERTISER_ID as ADVERTISER_ID,
                         COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as SITE_VISITORS,
+                        COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITORS,
                         COUNT(DISTINCT CASE WHEN IS_LEAD = 'TRUE' THEN IMP_MAID END) as LEAD_VISITORS,
                         COUNT(DISTINCT CASE WHEN IS_PURCHASE = 'TRUE' THEN IMP_MAID END) as PURCHASERS
                     FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
@@ -294,7 +299,7 @@ def get_advertisers_v5():
                     i.ADVERTISER_ID,
                     i.ADVERTISER_NAME,
                     i.IMPRESSIONS,
-                    COALESCE(c.SITE_VISITORS, 0) as STORE_VISITS,
+                    COALESCE(c.SITE_VISITORS, 0) + COALESCE(c.STORE_VISITORS, 0) as STORE_VISITS,
                     i.CAMPAIGN_COUNT,
                     'W' as AGENCY_CLASS
                 FROM impressions i
@@ -384,7 +389,7 @@ def get_advertiser_summary_v5():
             visit_type = 'store'
             
         elif agency_class == 'W':
-            # Class W (ViacomCBS/Paramount) query
+            # Class W (ViacomCBS/Paramount) query - both web and store visits
             date_filter = ""
             if start_date and end_date:
                 date_filter = f"AND IMP_DATE BETWEEN '{start_date}' AND '{end_date}'"
@@ -405,16 +410,18 @@ def get_advertiser_summary_v5():
                 conversions AS (
                     SELECT 
                         COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as SITE_VISITORS,
+                        COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITORS,
                         COUNT(DISTINCT CASE WHEN IS_LEAD = 'TRUE' THEN IMP_MAID END) as LEAD_VISITORS,
                         COUNT(DISTINCT CASE WHEN IS_PURCHASE = 'TRUE' THEN IMP_MAID END) as PURCHASERS,
-                        COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN ZIP_CODE END) as ZIP_COUNT
+                        COUNT(DISTINCT ZIP_CODE) as ZIP_COUNT
                     FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
                     WHERE QUORUM_ADVERTISER_ID = {advertiser_id}
                       {date_filter}
                 )
                 SELECT 
                     i.IMPRESSIONS,
-                    COALESCE(c.SITE_VISITORS, 0) as STORE_VISITS,
+                    COALESCE(c.STORE_VISITORS, 0) as STORE_VISITS,
+                    COALESCE(c.SITE_VISITORS, 0) as WEB_VISITS,
                     i.CAMPAIGN_COUNT,
                     i.PUBLISHER_COUNT,
                     COALESCE(c.ZIP_COUNT, 0) as ZIP_COUNT,
@@ -424,7 +431,7 @@ def get_advertiser_summary_v5():
                 FROM impressions i
                 CROSS JOIN conversions c
             """
-            visit_type = 'web'
+            visit_type = 'both'
             
         else:
             # Class B query
@@ -474,10 +481,12 @@ def get_advertiser_summary_v5():
         
         result = dict(zip(columns, row)) if row else {}
         
-        # Calculate visit rate
+        # Calculate visit rate - for Paramount, include both web and store visits
         imps = result.get('IMPRESSIONS', 0) or 1
-        visits = result.get('STORE_VISITS', 0) or 0
-        result['VISIT_RATE'] = round(visits / imps * 100, 4)
+        store_visits = result.get('STORE_VISITS', 0) or 0
+        web_visits = result.get('WEB_VISITS', 0) or 0
+        total_visits = store_visits + web_visits
+        result['VISIT_RATE'] = round(total_visits / imps * 100, 4)
         result['VISIT_TYPE'] = visit_type
         result['AGENCY_CLASS'] = agency_class
         
@@ -529,6 +538,7 @@ def get_campaign_performance_v5():
                     IO_ID as CAMPAIGN_ID,
                     IO_NAME as CAMPAIGN_NAME,
                     COUNT(DISTINCT AD_IMP_ID) as IMPRESSIONS,
+                    0 as W_VISITS,
                     COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = TRUE THEN DEVICE_ID_QU END) as S_VISITS
                 FROM QUORUMDB.SEGMENT_DATA.QUORUM_ADV_STORE_VISITS
                 WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
@@ -539,7 +549,7 @@ def get_campaign_performance_v5():
             """
             
         elif agency_class == 'W':
-            # Class W (ViacomCBS/Paramount) query
+            # Class W (ViacomCBS/Paramount) query - both web and store visits
             date_filter = ""
             if start_date and end_date:
                 date_filter = f"AND IMP_DATE BETWEEN '{start_date}' AND '{end_date}'"
@@ -560,7 +570,8 @@ def get_campaign_performance_v5():
                 conversions AS (
                     SELECT 
                         IO_ID,
-                        COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as SITE_VISITORS
+                        COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as SITE_VISITORS,
+                        COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITORS
                     FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
                     WHERE QUORUM_ADVERTISER_ID = {advertiser_id}
                       {date_filter}
@@ -570,7 +581,8 @@ def get_campaign_performance_v5():
                     i.IO_ID as CAMPAIGN_ID,
                     i.IO_NAME as CAMPAIGN_NAME,
                     i.IMPRESSIONS,
-                    COALESCE(c.SITE_VISITORS, 0) as S_VISITS
+                    COALESCE(c.SITE_VISITORS, 0) as W_VISITS,
+                    COALESCE(c.STORE_VISITORS, 0) as S_VISITS
                 FROM impressions i
                 LEFT JOIN conversions c ON i.IO_ID = c.IO_ID
                 WHERE i.IMPRESSIONS >= 1000
@@ -590,6 +602,7 @@ def get_campaign_performance_v5():
                     CAST(IO_ID AS NUMBER) as CAMPAIGN_ID,
                     MAX(IO_NAME) as CAMPAIGN_NAME,
                     SUM(IMPRESSIONS) as IMPRESSIONS,
+                    0 as W_VISITS,
                     SUM(VISITORS) as S_VISITS
                 FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
                 WHERE ADVERTISER_ID = %(advertiser_id)s
@@ -667,7 +680,7 @@ def get_publisher_performance_v5():
             """
             
         elif agency_class == 'W':
-            # Class W (ViacomCBS/Paramount) query
+            # Class W (ViacomCBS/Paramount) query - both web and store visits
             date_filter = ""
             if start_date and end_date:
                 date_filter = f"AND IMP_DATE BETWEEN '{start_date}' AND '{end_date}'"
@@ -694,7 +707,8 @@ def get_publisher_performance_v5():
                 conversions AS (
                     SELECT 
                         SITE as PUBLISHER_CODE,
-                        COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as SITE_VISITORS
+                        COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as SITE_VISITORS,
+                        COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITORS
                     FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
                     WHERE QUORUM_ADVERTISER_ID = {advertiser_id}
                       {date_filter}
@@ -704,7 +718,7 @@ def get_publisher_performance_v5():
                 SELECT 
                     COALESCE(i.PUBLISHER_CODE, c.PUBLISHER_CODE) as PUBLISHER_CODE,
                     COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS,
-                    COALESCE(c.SITE_VISITORS, 0) as S_VISITS
+                    COALESCE(c.SITE_VISITORS, 0) + COALESCE(c.STORE_VISITORS, 0) as S_VISITS
                 FROM impressions i
                 FULL OUTER JOIN conversions c ON i.PUBLISHER_CODE = c.PUBLISHER_CODE
                 WHERE COALESCE(i.IMPRESSIONS, 0) >= 100
@@ -1205,38 +1219,33 @@ def global_advertiser_overview_compat():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # ============================================================================
-# OVERVIEW ENDPOINTS (for dashboard screens)
+# OVERVIEW ENDPOINTS (for dashboard screens) - FIXED TO SHOW MNTN & VIACOM
 # ============================================================================
 
 @app.route('/api/v5/agency-overview', methods=['GET'])
 def get_agency_overview_v5():
-    """Get all agencies with Web Visits, Location Visits, W Visit Rate, L Visit Rate"""
+    """Get all agencies - reuses /agencies endpoint for consistency"""
     try:
-        conn = get_snowflake_connection()
-        cursor = conn.cursor()
+        # Get agencies using the same gold tables that work in sidebar
+        agencies_response = get_agencies_v5()
+        agencies_data = agencies_response.get_json()
         
-        query = """
-            SELECT 
-                AGENCY_ID,
-                AGENCY_NAME,
-                COUNT(DISTINCT ADVERTISER_ID) as ADVERTISER_COUNT,
-                SUM(IMPRESSIONS) as IMPRESSIONS,
-                SUM(COALESCE(SITE_VISITS, 0)) as WEB_VISITS,
-                SUM(COALESCE(TEST_VISITORS, 0)) as LOCATION_VISITS
-            FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
-            WHERE LOG_DATE >= DATEADD(day, -90, CURRENT_DATE())
-            GROUP BY AGENCY_ID, AGENCY_NAME
-            ORDER BY IMPRESSIONS DESC
-        """
+        if not agencies_data.get('success'):
+            return agencies_response
         
-        cursor.execute(query)
-        columns = [desc[0] for desc in cursor.description]
-        results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        # Transform to overview format - columns already match!
+        overview_data = []
+        for agency in agencies_data.get('data', []):
+            overview_data.append({
+                'AGENCY_ID': agency['AGENCY_ID'],
+                'AGENCY_NAME': agency['AGENCY_NAME'],
+                'ADVERTISER_COUNT': agency.get('ADVERTISER_COUNT', 0),
+                'IMPRESSIONS': agency.get('IMPRESSIONS', 0),
+                'WEB_VISITS': agency.get('WEB_VISITS', 0),
+                'LOCATION_VISITS': agency.get('LOCATION_VISITS', 0),
+            })
         
-        cursor.close()
-        conn.close()
-        
-        return jsonify({'success': True, 'data': results})
+        return jsonify({'success': True, 'data': overview_data})
         
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -1320,14 +1329,14 @@ def get_impressions_timeseries_v5():
                 )
                 SELECT 
                     d.LOG_DATE,
-                    CASE WHEN r.rn <= 10 THEN d.ADVERTISER_NAME ELSE 'Others' END as ADVERTISER_NAME,
+                    CASE WHEN r.rn <= 10 THEN d.ADVERTISER_NAME ELSE 'Others' END as ENTITY_NAME,
                     SUM(d.IMPRESSIONS) as IMPRESSIONS
                 FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING d
                 JOIN ranked r ON d.ADVERTISER_ID = r.ADVERTISER_ID
                 WHERE d.AGENCY_ID = %(agency_id)s
                   AND d.LOG_DATE >= DATEADD(day, -30, CURRENT_DATE())
                 GROUP BY d.LOG_DATE, CASE WHEN r.rn <= 10 THEN d.ADVERTISER_NAME ELSE 'Others' END
-                ORDER BY d.LOG_DATE, IMPRESSIONS DESC
+                ORDER BY d.LOG_DATE, SUM(d.IMPRESSIONS) DESC
             """
             cursor.execute(query, {'agency_id': agency_id})
         else:
@@ -1335,12 +1344,12 @@ def get_impressions_timeseries_v5():
             query = """
                 SELECT 
                     LOG_DATE,
-                    AGENCY_NAME,
+                    AGENCY_NAME as ENTITY_NAME,
                     SUM(IMPRESSIONS) as IMPRESSIONS
                 FROM QUORUMDB.SEGMENT_DATA.DAILY_ADVERTISER_REPORTING
                 WHERE LOG_DATE >= DATEADD(day, -30, CURRENT_DATE())
                 GROUP BY LOG_DATE, AGENCY_NAME
-                ORDER BY LOG_DATE, IMPRESSIONS DESC
+                ORDER BY LOG_DATE, SUM(IMPRESSIONS) DESC
             """
             cursor.execute(query)
         
