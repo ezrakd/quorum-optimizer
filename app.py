@@ -138,15 +138,16 @@ def get_agency_overview():
         """
         cprs_data = {str(r[0]): r for r in query(cprs_sql, [start, end])}
         
-        # Paramount - separate query (may fail if no access)
+        # Paramount - count DISTINCT impressions and visits
         try:
             paramount_sql = """
-                SELECT COUNT(*),
-                       SUM(CASE WHEN IS_STORE_VISIT = 'TRUE' THEN 1 ELSE 0 END),
-                       SUM(CASE WHEN IS_SITE_VISIT = 'TRUE' THEN 1 ELSE 0 END)
+                SELECT COUNT(DISTINCT CACHE_BUSTER),
+                       COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN CACHE_BUSTER END),
+                       COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN WEB_IMPRESSION_ID END)
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+                WHERE IMP_DATE >= %s AND IMP_DATE < %s
             """
-            p_row = query(paramount_sql)[0]
+            p_row = query(paramount_sql, [start, end])[0]
             paramount_imps = p_row[0] or 0
             paramount_lv = p_row[1] or 0
             paramount_wv = p_row[2] or 0
@@ -222,16 +223,18 @@ def get_advertiser_overview():
             rows = query(sql, [agency_id, start, end])
         elif src == 'PARAMOUNT':
             sql = """
-                SELECT p.QUORUM_ADVERTISER_ID, MAX(a.COMP_NAME), COUNT(*),
-                       SUM(CASE WHEN p.IS_STORE_VISIT = 'TRUE' THEN 1 ELSE 0 END),
-                       SUM(CASE WHEN p.IS_SITE_VISIT = 'TRUE' THEN 1 ELSE 0 END)
+                SELECT p.QUORUM_ADVERTISER_ID, MAX(a.COMP_NAME), 
+                       COUNT(DISTINCT p.CACHE_BUSTER),
+                       COUNT(DISTINCT CASE WHEN p.IS_STORE_VISIT = 'TRUE' THEN p.CACHE_BUSTER END),
+                       COUNT(DISTINCT CASE WHEN p.IS_SITE_VISIT = 'TRUE' THEN p.WEB_IMPRESSION_ID END)
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS p
                 LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER a ON p.QUORUM_ADVERTISER_ID = a.ID
+                WHERE p.IMP_DATE >= %s AND p.IMP_DATE < %s
                 GROUP BY p.QUORUM_ADVERTISER_ID
-                HAVING COUNT(*) >= 10000
+                HAVING COUNT(DISTINCT p.CACHE_BUSTER) >= 10000
                 ORDER BY 3 DESC LIMIT 100
             """
-            rows = query(sql)
+            rows = query(sql, [start, end])
         else:
             rows = []
         
@@ -324,14 +327,15 @@ def get_advertiser_summary():
             rows = query(sql, [advertiser_id, agency_id, start, end])
         elif src == 'PARAMOUNT':
             sql = """
-                SELECT COUNT(*), 
-                       SUM(CASE WHEN IS_STORE_VISIT = 'TRUE' THEN 1 ELSE 0 END),
-                       SUM(CASE WHEN IS_SITE_VISIT = 'TRUE' THEN 1 ELSE 0 END),
+                SELECT COUNT(DISTINCT CACHE_BUSTER), 
+                       COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN CACHE_BUSTER END),
+                       COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN WEB_IMPRESSION_ID END),
                        COUNT(DISTINCT IO_ID), COUNT(DISTINCT SITE)
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE QUORUM_ADVERTISER_ID = %s
+                WHERE CAST(QUORUM_ADVERTISER_ID AS INTEGER) = %s
+                  AND IMP_DATE >= %s AND IMP_DATE < %s
             """
-            rows = query(sql, [advertiser_id])
+            rows = query(sql, [int(advertiser_id), start, end])
         else:
             rows = [(0, 0, 0, 0, 0)]
         
@@ -382,14 +386,15 @@ def get_campaign_performance():
             rows = query(sql, [advertiser_id, agency_id, start, end])
         elif src == 'PARAMOUNT':
             sql = """
-                SELECT IO_ID, MAX(IO_NAME), COUNT(*),
-                       SUM(CASE WHEN IS_STORE_VISIT = 'TRUE' THEN 1 ELSE 0 END),
-                       SUM(CASE WHEN IS_SITE_VISIT = 'TRUE' THEN 1 ELSE 0 END)
+                SELECT IO_ID, MAX(IO_NAME), COUNT(DISTINCT CACHE_BUSTER),
+                       COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN CACHE_BUSTER END),
+                       COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN WEB_IMPRESSION_ID END)
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE QUORUM_ADVERTISER_ID = %s
-                GROUP BY IO_ID HAVING COUNT(*) >= 100 ORDER BY 3 DESC LIMIT 50
+                WHERE CAST(QUORUM_ADVERTISER_ID AS INTEGER) = %s
+                  AND IMP_DATE >= %s AND IMP_DATE < %s
+                GROUP BY IO_ID HAVING COUNT(DISTINCT CACHE_BUSTER) >= 100 ORDER BY 3 DESC LIMIT 50
             """
-            rows = query(sql, [advertiser_id])
+            rows = query(sql, [int(advertiser_id), start, end])
         else:
             rows = []
         
@@ -441,14 +446,15 @@ def get_publisher_performance():
             rows = query(sql, [advertiser_id, agency_id, start, end])
         elif src == 'PARAMOUNT':
             sql = """
-                SELECT SITE, COUNT(*),
-                       SUM(CASE WHEN IS_STORE_VISIT = 'TRUE' THEN 1 ELSE 0 END),
-                       SUM(CASE WHEN IS_SITE_VISIT = 'TRUE' THEN 1 ELSE 0 END)
+                SELECT SITE, COUNT(DISTINCT CACHE_BUSTER),
+                       COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN CACHE_BUSTER END),
+                       COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN WEB_IMPRESSION_ID END)
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE QUORUM_ADVERTISER_ID = %s
-                GROUP BY SITE HAVING COUNT(*) >= 100 ORDER BY 2 DESC LIMIT 50
+                WHERE CAST(QUORUM_ADVERTISER_ID AS INTEGER) = %s
+                  AND IMP_DATE >= %s AND IMP_DATE < %s
+                GROUP BY SITE HAVING COUNT(DISTINCT CACHE_BUSTER) >= 100 ORDER BY 2 DESC LIMIT 50
             """
-            rows = query(sql, [advertiser_id])
+            rows = query(sql, [int(advertiser_id), start, end])
         else:
             rows = []
         
@@ -462,7 +468,8 @@ def get_publisher_performance():
                 'IMPRESSIONS': imps,
                 'LOCATION_VISITS': lv,
                 'WEB_VISITS': wv,
-                'LOCATION_VR': pct(lv, imps)
+                'LOCATION_VR': pct(lv, imps),
+                'WEB_VR': pct(wv, imps)
             })
         
         return jsonify({'success': True, 'data': data})
@@ -508,16 +515,17 @@ def get_zip_performance():
             rows = query(sql, [advertiser_id, agency_id, start, end])
         elif src == 'PARAMOUNT':
             sql = """
-                SELECT p.ZIP_CODE, COUNT(*),
-                       SUM(CASE WHEN p.IS_STORE_VISIT = 'TRUE' THEN 1 ELSE 0 END),
+                SELECT p.ZIP_CODE, COUNT(DISTINCT p.CACHE_BUSTER),
+                       COUNT(DISTINCT CASE WHEN p.IS_STORE_VISIT = 'TRUE' THEN p.CACHE_BUSTER END),
                        MAX(z.CITY_NAME), MAX(z.STATE_ABBREVIATION)
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS p
                 LEFT JOIN QUORUMDB.REF_DATA.ZIP_POPULATION_DATA z ON p.ZIP_CODE = z.ZIP_CODE
-                WHERE p.QUORUM_ADVERTISER_ID = %s 
+                WHERE CAST(p.QUORUM_ADVERTISER_ID AS INTEGER) = %s 
+                  AND p.IMP_DATE >= %s AND p.IMP_DATE < %s
                   AND p.ZIP_CODE IS NOT NULL AND p.ZIP_CODE != ''
-                GROUP BY p.ZIP_CODE HAVING COUNT(*) >= 100 ORDER BY 2 DESC LIMIT 50
+                GROUP BY p.ZIP_CODE HAVING COUNT(DISTINCT p.CACHE_BUSTER) >= 100 ORDER BY 2 DESC LIMIT 50
             """
-            rows = query(sql, [advertiser_id])
+            rows = query(sql, [int(advertiser_id), start, end])
         else:
             rows = []
         
