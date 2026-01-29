@@ -228,7 +228,7 @@ def get_advertiser_overview():
                        COUNT(DISTINCT CASE WHEN p.IS_STORE_VISIT = 'TRUE' THEN p.CACHE_BUSTER END),
                        COUNT(DISTINCT CASE WHEN p.IS_SITE_VISIT = 'TRUE' THEN p.WEB_IMPRESSION_ID END)
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS p
-                LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER a ON p.QUORUM_ADVERTISER_ID = a.ID
+                LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER a ON CAST(p.QUORUM_ADVERTISER_ID AS INTEGER) = a.ID
                 WHERE p.IMP_DATE >= %s AND p.IMP_DATE < %s
                 GROUP BY p.QUORUM_ADVERTISER_ID
                 HAVING COUNT(DISTINCT p.CACHE_BUSTER) >= 10000
@@ -487,6 +487,7 @@ def get_zip_performance():
         
         start, end = dates(request)
         src = get_source(agency_id)
+        logger.info(f"zip-performance: agency={agency_id}, advertiser={advertiser_id}, src={src}, dates={start} to {end}")
         
         if src == 'QIR':
             sql = """
