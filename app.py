@@ -9,12 +9,24 @@ import snowflake.connector
 import os
 from datetime import datetime, timedelta
 import logging
+from urllib.parse import unquote
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
+
+def decode_publisher(name):
+    """URL-decode publisher names (handles %2520 double-encoding)"""
+    if not name:
+        return name
+    # Double-decode to handle %2520 -> %20 -> space
+    try:
+        decoded = unquote(unquote(str(name)))
+        return decoded
+    except:
+        return name
 
 # ============================================================================
 # HARDCODED AGENCY LIST - Avoids slow startup query
@@ -129,21 +141,17 @@ def get_agency_overview():
         # Paramount - separate query (may fail if no access)
         try:
             paramount_sql = """
-                SELECT COUNT(*) FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+                SELECT COUNT(*),
+                       SUM(CASE WHEN IS_STORE_VISIT = 'TRUE' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN IS_SITE_VISIT = 'TRUE' THEN 1 ELSE 0 END)
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
             """
-            paramount_imps = query(paramount_sql)[0][0] or 0
+            p_row = query(paramount_sql)[0]
+            paramount_imps = p_row[0] or 0
+            paramount_lv = p_row[1] or 0
+            paramount_wv = p_row[2] or 0
         except:
-            paramount_imps = 0
-        
-        try:
-            paramount_web_sql = """
-                SELECT COUNT(DISTINCT WEB_IMPRESSION_ID) 
-                FROM QUORUMDB.SEGMENT_DATA.WEB_VISITORS_TO_LOG
-                WHERE SITE_VISIT_TIMESTAMP >= %s AND SITE_VISIT_TIMESTAMP < %s
-            """
-            paramount_web = query(paramount_web_sql, [start, end])[0][0] or 0
-        except:
-            paramount_web = 0
+            paramount_imps, paramount_lv, paramount_wv = 0, 0, 0
         
         for a in AGENCIES:
             aid = a['AGENCY_ID']
@@ -156,7 +164,7 @@ def get_agency_overview():
                 r = cprs_data[aid]
                 imps, lv, wv = r[1] or 0, r[2] or 0, 0
             elif src == 'PARAMOUNT':
-                imps, lv, wv = paramount_imps, 0, paramount_web
+                imps, lv, wv = paramount_imps, paramount_lv, paramount_wv
             else:
                 imps, lv, wv = 0, 0, 0
             
@@ -214,7 +222,9 @@ def get_advertiser_overview():
             rows = query(sql, [agency_id, start, end])
         elif src == 'PARAMOUNT':
             sql = """
-                SELECT p.QUORUM_ADVERTISER_ID, MAX(a.COMP_NAME), COUNT(*), 0, 0
+                SELECT p.QUORUM_ADVERTISER_ID, MAX(a.COMP_NAME), COUNT(*),
+                       SUM(CASE WHEN p.IS_STORE_VISIT = 'TRUE' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN p.IS_SITE_VISIT = 'TRUE' THEN 1 ELSE 0 END)
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS p
                 LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER a ON p.QUORUM_ADVERTISER_ID = a.ID
                 GROUP BY p.QUORUM_ADVERTISER_ID
@@ -312,6 +322,16 @@ def get_advertiser_summary():
                 WHERE ADVERTISER_ID = %s AND AGENCY_ID = %s AND LOG_DATE >= %s AND LOG_DATE < %s
             """
             rows = query(sql, [advertiser_id, agency_id, start, end])
+        elif src == 'PARAMOUNT':
+            sql = """
+                SELECT COUNT(*), 
+                       SUM(CASE WHEN IS_STORE_VISIT = 'TRUE' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN IS_SITE_VISIT = 'TRUE' THEN 1 ELSE 0 END),
+                       COUNT(DISTINCT IO_ID), COUNT(DISTINCT SITE)
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+                WHERE QUORUM_ADVERTISER_ID = %s
+            """
+            rows = query(sql, [advertiser_id])
         else:
             rows = [(0, 0, 0, 0, 0)]
         
@@ -360,6 +380,16 @@ def get_campaign_performance():
                 GROUP BY IO_ID HAVING SUM(IMPRESSIONS) >= 100 ORDER BY 3 DESC LIMIT 50
             """
             rows = query(sql, [advertiser_id, agency_id, start, end])
+        elif src == 'PARAMOUNT':
+            sql = """
+                SELECT IO_ID, MAX(IO_NAME), COUNT(*),
+                       SUM(CASE WHEN IS_STORE_VISIT = 'TRUE' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN IS_SITE_VISIT = 'TRUE' THEN 1 ELSE 0 END)
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+                WHERE QUORUM_ADVERTISER_ID = %s
+                GROUP BY IO_ID HAVING COUNT(*) >= 100 ORDER BY 3 DESC LIMIT 50
+            """
+            rows = query(sql, [advertiser_id])
         else:
             rows = []
         
@@ -409,15 +439,26 @@ def get_publisher_performance():
                 GROUP BY PUBLISHER HAVING SUM(IMPRESSIONS) >= 100 ORDER BY 2 DESC LIMIT 50
             """
             rows = query(sql, [advertiser_id, agency_id, start, end])
+        elif src == 'PARAMOUNT':
+            sql = """
+                SELECT SITE, COUNT(*),
+                       SUM(CASE WHEN IS_STORE_VISIT = 'TRUE' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN IS_SITE_VISIT = 'TRUE' THEN 1 ELSE 0 END)
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+                WHERE QUORUM_ADVERTISER_ID = %s
+                GROUP BY SITE HAVING COUNT(*) >= 100 ORDER BY 2 DESC LIMIT 50
+            """
+            rows = query(sql, [advertiser_id])
         else:
             rows = []
         
         data = []
         for r in rows:
             imps, lv, wv = r[1] or 0, r[2] or 0, r[3] or 0
+            pub_name = decode_publisher(r[0])
             data.append({
-                'PUBLISHER': r[0],
-                'PUBLISHER_CODE': r[0],
+                'PUBLISHER': pub_name,
+                'PUBLISHER_CODE': pub_name,
                 'IMPRESSIONS': imps,
                 'LOCATION_VISITS': lv,
                 'WEB_VISITS': wv,
@@ -465,6 +506,18 @@ def get_zip_performance():
                 GROUP BY w.ZIP HAVING SUM(w.IMPRESSIONS) >= 100 ORDER BY 2 DESC LIMIT 50
             """
             rows = query(sql, [advertiser_id, agency_id, start, end])
+        elif src == 'PARAMOUNT':
+            sql = """
+                SELECT p.ZIP_CODE, COUNT(*),
+                       SUM(CASE WHEN p.IS_STORE_VISIT = 'TRUE' THEN 1 ELSE 0 END),
+                       MAX(z.CITY_NAME), MAX(z.STATE_ABBREVIATION)
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS p
+                LEFT JOIN QUORUMDB.REF_DATA.ZIP_POPULATION_DATA z ON p.ZIP_CODE = z.ZIP_CODE
+                WHERE p.QUORUM_ADVERTISER_ID = %s 
+                  AND p.ZIP_CODE IS NOT NULL AND p.ZIP_CODE != ''
+                GROUP BY p.ZIP_CODE HAVING COUNT(*) >= 100 ORDER BY 2 DESC LIMIT 50
+            """
+            rows = query(sql, [advertiser_id])
         else:
             rows = []
         
