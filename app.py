@@ -21,21 +21,21 @@ CORS(app)
 # ============================================================================
 
 AGENCIES = [
-    {'AGENCY_ID': '2514', 'AGENCY_NAME': 'MNTN', 'SOURCE': 'QIR'},
-    {'AGENCY_ID': '1956', 'AGENCY_NAME': 'Dealer Spike', 'SOURCE': 'QIR'},
-    {'AGENCY_ID': '2298', 'AGENCY_NAME': 'InteractRV', 'SOURCE': 'QIR'},
-    {'AGENCY_ID': '2086', 'AGENCY_NAME': 'Level5', 'SOURCE': 'QIR'},
-    {'AGENCY_ID': '1955', 'AGENCY_NAME': 'ARI', 'SOURCE': 'QIR'},
-    {'AGENCY_ID': '1950', 'AGENCY_NAME': 'ByRider', 'SOURCE': 'QIR'},
-    {'AGENCY_ID': '1813', 'AGENCY_NAME': 'Causal iQ', 'SOURCE': 'CPRS'},
-    {'AGENCY_ID': '1972', 'AGENCY_NAME': 'Hearst', 'SOURCE': 'CPRS'},
-    {'AGENCY_ID': '2234', 'AGENCY_NAME': 'Magnite', 'SOURCE': 'CPRS'},
-    {'AGENCY_ID': '2744', 'AGENCY_NAME': 'Parallel Path', 'SOURCE': 'CPRS'},
-    {'AGENCY_ID': '1445', 'AGENCY_NAME': 'Publicis', 'SOURCE': 'CPRS'},
-    {'AGENCY_ID': '2379', 'AGENCY_NAME': 'The Shipyard', 'SOURCE': 'CPRS'},
-    {'AGENCY_ID': '2691', 'AGENCY_NAME': 'TeamSnap', 'SOURCE': 'CPRS'},
-    {'AGENCY_ID': '1880', 'AGENCY_NAME': 'TravelSpike', 'SOURCE': 'CPRS'},
-    {'AGENCY_ID': '1480', 'AGENCY_NAME': 'ViacomCBS / Paramount', 'SOURCE': 'PARAMOUNT'},
+    {'AGENCY_ID': '2514', 'AGENCY_NAME': 'MNTN', 'SOURCE': 'QIR', 'ADVERTISER_COUNT': 30},
+    {'AGENCY_ID': '1956', 'AGENCY_NAME': 'Dealer Spike', 'SOURCE': 'QIR', 'ADVERTISER_COUNT': 25},
+    {'AGENCY_ID': '2298', 'AGENCY_NAME': 'InteractRV', 'SOURCE': 'QIR', 'ADVERTISER_COUNT': 15},
+    {'AGENCY_ID': '2086', 'AGENCY_NAME': 'Level5', 'SOURCE': 'QIR', 'ADVERTISER_COUNT': 10},
+    {'AGENCY_ID': '1955', 'AGENCY_NAME': 'ARI', 'SOURCE': 'QIR', 'ADVERTISER_COUNT': 20},
+    {'AGENCY_ID': '1950', 'AGENCY_NAME': 'ByRider', 'SOURCE': 'QIR', 'ADVERTISER_COUNT': 8},
+    {'AGENCY_ID': '1813', 'AGENCY_NAME': 'Causal iQ', 'SOURCE': 'CPRS', 'ADVERTISER_COUNT': 45},
+    {'AGENCY_ID': '1972', 'AGENCY_NAME': 'Hearst', 'SOURCE': 'CPRS', 'ADVERTISER_COUNT': 20},
+    {'AGENCY_ID': '2234', 'AGENCY_NAME': 'Magnite', 'SOURCE': 'CPRS', 'ADVERTISER_COUNT': 12},
+    {'AGENCY_ID': '2744', 'AGENCY_NAME': 'Parallel Path', 'SOURCE': 'CPRS', 'ADVERTISER_COUNT': 18},
+    {'AGENCY_ID': '1445', 'AGENCY_NAME': 'Publicis', 'SOURCE': 'CPRS', 'ADVERTISER_COUNT': 15},
+    {'AGENCY_ID': '2379', 'AGENCY_NAME': 'The Shipyard', 'SOURCE': 'CPRS', 'ADVERTISER_COUNT': 10},
+    {'AGENCY_ID': '2691', 'AGENCY_NAME': 'TeamSnap', 'SOURCE': 'CPRS', 'ADVERTISER_COUNT': 5},
+    {'AGENCY_ID': '1880', 'AGENCY_NAME': 'TravelSpike', 'SOURCE': 'CPRS', 'ADVERTISER_COUNT': 8},
+    {'AGENCY_ID': '1480', 'AGENCY_NAME': 'ViacomCBS / Paramount', 'SOURCE': 'PARAMOUNT', 'ADVERTISER_COUNT': 95},
 ]
 
 AGENCY_SOURCE = {a['AGENCY_ID']: a['SOURCE'] for a in AGENCIES}
@@ -126,6 +126,19 @@ def get_agency_overview():
         """
         cprs_data = {str(r[0]): r for r in query(cprs_sql, [start, end])}
         
+        # Paramount - separate query
+        paramount_sql = """
+            SELECT COUNT(*) FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+        """
+        paramount_imps = query(paramount_sql)[0][0] or 0
+        
+        paramount_web_sql = """
+            SELECT COUNT(DISTINCT WEB_IMPRESSION_ID) 
+            FROM QUORUMDB.SEGMENT_DATA.WEB_VISITORS_TO_LOG
+            WHERE SITE_VISIT_TIMESTAMP >= %s AND SITE_VISIT_TIMESTAMP < %s
+        """
+        paramount_web = query(paramount_web_sql, [start, end])[0][0] or 0
+        
         for a in AGENCIES:
             aid = a['AGENCY_ID']
             src = a['SOURCE']
@@ -137,7 +150,7 @@ def get_agency_overview():
                 r = cprs_data[aid]
                 imps, lv, wv = r[1] or 0, r[2] or 0, 0
             elif src == 'PARAMOUNT':
-                imps, lv, wv = 0, 0, 0  # Skip Paramount for speed
+                imps, lv, wv = paramount_imps, 0, paramount_web
             else:
                 imps, lv, wv = 0, 0, 0
             
