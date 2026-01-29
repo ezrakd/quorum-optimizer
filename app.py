@@ -50,6 +50,17 @@ def get_snowflake_connection():
     )
 
 def parse_date(date_str):
+    """Validate and parse date string to prevent SQL injection"""
+    if not date_str:
+        return None
+    try:
+        # Validate format is YYYY-MM-DD
+        datetime.strptime(date_str, '%Y-%m-%d')
+        return date_str
+    except (ValueError, AttributeError):
+        return None
+
+def parse_date(date_str):
     """Parse date string in multiple formats to YYYY-MM-DD"""
     if not date_str:
         return None
@@ -634,6 +645,15 @@ def get_campaign_performance_v5():
         columns = [desc[0] for desc in cursor.description]
         results = [dict(zip(columns, row)) for row in cursor.fetchall()]
         
+        # Add visit rate calculations
+        for row in results:
+            impressions = row.get('IMPRESSIONS', 0) or 0
+            w_visits = row.get('W_VISITS', 0) or 0
+            s_visits = row.get('S_VISITS', 0) or 0
+            
+            row['W_VISIT_RATE'] = round((w_visits / impressions * 100), 2) if impressions > 0 else 0.0
+            row['L_VISIT_RATE'] = round((s_visits / impressions * 100), 2) if impressions > 0 else 0.0
+        
         cursor.close()
         conn.close()
         
@@ -686,6 +706,7 @@ def get_publisher_performance_v5():
                 SELECT 
                     PUBLISHER_CODE,
                     COUNT(DISTINCT AD_IMP_ID) as IMPRESSIONS,
+                    0 as W_VISITS,
                     COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = TRUE THEN DEVICE_ID_QU END) as S_VISITS
                 FROM QUORUMDB.SEGMENT_DATA.QUORUM_ADV_STORE_VISITS
                 WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
@@ -736,7 +757,8 @@ def get_publisher_performance_v5():
                 SELECT 
                     COALESCE(i.PUBLISHER_CODE, c.PUBLISHER_CODE) as PUBLISHER_CODE,
                     COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS,
-                    COALESCE(c.SITE_VISITORS, 0) + COALESCE(c.STORE_VISITORS, 0) as S_VISITS
+                    COALESCE(c.SITE_VISITORS, 0) as W_VISITS,
+                    COALESCE(c.STORE_VISITORS, 0) as S_VISITS
                 FROM impressions i
                 FULL OUTER JOIN conversions c ON i.PUBLISHER_CODE = c.PUBLISHER_CODE
                 WHERE COALESCE(i.IMPRESSIONS, 0) >= 100
@@ -760,6 +782,7 @@ def get_publisher_performance_v5():
                 SELECT 
                     PUBLISHER as PUBLISHER_CODE,
                     SUM(IMPRESSIONS) as IMPRESSIONS,
+                    0 as W_VISITS,
                     SUM(VISITORS) as S_VISITS
                 FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
                 WHERE ADVERTISER_ID = %(advertiser_id)s
@@ -774,6 +797,15 @@ def get_publisher_performance_v5():
         cursor.execute(query, {'advertiser_id': advertiser_id})
         columns = [desc[0] for desc in cursor.description]
         results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        # Add visit rate calculations
+        for row in results:
+            impressions = row.get('IMPRESSIONS', 0) or 0
+            w_visits = row.get('W_VISITS', 0) or 0
+            s_visits = row.get('S_VISITS', 0) or 0
+            
+            row['W_VISIT_RATE'] = round((w_visits / impressions * 100), 2) if impressions > 0 else 0.0
+            row['L_VISIT_RATE'] = round((s_visits / impressions * 100), 2) if impressions > 0 else 0.0
         
         cursor.close()
         conn.close()
@@ -936,6 +968,15 @@ def get_zip_performance_v5():
         cursor.execute(query, {'advertiser_id': advertiser_id})
         columns = [desc[0] for desc in cursor.description]
         results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        # Add visit rate calculations
+        for row in results:
+            impressions = row.get('IMPRESSIONS', 0) or 0
+            w_visits = row.get('W_VISITS', 0) or 0
+            s_visits = row.get('S_VISITS', 0) or 0
+            
+            row['W_VISIT_RATE'] = round((w_visits / impressions * 100), 2) if impressions > 0 else 0.0
+            row['L_VISIT_RATE'] = round((s_visits / impressions * 100), 2) if impressions > 0 else 0.0
         
         cursor.close()
         conn.close()
@@ -995,6 +1036,15 @@ def get_creative_performance_v5():
         cursor.execute(query, {'advertiser_id': advertiser_id})
         columns = [desc[0] for desc in cursor.description]
         results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        # Add visit rate calculations
+        for row in results:
+            impressions = row.get('IMPRESSIONS', 0) or 0
+            w_visits = row.get('W_VISITS', 0) or 0
+            s_visits = row.get('S_VISITS', 0) or 0
+            
+            row['W_VISIT_RATE'] = round((w_visits / impressions * 100), 2) if impressions > 0 else 0.0
+            row['L_VISIT_RATE'] = round((s_visits / impressions * 100), 2) if impressions > 0 else 0.0
         
         cursor.close()
         conn.close()
@@ -1056,6 +1106,15 @@ def get_lineitem_performance_v5():
         cursor.execute(query, {'advertiser_id': advertiser_id})
         columns = [desc[0] for desc in cursor.description]
         results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        # Add visit rate calculations
+        for row in results:
+            impressions = row.get('IMPRESSIONS', 0) or 0
+            w_visits = row.get('W_VISITS', 0) or 0
+            s_visits = row.get('S_VISITS', 0) or 0
+            
+            row['W_VISIT_RATE'] = round((w_visits / impressions * 100), 2) if impressions > 0 else 0.0
+            row['L_VISIT_RATE'] = round((s_visits / impressions * 100), 2) if impressions > 0 else 0.0
         
         cursor.close()
         conn.close()
@@ -1124,6 +1183,15 @@ def get_dma_performance_v5():
         cursor.execute(query, {'advertiser_id': advertiser_id})
         columns = [desc[0] for desc in cursor.description]
         results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        # Add visit rate calculations
+        for row in results:
+            impressions = row.get('IMPRESSIONS', 0) or 0
+            w_visits = row.get('W_VISITS', 0) or 0
+            s_visits = row.get('S_VISITS', 0) or 0
+            
+            row['W_VISIT_RATE'] = round((w_visits / impressions * 100), 2) if impressions > 0 else 0.0
+            row['L_VISIT_RATE'] = round((s_visits / impressions * 100), 2) if impressions > 0 else 0.0
         
         cursor.close()
         conn.close()
@@ -1429,37 +1497,120 @@ def get_agency_overview_v5():
 
 @app.route('/api/v5/advertiser-overview', methods=['GET'])
 def get_advertiser_overview_v5():
-    """Get advertisers for an agency - delegates to /advertisers endpoint"""
+    """Get advertisers for an agency with WEB_VISITS and LOCATION_VISITS columns"""
     agency_id = request.args.get('agency_id', type=int)
+    start_date = request.args.get('start_date')
+    end_date = request.args.get('end_date')
     
     if not agency_id:
-        # Global view not supported, return empty
         return jsonify({'success': True, 'data': []})
     
     try:
-        # Reuse the advertisers endpoint which has the correct logic
-        advertisers_response = get_advertisers_v5()
-        advertisers_data = advertisers_response.get_json()
+        conn = get_snowflake_connection()
+        cursor = conn.cursor()
         
-        if not advertisers_data.get('success'):
-            return advertisers_response
-        
-        # Transform to overview format (STORE_VISITS becomes WEB_VISITS or LOCATION_VISITS)
-        overview_data = []
-        for adv in advertisers_data.get('data', []):
-            agency_class = adv.get('AGENCY_CLASS', 'A')
-            store_visits = adv.get('STORE_VISITS', 0)
+        # Determine agency class
+        if agency_id in CLASS_A_AGENCIES:
+            # Class A - QUORUM_ADV_STORE_VISITS
+            date_filter = ""
+            if start_date and end_date:
+                date_filter = f"AND IMP_TIMESTAMP >= TO_DATE('{start_date}', 'YYYY-MM-DD') AND IMP_TIMESTAMP < DATEADD(day, 1, TO_DATE('{end_date}', 'YYYY-MM-DD'))"
+            else:
+                date_filter = "AND IMP_TIMESTAMP >= DATEADD(day, -90, CURRENT_DATE())"
             
-            overview_data.append({
-                'ADVERTISER_ID': adv['ADVERTISER_ID'],
-                'ADVERTISER_NAME': adv['ADVERTISER_NAME'],
-                'IMPRESSIONS': adv.get('IMPRESSIONS', 0),
-                # Class W = web visits, others = location visits
-                'WEB_VISITS': store_visits if agency_class == 'W' else 0,
-                'LOCATION_VISITS': store_visits if agency_class != 'W' else 0,
-            })
+            query = f"""
+                WITH adv_stats AS (
+                    SELECT 
+                        QUORUM_ADVERTISER_ID as ADVERTISER_ID,
+                        COUNT(DISTINCT AD_IMP_ID) as IMPRESSIONS,
+                        COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = TRUE THEN DEVICE_ID_QU END) as STORE_VISITS
+                    FROM QUORUMDB.SEGMENT_DATA.QUORUM_ADV_STORE_VISITS
+                    WHERE AGENCY_ID = %(agency_id)s
+                      {date_filter}
+                    GROUP BY QUORUM_ADVERTISER_ID
+                    HAVING COUNT(DISTINCT AD_IMP_ID) >= 1000
+                )
+                SELECT 
+                    a.ADVERTISER_ID,
+                    COALESCE(aa.COMP_NAME, 'Advertiser ' || a.ADVERTISER_ID) as ADVERTISER_NAME,
+                    a.IMPRESSIONS,
+                    0 as WEB_VISITS,
+                    a.STORE_VISITS as LOCATION_VISITS
+                FROM adv_stats a
+                LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa ON a.ADVERTISER_ID = aa.ID
+                ORDER BY a.IMPRESSIONS DESC
+            """
+            
+        elif agency_id in CLASS_W_AGENCIES:
+            # Class W - PARAMOUNT_MAPPED_IMPRESSIONS
+            date_filter = ""
+            if start_date and end_date:
+                date_filter = f"AND IMP_DATE >= TO_DATE('{start_date}', 'YYYY-MM-DD') AND IMP_DATE <= TO_DATE('{end_date}', 'YYYY-MM-DD')"
+            else:
+                date_filter = "AND IMP_DATE >= DATEADD(day, -90, CURRENT_DATE())"
+            
+            query = f"""
+                WITH impressions AS (
+                    SELECT 
+                        CAST(QUORUM_ADVERTISER_ID AS NUMBER) as ADVERTISER_ID,
+                        MAX(ADVERTISER_NAME) as ADVERTISER_NAME,
+                        COUNT(*) as IMPRESSIONS
+                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_MAPPED_IMPRESSIONS
+                    WHERE 1=1 {date_filter}
+                    GROUP BY QUORUM_ADVERTISER_ID
+                ),
+                conversions AS (
+                    SELECT 
+                        QUORUM_ADVERTISER_ID as ADVERTISER_ID,
+                        COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as SITE_VISITORS
+                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+                    WHERE 1=1 {date_filter}
+                    GROUP BY QUORUM_ADVERTISER_ID
+                )
+                SELECT 
+                    i.ADVERTISER_ID,
+                    i.ADVERTISER_NAME,
+                    i.IMPRESSIONS,
+                    COALESCE(c.SITE_VISITORS, 0) as WEB_VISITS,
+                    0 as LOCATION_VISITS
+                FROM impressions i
+                LEFT JOIN conversions c ON i.ADVERTISER_ID = c.ADVERTISER_ID
+                WHERE i.IMPRESSIONS >= 10000
+                ORDER BY i.IMPRESSIONS DESC
+            """
+            
+        else:
+            # Class B - CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
+            date_filter = ""
+            if start_date and end_date:
+                date_filter = f"AND CAST(LOG_DATE AS DATE) BETWEEN '{start_date}' AND '{end_date}'"
+            else:
+                date_filter = "AND LOG_DATE >= DATEADD(day, -90, CURRENT_DATE())"
+            
+            query = f"""
+                SELECT 
+                    ADVERTISER_ID,
+                    COALESCE(aa.COMP_NAME, 'Advertiser ' || w.ADVERTISER_ID) as ADVERTISER_NAME,
+                    SUM(IMPRESSIONS) as IMPRESSIONS,
+                    0 as WEB_VISITS,
+                    SUM(VISITORS) as LOCATION_VISITS
+                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS w
+                LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa ON w.ADVERTISER_ID = aa.ID
+                WHERE AGENCY_ID = %(agency_id)s
+                  {date_filter}
+                GROUP BY ADVERTISER_ID, aa.COMP_NAME
+                HAVING SUM(IMPRESSIONS) >= 1000 OR SUM(VISITORS) >= 10
+                ORDER BY SUM(IMPRESSIONS) DESC
+            """
         
-        return jsonify({'success': True, 'data': overview_data})
+        cursor.execute(query, {'agency_id': agency_id})
+        columns = [desc[0] for desc in cursor.description]
+        results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        
+        cursor.close()
+        conn.close()
+        
+        return jsonify({'success': True, 'data': results})
         
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
