@@ -126,18 +126,24 @@ def get_agency_overview():
         """
         cprs_data = {str(r[0]): r for r in query(cprs_sql, [start, end])}
         
-        # Paramount - separate query
-        paramount_sql = """
-            SELECT COUNT(*) FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-        """
-        paramount_imps = query(paramount_sql)[0][0] or 0
+        # Paramount - separate query (may fail if no access)
+        try:
+            paramount_sql = """
+                SELECT COUNT(*) FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+            """
+            paramount_imps = query(paramount_sql)[0][0] or 0
+        except:
+            paramount_imps = 0
         
-        paramount_web_sql = """
-            SELECT COUNT(DISTINCT WEB_IMPRESSION_ID) 
-            FROM QUORUMDB.SEGMENT_DATA.WEB_VISITORS_TO_LOG
-            WHERE SITE_VISIT_TIMESTAMP >= %s AND SITE_VISIT_TIMESTAMP < %s
-        """
-        paramount_web = query(paramount_web_sql, [start, end])[0][0] or 0
+        try:
+            paramount_web_sql = """
+                SELECT COUNT(DISTINCT WEB_IMPRESSION_ID) 
+                FROM QUORUMDB.SEGMENT_DATA.WEB_VISITORS_TO_LOG
+                WHERE SITE_VISIT_TIMESTAMP >= %s AND SITE_VISIT_TIMESTAMP < %s
+            """
+            paramount_web = query(paramount_web_sql, [start, end])[0][0] or 0
+        except:
+            paramount_web = 0
         
         for a in AGENCIES:
             aid = a['AGENCY_ID']
