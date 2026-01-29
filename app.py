@@ -1561,8 +1561,9 @@ def get_advertiser_overview_v5():
                 ),
                 conversions AS (
                     SELECT 
-                        QUORUM_ADVERTISER_ID as ADVERTISER_ID,
-                        COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as SITE_VISITORS
+                        CAST(QUORUM_ADVERTISER_ID AS NUMBER) as ADVERTISER_ID,
+                        COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as SITE_VISITORS,
+                        COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITORS
                     FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
                     WHERE 1=1 {date_filter}
                     GROUP BY QUORUM_ADVERTISER_ID
@@ -1572,7 +1573,7 @@ def get_advertiser_overview_v5():
                     i.ADVERTISER_NAME,
                     i.IMPRESSIONS,
                     COALESCE(c.SITE_VISITORS, 0) as WEB_VISITS,
-                    0 as LOCATION_VISITS
+                    COALESCE(c.STORE_VISITORS, 0) as LOCATION_VISITS
                 FROM impressions i
                 LEFT JOIN conversions c ON i.ADVERTISER_ID = c.ADVERTISER_ID
                 WHERE i.IMPRESSIONS >= 10000
@@ -1589,18 +1590,18 @@ def get_advertiser_overview_v5():
             
             query = f"""
                 SELECT 
-                    ADVERTISER_ID,
+                    w.ADVERTISER_ID,
                     COALESCE(aa.COMP_NAME, 'Advertiser ' || w.ADVERTISER_ID) as ADVERTISER_NAME,
-                    SUM(IMPRESSIONS) as IMPRESSIONS,
+                    SUM(w.IMPRESSIONS) as IMPRESSIONS,
                     0 as WEB_VISITS,
-                    SUM(VISITORS) as LOCATION_VISITS
+                    SUM(w.VISITORS) as LOCATION_VISITS
                 FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS w
                 LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa ON w.ADVERTISER_ID = aa.ID
-                WHERE AGENCY_ID = %(agency_id)s
+                WHERE w.AGENCY_ID = %(agency_id)s
                   {date_filter}
-                GROUP BY ADVERTISER_ID, aa.COMP_NAME
-                HAVING SUM(IMPRESSIONS) >= 1000 OR SUM(VISITORS) >= 10
-                ORDER BY SUM(IMPRESSIONS) DESC
+                GROUP BY w.ADVERTISER_ID, aa.COMP_NAME
+                HAVING SUM(w.IMPRESSIONS) >= 1000 OR SUM(w.VISITORS) >= 10
+                ORDER BY SUM(w.IMPRESSIONS) DESC
             """
         
         cursor.execute(query, {'agency_id': agency_id})
