@@ -13,23 +13,42 @@ from flask_cors import CORS
 import snowflake.connector
 import os
 from datetime import datetime, timedelta
+import logging
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
+
+# Log startup
+logger.info("App starting up - no Snowflake connection until first request")
 
 # ============================================================================
 # SNOWFLAKE CONNECTION
 # ============================================================================
 
+_connection_pool = None
+
 def get_snowflake_connection():
-    return snowflake.connector.connect(
-        user=os.environ.get('SNOWFLAKE_USER'),
-        password=os.environ.get('SNOWFLAKE_PASSWORD'),
-        account=os.environ.get('SNOWFLAKE_ACCOUNT'),
-        warehouse=os.environ.get('SNOWFLAKE_WAREHOUSE', 'COMPUTE_WH'),
-        database='QUORUMDB',
-        schema='SEGMENT_DATA'
-    )
+    """Get a Snowflake connection with timeout settings"""
+    try:
+        conn = snowflake.connector.connect(
+            user=os.environ.get('SNOWFLAKE_USER'),
+            password=os.environ.get('SNOWFLAKE_PASSWORD'),
+            account=os.environ.get('SNOWFLAKE_ACCOUNT'),
+            warehouse=os.environ.get('SNOWFLAKE_WAREHOUSE', 'COMPUTE_WH'),
+            database='QUORUMDB',
+            schema='SEGMENT_DATA',
+            login_timeout=30,
+            network_timeout=60
+        )
+        logger.info("Snowflake connection established")
+        return conn
+    except Exception as e:
+        logger.error(f"Snowflake connection error: {e}")
+        raise
 
 # ============================================================================
 # AGENCY SOURCE DETECTION
@@ -69,19 +88,28 @@ def safe_divide(numerator, denominator, multiplier=100, decimals=4):
 
 def execute_query(query, params=None):
     """Execute a query and return results"""
-    conn = get_snowflake_connection()
-    cursor = conn.cursor()
+    conn = None
+    cursor = None
     try:
+        conn = get_snowflake_connection()
+        cursor = conn.cursor()
+        logger.info(f"Executing query: {query[:100]}...")
         if params:
             cursor.execute(query, params)
         else:
             cursor.execute(query)
         results = cursor.fetchall()
         columns = [desc[0] for desc in cursor.description] if cursor.description else []
+        logger.info(f"Query returned {len(results)} rows")
         return results, columns
+    except Exception as e:
+        logger.error(f"Query error: {e}")
+        raise
     finally:
-        cursor.close()
-        conn.close()
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 # ============================================================================
 # V3 ENDPOINTS - Overview/Navigation
