@@ -485,10 +485,10 @@ def get_zip_performance():
         if not agency_id or not advertiser_id:
             return jsonify({'success': False, 'error': 'agency_id and advertiser_id required'}), 400
         
-        start, end = dates(request)
         src = get_source(agency_id)
-        logger.info(f"zip-performance: agency={agency_id}, advertiser={advertiser_id}, src={src}, dates={start} to {end}")
+        logger.info(f"zip-performance (all-time): agency={agency_id}, advertiser={advertiser_id}, src={src}")
         
+        # ALL-TIME data - no date filtering for performance and reliability
         if src == 'QIR':
             sql = """
                 SELECT q.ZIP_CODE, COUNT(*),
@@ -497,11 +497,10 @@ def get_zip_performance():
                 FROM QUORUMDB.SEGMENT_DATA.QUORUM_IMPRESSIONS_REPORT q
                 LEFT JOIN QUORUMDB.REF_DATA.ZIP_POPULATION_DATA z ON q.ZIP_CODE = z.ZIP_CODE
                 WHERE q.QUORUM_ADVERTISER_ID = %s AND q.AGENCY_ID = %s 
-                  AND q.LOG_DATE >= %s AND q.LOG_DATE < %s
                   AND q.ZIP_CODE IS NOT NULL AND q.ZIP_CODE != ''
-                GROUP BY q.ZIP_CODE HAVING COUNT(*) >= 100 ORDER BY 2 DESC LIMIT 50
+                GROUP BY q.ZIP_CODE HAVING COUNT(*) >= 1000 ORDER BY 2 DESC LIMIT 50
             """
-            rows = query(sql, [advertiser_id, agency_id, start, end])
+            rows = query(sql, [advertiser_id, agency_id])
         elif src == 'CPRS':
             sql = """
                 SELECT w.ZIP, SUM(w.IMPRESSIONS), SUM(w.VISITORS),
@@ -509,11 +508,10 @@ def get_zip_performance():
                 FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS w
                 LEFT JOIN QUORUMDB.REF_DATA.ZIP_POPULATION_DATA z ON w.ZIP = z.ZIP_CODE
                 WHERE w.ADVERTISER_ID = %s AND w.AGENCY_ID = %s 
-                  AND w.LOG_DATE >= %s AND w.LOG_DATE < %s
                   AND w.ZIP IS NOT NULL AND w.ZIP != ''
-                GROUP BY w.ZIP HAVING SUM(w.IMPRESSIONS) >= 100 ORDER BY 2 DESC LIMIT 50
+                GROUP BY w.ZIP HAVING SUM(w.IMPRESSIONS) >= 1000 ORDER BY 2 DESC LIMIT 50
             """
-            rows = query(sql, [advertiser_id, agency_id, start, end])
+            rows = query(sql, [advertiser_id, agency_id])
         elif src == 'PARAMOUNT':
             sql = """
                 SELECT p.ZIP_CODE, COUNT(DISTINCT p.CACHE_BUSTER),
@@ -522,11 +520,10 @@ def get_zip_performance():
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS p
                 LEFT JOIN QUORUMDB.REF_DATA.ZIP_POPULATION_DATA z ON p.ZIP_CODE = z.ZIP_CODE
                 WHERE CAST(p.QUORUM_ADVERTISER_ID AS INTEGER) = %s 
-                  AND p.IMP_DATE >= %s AND p.IMP_DATE < %s
                   AND p.ZIP_CODE IS NOT NULL AND p.ZIP_CODE != ''
                 GROUP BY p.ZIP_CODE HAVING COUNT(DISTINCT p.CACHE_BUSTER) >= 100 ORDER BY 2 DESC LIMIT 50
             """
-            rows = query(sql, [int(float(advertiser_id)), start, end])
+            rows = query(sql, [int(float(advertiser_id))])
         else:
             rows = []
         
