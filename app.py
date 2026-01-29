@@ -223,7 +223,7 @@ def get_advertiser_overview():
             rows = query(sql, [agency_id, start, end])
         elif src == 'PARAMOUNT':
             sql = """
-                SELECT p.QUORUM_ADVERTISER_ID, MAX(a.COMP_NAME), 
+                SELECT CAST(p.QUORUM_ADVERTISER_ID AS INTEGER), MAX(a.COMP_NAME), 
                        COUNT(DISTINCT p.CACHE_BUSTER),
                        COUNT(DISTINCT CASE WHEN p.IS_STORE_VISIT = 'TRUE' THEN p.CACHE_BUSTER END),
                        COUNT(DISTINCT CASE WHEN p.IS_SITE_VISIT = 'TRUE' THEN p.WEB_IMPRESSION_ID END)
