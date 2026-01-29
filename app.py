@@ -335,7 +335,7 @@ def get_advertiser_summary():
                 WHERE CAST(QUORUM_ADVERTISER_ID AS INTEGER) = %s
                   AND IMP_DATE >= %s AND IMP_DATE < %s
             """
-            rows = query(sql, [int(advertiser_id), start, end])
+            rows = query(sql, [int(float(advertiser_id)), start, end])
         else:
             rows = [(0, 0, 0, 0, 0)]
         
@@ -394,7 +394,7 @@ def get_campaign_performance():
                   AND IMP_DATE >= %s AND IMP_DATE < %s
                 GROUP BY IO_ID HAVING COUNT(DISTINCT CACHE_BUSTER) >= 100 ORDER BY 3 DESC LIMIT 50
             """
-            rows = query(sql, [int(advertiser_id), start, end])
+            rows = query(sql, [int(float(advertiser_id)), start, end])
         else:
             rows = []
         
@@ -454,7 +454,7 @@ def get_publisher_performance():
                   AND IMP_DATE >= %s AND IMP_DATE < %s
                 GROUP BY SITE HAVING COUNT(DISTINCT CACHE_BUSTER) >= 100 ORDER BY 2 DESC LIMIT 50
             """
-            rows = query(sql, [int(advertiser_id), start, end])
+            rows = query(sql, [int(float(advertiser_id)), start, end])
         else:
             rows = []
         
@@ -526,7 +526,7 @@ def get_zip_performance():
                   AND p.ZIP_CODE IS NOT NULL AND p.ZIP_CODE != ''
                 GROUP BY p.ZIP_CODE HAVING COUNT(DISTINCT p.CACHE_BUSTER) >= 100 ORDER BY 2 DESC LIMIT 50
             """
-            rows = query(sql, [int(advertiser_id), start, end])
+            rows = query(sql, [int(float(advertiser_id)), start, end])
         else:
             rows = []
         
