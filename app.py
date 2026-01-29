@@ -1146,24 +1146,28 @@ def agencies_compat():
 @app.route('/api/v3/advertisers', methods=['GET'])
 @app.route('/api/v4/advertisers', methods=['GET'])
 @app.route('/api/advertisers', methods=['GET'])
+@app.route('/api/web/advertisers', methods=['GET'])
 def advertisers_compat():
     return get_advertisers_v5()
 
 @app.route('/api/v3/advertiser-summary', methods=['GET'])
 @app.route('/api/v4/advertiser-summary', methods=['GET'])
 @app.route('/api/advertiser-summary', methods=['GET'])
+@app.route('/api/web/advertiser-summary', methods=['GET'])
 def summary_compat():
     return get_advertiser_summary_v5()
 
 @app.route('/api/v3/campaign-performance', methods=['GET'])
 @app.route('/api/v4/campaign-performance', methods=['GET'])
 @app.route('/api/campaign-performance', methods=['GET'])
+@app.route('/api/web/campaign-performance', methods=['GET'])
 def campaign_compat():
     return get_campaign_performance_v5()
 
 @app.route('/api/v3/publisher-performance', methods=['GET'])
 @app.route('/api/v4/publisher-performance', methods=['GET'])
 @app.route('/api/publisher-performance', methods=['GET'])
+@app.route('/api/web/publisher-performance', methods=['GET'])
 def publisher_compat():
     return get_publisher_performance_v5()
 
@@ -1176,6 +1180,7 @@ def zip_compat():
 @app.route('/api/v3/creative-performance', methods=['GET'])
 @app.route('/api/v4/creative-performance', methods=['GET'])
 @app.route('/api/creative-performance', methods=['GET'])
+@app.route('/api/web/creative-performance', methods=['GET'])
 def creative_compat():
     return get_creative_performance_v5()
 
