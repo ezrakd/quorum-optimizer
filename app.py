@@ -280,7 +280,7 @@ def get_campaign_performance():
                     COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
                     COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITS
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE QUORUM_ADVERTISER_ID = CAST(%(advertiser_id)s AS VARCHAR)
+                WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
                   AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
                 GROUP BY IO_ID
                 HAVING COUNT(*) >= 100
@@ -359,7 +359,7 @@ def get_lineitem_performance():
                     COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
                     COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITS
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE QUORUM_ADVERTISER_ID = CAST(%(advertiser_id)s AS VARCHAR)
+                WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
                   AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
                   {campaign_filter}
                 GROUP BY LINEITEM_ID
@@ -452,7 +452,7 @@ def get_publisher_performance():
                     COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
                     COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITS
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE QUORUM_ADVERTISER_ID = CAST(%(advertiser_id)s AS VARCHAR)
+                WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
                   AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
                   {paramount_filters}
                 GROUP BY SITE
@@ -539,7 +539,7 @@ def get_zip_performance():
                     COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
                     COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITS
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE QUORUM_ADVERTISER_ID = CAST(%(advertiser_id)s AS VARCHAR)
+                WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
                   AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
                   AND ZIP_CODE IS NOT NULL 
                   AND ZIP_CODE != ''
@@ -612,6 +612,8 @@ def get_zip_performance():
 def get_dma_performance():
     """
     Get DMA level performance for an advertiser.
+    Paramount: derives DMA from ZIP_CODE using DBIP_LOOKUP_US reference
+    Class B: uses DMA column from CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
     """
     try:
         agency_id = request.args.get('agency_id')
@@ -627,24 +629,56 @@ def get_dma_performance():
         conn = get_snowflake_connection()
         cursor = conn.cursor()
         
-        # Build filters
-        filters = ""
-        if campaign_id:
-            filters += f" AND IO_ID = '{campaign_id}'"
-        if lineitem_id:
-            filters += f" AND LI_ID = '{lineitem_id}'"
-        
-        # Paramount isn't in WEEKLY_STATS, so return empty for now
         if agency_id == 1480:
-            results = []
+            # Paramount - derive DMA from ZIP using DBIP_LOOKUP_US reference table
+            filters = ""
+            if campaign_id:
+                filters += f" AND p.IO_ID = '{campaign_id}'"
+            if lineitem_id:
+                filters += f" AND p.LINEITEM_ID = '{lineitem_id}'"
+            
+            query = f"""
+                WITH zip_dma AS (
+                    SELECT ZIPCODE, MAX(DMA_NAME) as DMA_NAME 
+                    FROM QUORUMDB.SEGMENT_DATA.DBIP_LOOKUP_US 
+                    WHERE DMA_NAME IS NOT NULL AND DMA_NAME != ''
+                    GROUP BY ZIPCODE
+                )
+                SELECT 
+                    d.DMA_NAME as DMA,
+                    COUNT(*) as IMPRESSIONS,
+                    COUNT(DISTINCT CASE WHEN p.IS_STORE_VISIT = 'TRUE' THEN p.IMP_MAID END) as STORE_VISITS,
+                    COUNT(DISTINCT CASE WHEN p.IS_SITE_VISIT = 'TRUE' THEN p.IMP_MAID END) as WEB_VISITS
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS p
+                JOIN zip_dma d ON p.ZIP_CODE = d.ZIPCODE
+                WHERE p.QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                  AND p.IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
+                  {filters}
+                GROUP BY d.DMA_NAME
+                HAVING COUNT(*) >= 100
+                ORDER BY 2 DESC
+                LIMIT 50
+            """
+            
+            cursor.execute(query, {
+                'advertiser_id': advertiser_id,
+                'start_date': start_date,
+                'end_date': end_date
+            })
         else:
+            # Class B - use DMA column from WEEKLY_STATS
+            filters = ""
+            if campaign_id:
+                filters += f" AND IO_ID = '{campaign_id}'"
+            if lineitem_id:
+                filters += f" AND LI_ID = '{lineitem_id}'"
+            
             query = f"""
                 SELECT 
                     DMA,
                     SUM(IMPRESSIONS) as IMPRESSIONS,
                     SUM(VISITORS) as STORE_VISITS,
-                    0 as WEB_VISITS,
-                    ROUND(SUM(VISITORS) * 100.0 / NULLIF(SUM(IMPRESSIONS), 0), 4) as VISIT_RATE
+                    0 as WEB_VISITS
                 FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
                 WHERE AGENCY_ID = %(agency_id)s
                   AND ADVERTISER_ID = %(advertiser_id)s
@@ -663,9 +697,9 @@ def get_dma_performance():
                 'start_date': start_date,
                 'end_date': end_date
             })
-            
-            columns = [desc[0] for desc in cursor.description]
-            results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        
+        columns = [desc[0] for desc in cursor.description]
+        results = [dict(zip(columns, row)) for row in cursor.fetchall()]
         
         cursor.close()
         conn.close()
