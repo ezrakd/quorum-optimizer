@@ -26,6 +26,29 @@ CORS(app)
 # CONFIGURATION
 # =============================================================================
 
+# Agency name mapping (hardcoded since no proper agency table exists)
+AGENCY_NAMES = {
+    1480: "Paramount",
+    1813: "Causal iQ", 
+    2514: "MNTN",
+    2234: "Magnite",
+    1972: "Hearst",
+    2379: "The Shipyard",
+    1445: "Publicis",
+    2744: "Parallel Path",
+    2691: "Agency 2691",
+    1956: "Dealer Spike",
+    2298: "InteractRV",
+    1955: "ARI",
+    2086: "Level5",
+    1950: "ByRider",
+    1880: "TeamSnap"
+}
+
+def get_agency_name(agency_id):
+    """Get agency name from mapping"""
+    return AGENCY_NAMES.get(int(agency_id), f"Agency {agency_id}")
+
 def get_snowflake_connection():
     return snowflake.connector.connect(
         user=os.environ.get('SNOWFLAKE_USER', 'OPTIMIZER_SERVICE_USER'),
@@ -91,37 +114,28 @@ def get_agencies():
         end_date = parse_date(request.args.get('end_date')) or end_date
         
         query = """
-            WITH visit_stats AS (
-                SELECT 
-                    AGENCY_ID,
-                    COUNT(DISTINCT ADVERTISER_ID) as ADVERTISER_COUNT,
-                    SUM(CASE WHEN VISIT_TYPE = 'STORE' THEN 1 ELSE 0 END) as STORE_VISITS,
-                    SUM(CASE WHEN VISIT_TYPE = 'WEB' THEN 1 ELSE 0 END) as WEB_VISITS,
-                    COUNT(DISTINCT DEVICE_ID) as UNIQUE_VISITORS
-                FROM QUORUMDB.SEGMENT_DATA.V5_ALL_VISITS
-                WHERE VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
-                GROUP BY AGENCY_ID
-            ),
-            agency_names AS (
-                SELECT DISTINCT ID as AGENCY_ID, COMP_NAME as AGENCY_NAME
-                FROM QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER
-                WHERE COMP_NAME IS NOT NULL
-            )
             SELECT 
-                v.AGENCY_ID,
-                COALESCE(a.AGENCY_NAME, 'Agency ' || v.AGENCY_ID) as AGENCY_NAME,
-                v.ADVERTISER_COUNT,
-                v.STORE_VISITS,
-                v.WEB_VISITS,
-                v.UNIQUE_VISITORS
-            FROM visit_stats v
-            LEFT JOIN agency_names a ON v.AGENCY_ID = a.AGENCY_ID
-            ORDER BY v.STORE_VISITS + v.WEB_VISITS DESC
+                AGENCY_ID,
+                COUNT(DISTINCT ADVERTISER_ID) as ADVERTISER_COUNT,
+                SUM(CASE WHEN VISIT_TYPE = 'STORE' THEN 1 ELSE 0 END) as STORE_VISITS,
+                SUM(CASE WHEN VISIT_TYPE = 'WEB' THEN 1 ELSE 0 END) as WEB_VISITS,
+                COUNT(DISTINCT DEVICE_ID) as UNIQUE_VISITORS
+            FROM QUORUMDB.SEGMENT_DATA.V5_ALL_VISITS
+            WHERE VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+            GROUP BY AGENCY_ID
+            ORDER BY STORE_VISITS + WEB_VISITS DESC
         """
         
         cursor.execute(query, {'start_date': start_date, 'end_date': end_date})
         columns = [desc[0] for desc in cursor.description]
-        results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        rows = cursor.fetchall()
+        
+        # Add agency names from mapping
+        results = []
+        for row in rows:
+            data = dict(zip(columns, row))
+            data['AGENCY_NAME'] = get_agency_name(data['AGENCY_ID'])
+            results.append(data)
         
         cursor.close()
         conn.close()
@@ -150,32 +164,40 @@ def get_advertisers():
         start_date = parse_date(request.args.get('start_date')) or start_date
         end_date = parse_date(request.args.get('end_date')) or end_date
         
+        # Get advertiser names based on agency
+        adv_names = {}
+        if agency_id == 1480:  # Paramount - use URL mapping
+            name_query = """
+                SELECT DISTINCT ADVERTISER_ID, 
+                    REGEXP_REPLACE(ADVERTISER_NAME, '^[0-9A-Za-z]+ - ', '') as ADVERTISER_NAME
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_URL_MAPPING
+                WHERE ADVERTISER_ID IS NOT NULL
+            """
+            cursor.execute(name_query)
+            for row in cursor.fetchall():
+                adv_names[row[0]] = row[1]
+        else:  # Other agencies - use ADVERTISER_PIXEL_STATS
+            name_query = """
+                SELECT DISTINCT QUORUM_ADVERTISER_ID, IMP_ADV_NAME
+                FROM QUORUMDB.SEGMENT_DATA.ADVERTISER_PIXEL_STATS
+                WHERE AGENCY_ID = %(agency_id)s AND IMP_ADV_NAME IS NOT NULL
+            """
+            cursor.execute(name_query, {'agency_id': agency_id})
+            for row in cursor.fetchall():
+                if row[0] and row[1]:
+                    adv_names[int(row[0])] = row[1]
+        
         query = """
-            WITH visit_stats AS (
-                SELECT 
-                    ADVERTISER_ID,
-                    SUM(CASE WHEN VISIT_TYPE = 'STORE' THEN 1 ELSE 0 END) as STORE_VISITS,
-                    SUM(CASE WHEN VISIT_TYPE = 'WEB' THEN 1 ELSE 0 END) as WEB_VISITS,
-                    COUNT(DISTINCT DEVICE_ID) as UNIQUE_VISITORS
-                FROM QUORUMDB.SEGMENT_DATA.V5_ALL_VISITS
-                WHERE AGENCY_ID = %(agency_id)s
-                  AND VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
-                GROUP BY ADVERTISER_ID
-            ),
-            adv_names AS (
-                SELECT DISTINCT ID as ADVERTISER_ID, COMP_NAME as ADVERTISER_NAME
-                FROM QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER
-                WHERE COMP_NAME IS NOT NULL
-            )
             SELECT 
-                v.ADVERTISER_ID,
-                COALESCE(a.ADVERTISER_NAME, 'Advertiser ' || v.ADVERTISER_ID) as ADVERTISER_NAME,
-                v.STORE_VISITS,
-                v.WEB_VISITS,
-                v.UNIQUE_VISITORS
-            FROM visit_stats v
-            LEFT JOIN adv_names a ON v.ADVERTISER_ID = a.ADVERTISER_ID
-            ORDER BY v.STORE_VISITS + v.WEB_VISITS DESC
+                ADVERTISER_ID,
+                SUM(CASE WHEN VISIT_TYPE = 'STORE' THEN 1 ELSE 0 END) as STORE_VISITS,
+                SUM(CASE WHEN VISIT_TYPE = 'WEB' THEN 1 ELSE 0 END) as WEB_VISITS,
+                COUNT(DISTINCT DEVICE_ID) as UNIQUE_VISITORS
+            FROM QUORUMDB.SEGMENT_DATA.V5_ALL_VISITS
+            WHERE AGENCY_ID = %(agency_id)s
+              AND VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+            GROUP BY ADVERTISER_ID
+            ORDER BY STORE_VISITS + WEB_VISITS DESC
         """
         
         cursor.execute(query, {
@@ -184,7 +206,15 @@ def get_advertisers():
             'end_date': end_date
         })
         columns = [desc[0] for desc in cursor.description]
-        results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        rows = cursor.fetchall()
+        
+        # Add advertiser names
+        results = []
+        for row in rows:
+            data = dict(zip(columns, row))
+            adv_id = data['ADVERTISER_ID']
+            data['ADVERTISER_NAME'] = adv_names.get(adv_id, f"Advertiser {adv_id}")
+            results.append(data)
         
         cursor.close()
         conn.close()
