@@ -193,7 +193,7 @@ def get_advertisers():
                 WHERE DATE BETWEEN %(start_date)s AND %(end_date)s
                 GROUP BY QUORUM_ADVERTISER_ID
                 HAVING SUM(IMPRESSIONS) > 0 OR SUM(STORE_VISITS) > 0 OR SUM(SITE_VISITS) > 0
-                ORDER BY SUM(IMPRESSIONS) DESC
+                ORDER BY 3 DESC
             """
             cursor.execute(query, {'start_date': start_date, 'end_date': end_date})
         else:
@@ -212,7 +212,7 @@ def get_advertisers():
                   AND w.LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
                 GROUP BY w.ADVERTISER_ID
                 HAVING SUM(w.IMPRESSIONS) > 0 OR SUM(w.VISITORS) > 0
-                ORDER BY SUM(w.IMPRESSIONS) DESC
+                ORDER BY 3 DESC
             """
             cursor.execute(query, {
                 'agency_id': agency_id,
@@ -309,7 +309,7 @@ def get_campaign_performance():
                   AND LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
                 GROUP BY IO_ID
                 HAVING SUM(IMPRESSIONS) >= 100 OR SUM(VISITORS) >= 10
-                ORDER BY SUM(IMPRESSIONS) DESC
+                ORDER BY 3 DESC
             """
         
         cursor.execute(query, {
@@ -392,7 +392,7 @@ def get_lineitem_performance():
                   {campaign_filter}
                 GROUP BY LI_ID
                 HAVING SUM(IMPRESSIONS) >= 100 OR SUM(VISITORS) >= 10
-                ORDER BY SUM(IMPRESSIONS) DESC
+                ORDER BY 4 DESC
                 LIMIT 100
             """
         
@@ -490,7 +490,7 @@ def get_publisher_performance():
                   {campaign_filter}
                 GROUP BY PUBLISHER
                 HAVING SUM(IMPRESSIONS) >= 100
-                ORDER BY SUM(IMPRESSIONS) DESC
+                ORDER BY 2 DESC
                 LIMIT 50
             """
         
@@ -552,7 +552,7 @@ def get_zip_performance():
               {campaign_filter}
             GROUP BY USER_HOME_POSTAL_CODE
             HAVING SUM(IMPRESSIONS) >= 100 OR SUM(STORE_VISITS) >= 1
-            ORDER BY SUM(STORE_VISITS) DESC, SUM(IMPRESSIONS) DESC
+            ORDER BY 3 DESC, 2 DESC
             LIMIT 100
         """
         
@@ -622,7 +622,7 @@ def get_dma_performance():
                   {campaign_filter}
                 GROUP BY DMA
                 HAVING SUM(IMPRESSIONS) >= 100
-                ORDER BY SUM(IMPRESSIONS) DESC
+                ORDER BY 2 DESC
                 LIMIT 50
             """
             
