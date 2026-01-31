@@ -271,39 +271,20 @@ def get_campaign_performance():
         cursor = conn.cursor()
         
         if agency_id == 1480:
-            # Paramount - aggregate from PARAMOUNT_MAPPED_IMPRESSIONS + conversions
-            # QUORUM_ADVERTISER_ID is VARCHAR, so cast to string
+            # Paramount - use PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS for everything
             query = """
-                WITH impressions AS (
-                    SELECT 
-                        IO_ID,
-                        MAX(IO_NAME) as IO_NAME,
-                        COUNT(*) as IMPRESSIONS
-                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_MAPPED_IMPRESSIONS
-                    WHERE QUORUM_ADVERTISER_ID = CAST(%(advertiser_id)s AS VARCHAR)
-                      AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
-                    GROUP BY IO_ID
-                ),
-                conversions AS (
-                    SELECT 
-                        IO_ID,
-                        COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
-                        COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITS
-                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                    WHERE QUORUM_ADVERTISER_ID = CAST(%(advertiser_id)s AS VARCHAR)
-                      AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
-                    GROUP BY IO_ID
-                )
                 SELECT 
-                    i.IO_ID,
-                    i.IO_NAME,
-                    i.IMPRESSIONS,
-                    COALESCE(c.STORE_VISITS, 0) as STORE_VISITS,
-                    COALESCE(c.WEB_VISITS, 0) as WEB_VISITS
-                FROM impressions i
-                LEFT JOIN conversions c ON i.IO_ID = c.IO_ID
-                WHERE i.IMPRESSIONS >= 100
-                ORDER BY i.IMPRESSIONS DESC
+                    IO_ID,
+                    MAX(IO_NAME) as IO_NAME,
+                    COUNT(*) as IMPRESSIONS,
+                    COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
+                    COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITS
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+                WHERE QUORUM_ADVERTISER_ID = CAST(%(advertiser_id)s AS VARCHAR)
+                  AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
+                GROUP BY IO_ID
+                HAVING COUNT(*) >= 100
+                ORDER BY 3 DESC
             """
         else:
             # Class B - use CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
@@ -438,6 +419,7 @@ def get_publisher_performance():
         agency_id = request.args.get('agency_id')
         advertiser_id = request.args.get('advertiser_id')
         campaign_id = request.args.get('campaign_id')
+        lineitem_id = request.args.get('lineitem_id')
         
         if not agency_id or not advertiser_id:
             return jsonify({'success': False, 'error': 'agency_id and advertiser_id required'}), 400
@@ -447,43 +429,35 @@ def get_publisher_performance():
         conn = get_snowflake_connection()
         cursor = conn.cursor()
         
-        campaign_filter = ""
+        # Build filters for Paramount
+        paramount_filters = ""
         if campaign_id:
-            campaign_filter = f"AND IO_ID = '{campaign_id}'"
+            paramount_filters += f" AND IO_ID = '{campaign_id}'"
+        if lineitem_id:
+            paramount_filters += f" AND LINEITEM_ID = '{lineitem_id}'"
+        
+        # Build filters for Class B
+        classb_filters = ""
+        if campaign_id:
+            classb_filters += f" AND IO_ID = '{campaign_id}'"
+        if lineitem_id:
+            classb_filters += f" AND LI_ID = '{lineitem_id}'"
         
         if agency_id == 1480:
-            # Paramount - use SITE column
+            # Paramount - use PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
             query = f"""
-                WITH impressions AS (
-                    SELECT 
-                        SITE as PUBLISHER,
-                        COUNT(*) as IMPRESSIONS
-                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_MAPPED_IMPRESSIONS
-                    WHERE QUORUM_ADVERTISER_ID = CAST(%(advertiser_id)s AS VARCHAR)
-                      AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
-                      {campaign_filter}
-                    GROUP BY SITE
-                ),
-                conversions AS (
-                    SELECT 
-                        SITE as PUBLISHER,
-                        COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
-                        COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITS
-                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                    WHERE QUORUM_ADVERTISER_ID = CAST(%(advertiser_id)s AS VARCHAR)
-                      AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
-                      {campaign_filter}
-                    GROUP BY SITE
-                )
                 SELECT 
-                    COALESCE(i.PUBLISHER, c.PUBLISHER) as PUBLISHER,
-                    COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS,
-                    COALESCE(c.STORE_VISITS, 0) as STORE_VISITS,
-                    COALESCE(c.WEB_VISITS, 0) as WEB_VISITS
-                FROM impressions i
-                FULL OUTER JOIN conversions c ON i.PUBLISHER = c.PUBLISHER
-                WHERE COALESCE(i.IMPRESSIONS, 0) >= 100
-                ORDER BY COALESCE(i.IMPRESSIONS, 0) DESC
+                    SITE as PUBLISHER,
+                    COUNT(*) as IMPRESSIONS,
+                    COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
+                    COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITS
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+                WHERE QUORUM_ADVERTISER_ID = CAST(%(advertiser_id)s AS VARCHAR)
+                  AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
+                  {paramount_filters}
+                GROUP BY SITE
+                HAVING COUNT(*) >= 100
+                ORDER BY 2 DESC
                 LIMIT 50
             """
         else:
@@ -498,7 +472,7 @@ def get_publisher_performance():
                 WHERE AGENCY_ID = %(agency_id)s
                   AND ADVERTISER_ID = %(advertiser_id)s
                   AND LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
-                  {campaign_filter}
+                  {classb_filters}
                 GROUP BY PUBLISHER
                 HAVING SUM(IMPRESSIONS) >= 100
                 ORDER BY 2 DESC
@@ -538,6 +512,7 @@ def get_zip_performance():
         agency_id = request.args.get('agency_id')
         advertiser_id = request.args.get('advertiser_id')
         campaign_id = request.args.get('campaign_id')
+        lineitem_id = request.args.get('lineitem_id')
         
         if not agency_id or not advertiser_id:
             return jsonify({'success': False, 'error': 'agency_id and advertiser_id required'}), 400
@@ -545,12 +520,15 @@ def get_zip_performance():
         conn = get_snowflake_connection()
         cursor = conn.cursor()
         
-        # Build campaign filter if provided
-        campaign_filter = ""
+        # Build filters
+        filters = ""
         if campaign_id:
-            campaign_filter = f"AND CAMPAIGN_ID = {campaign_id}"
+            filters += f" AND CAMPAIGN_ID = {campaign_id}"
+        if lineitem_id:
+            filters += f" AND LINEITEM_ID = '{lineitem_id}'"
         
         # CAMPAIGN_POSTAL_REPORTING - all agencies, all-time data
+        # Filter out null/empty ZIP codes
         query = f"""
             SELECT 
                 USER_HOME_POSTAL_CODE as ZIP_CODE,
@@ -560,7 +538,11 @@ def get_zip_performance():
             FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING
             WHERE AGENCY_ID = %(agency_id)s
               AND ADVERTISER_ID = %(advertiser_id)s
-              {campaign_filter}
+              AND USER_HOME_POSTAL_CODE IS NOT NULL 
+              AND USER_HOME_POSTAL_CODE != ''
+              AND USER_HOME_POSTAL_CODE != 'null'
+              AND USER_HOME_POSTAL_CODE != 'UNKNOWN'
+              {filters}
             GROUP BY USER_HOME_POSTAL_CODE
             HAVING SUM(IMPRESSIONS) >= 100 OR SUM(STORE_VISITS) >= 1
             ORDER BY 3 DESC, 2 DESC
@@ -597,6 +579,7 @@ def get_dma_performance():
         agency_id = request.args.get('agency_id')
         advertiser_id = request.args.get('advertiser_id')
         campaign_id = request.args.get('campaign_id')
+        lineitem_id = request.args.get('lineitem_id')
         
         if not agency_id or not advertiser_id:
             return jsonify({'success': False, 'error': 'agency_id and advertiser_id required'}), 400
@@ -606,16 +589,15 @@ def get_dma_performance():
         conn = get_snowflake_connection()
         cursor = conn.cursor()
         
-        campaign_filter = ""
+        # Build filters
+        filters = ""
         if campaign_id:
-            campaign_filter = f"AND IO_ID = '{campaign_id}'"
+            filters += f" AND IO_ID = '{campaign_id}'"
+        if lineitem_id:
+            filters += f" AND LI_ID = '{lineitem_id}'"
         
-        # Both Paramount and Class B can use WEEKLY_STATS pattern for DMA
-        # But Paramount isn't in WEEKLY_STATS, so we need different handling
-        
+        # Paramount isn't in WEEKLY_STATS, so return empty for now
         if agency_id == 1480:
-            # Paramount - no DMA in standard tables, return empty for now
-            # Could add from PARAMOUNT_IMPRESSIONS_REPORT if ZIP_CODE -> DMA mapping exists
             results = []
         else:
             query = f"""
@@ -630,7 +612,7 @@ def get_dma_performance():
                   AND ADVERTISER_ID = %(advertiser_id)s
                   AND LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
                   AND DMA IS NOT NULL AND DMA != ''
-                  {campaign_filter}
+                  {filters}
                 GROUP BY DMA
                 HAVING SUM(IMPRESSIONS) >= 100
                 ORDER BY 2 DESC
