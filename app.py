@@ -1,22 +1,20 @@
 """
-Quorum Optimizer API v5 - Unified View Architecture
-====================================================
-Uses V5 views for simplified, consistent data access:
-- V5_ALL_VISITS: Combined store + web visits (all agencies)
-- V5_STORE_VISITS_ENRICHED: Store visits with campaign metadata
-- V5_STORE_VISITS_WITH_HOUSEHOLD: Store visits + household attribution
-- V5_WEB_VISITS_PARAMOUNT: Web visits for Paramount (agency 1480)
+Quorum Optimizer API v5 - Hybrid Architecture
+==============================================
+Uses pre-aggregated tables for fast queries:
+- CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS (Class B agencies)
+- PARAMOUNT_DASHBOARD_SUMMARY_STATS (Paramount advertiser-level)
+- PARAMOUNT_MAPPED_IMPRESSIONS + PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS (Paramount campaign-level)
+- CAMPAIGN_POSTAL_REPORTING (Geographic - all agencies, full history)
 
-Data Sources by Agency:
-- Class A (MNTN 2514): QUORUM_ADV_STORE_VISITS via V5_STORE_VISITS_ENRICHED
-- Class B (Causal iQ, Magnite, etc.): CPSV_RAW via V5_STORE_VISITS_ENRICHED  
-- Paramount (1480): PARAMOUNT_IMP_STORE_VISITS + WEBPIXEL via V5_ALL_VISITS
+Web visits included where available (Paramount only for now).
+Geographic endpoint uses full history with no date filter.
 """
 
-import os
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 import snowflake.connector
+import os
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
@@ -26,53 +24,52 @@ CORS(app)
 # CONFIGURATION
 # =============================================================================
 
-# Agency name mapping (hardcoded since no proper agency table exists)
-AGENCY_NAMES = {
-    1480: "Paramount",
-    1813: "Causal iQ", 
-    2514: "MNTN",
-    2234: "Magnite",
-    1972: "Hearst",
-    2379: "The Shipyard",
-    1445: "Publicis",
-    2744: "Parallel Path",
-    2691: "Agency 2691",
-    1956: "Dealer Spike",
-    2298: "InteractRV",
-    1955: "ARI",
-    2086: "Level5",
-    1950: "ByRider",
-    1880: "TeamSnap"
+# Agency classification and names
+AGENCY_CONFIG = {
+    # Paramount - uses PARAMOUNT_* tables
+    1480: {'name': 'Paramount', 'class': 'PARAMOUNT'},
+    
+    # Class B - uses CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
+    1813: {'name': 'Causal iQ', 'class': 'B'},
+    2514: {'name': 'MNTN', 'class': 'B'},
+    1972: {'name': 'Hearst', 'class': 'B'},
+    2234: {'name': 'Magnite', 'class': 'B'},
+    2379: {'name': 'The Shipyard', 'class': 'B'},
+    1445: {'name': 'Publicis', 'class': 'B'},
+    1880: {'name': 'TeamSnap', 'class': 'B'},
+    2744: {'name': 'Parallel Path', 'class': 'B'},
+    2691: {'name': 'TravelSpike', 'class': 'B'},
+    2393: {'name': 'AIOPW', 'class': 'B'},
 }
 
+CLASS_B_AGENCIES = [k for k, v in AGENCY_CONFIG.items() if v['class'] == 'B']
+
 def get_agency_name(agency_id):
-    """Get agency name from mapping"""
-    return AGENCY_NAMES.get(int(agency_id), f"Agency {agency_id}")
+    """Get agency name from config"""
+    config = AGENCY_CONFIG.get(int(agency_id))
+    return config['name'] if config else f"Agency {agency_id}"
+
+def get_agency_class(agency_id):
+    """Get agency class (PARAMOUNT or B)"""
+    config = AGENCY_CONFIG.get(int(agency_id))
+    return config['class'] if config else 'B'
 
 def get_snowflake_connection():
     return snowflake.connector.connect(
-        user=os.environ.get('SNOWFLAKE_USER', 'OPTIMIZER_SERVICE_USER'),
+        user=os.environ.get('SNOWFLAKE_USER'),
         password=os.environ.get('SNOWFLAKE_PASSWORD'),
-        account=os.environ.get('SNOWFLAKE_ACCOUNT', 'FZB05958.us-east-1'),
+        account=os.environ.get('SNOWFLAKE_ACCOUNT'),
         warehouse=os.environ.get('SNOWFLAKE_WAREHOUSE', 'COMPUTE_WH'),
-        database='QUORUMDB',
-        schema='SEGMENT_DATA'
+        database=os.environ.get('SNOWFLAKE_DATABASE', 'QUORUMDB'),
+        schema=os.environ.get('SNOWFLAKE_SCHEMA', 'SEGMENT_DATA'),
+        role=os.environ.get('SNOWFLAKE_ROLE', 'OPTIMIZER_READONLY_ROLE')
     )
 
-def parse_date(date_str):
-    """Validate and parse date string to prevent SQL injection"""
-    if not date_str:
-        return None
-    try:
-        datetime.strptime(date_str, '%Y-%m-%d')
-        return date_str
-    except (ValueError, AttributeError):
-        return None
-
-def get_default_dates():
-    """Return default 30-day date range"""
-    end_date = datetime.now().strftime('%Y-%m-%d')
-    start_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+def get_date_range():
+    """Get date range from request params with defaults"""
+    end_date = request.args.get('end_date', datetime.now().strftime('%Y-%m-%d'))
+    start_date = request.args.get('start_date', 
+        (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d'))
     return start_date, end_date
 
 # =============================================================================
@@ -80,141 +77,159 @@ def get_default_dates():
 # =============================================================================
 
 @app.route('/health', methods=['GET'])
-def health():
+def health_check():
     return jsonify({
         'status': 'healthy',
-        'version': 'v5-unified',
-        'views': [
-            'V5_ALL_VISITS',
-            'V5_STORE_VISITS_ENRICHED', 
-            'V5_STORE_VISITS_WITH_HOUSEHOLD',
-            'V5_WEB_VISITS_PARAMOUNT',
-            'V5_STORE_VISITS_PARAMOUNT'
-        ],
-        'data_sources': {
-            'class_a': 'QUORUM_ADV_STORE_VISITS (MNTN)',
-            'class_b': 'CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW (Causal iQ, Magnite, etc.)',
-            'paramount': 'PARAMOUNT_IMP_STORE_VISITS + WEBPIXEL_IMPRESSION_LOG'
-        }
+        'version': '5.0-hybrid',
+        'description': 'Pre-aggregated tables for speed, web visits where available'
     })
 
 # =============================================================================
-# AGENCIES ENDPOINT
+# AGENCY OVERVIEW
 # =============================================================================
 
 @app.route('/api/v5/agencies', methods=['GET'])
 def get_agencies():
-    """Get all agencies with visit counts"""
+    """
+    Get all agencies with aggregated metrics.
+    Uses CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS for Class B,
+    PARAMOUNT_DASHBOARD_SUMMARY_STATS for Paramount.
+    """
     try:
+        start_date, end_date = get_date_range()
         conn = get_snowflake_connection()
         cursor = conn.cursor()
         
-        start_date, end_date = get_default_dates()
-        start_date = parse_date(request.args.get('start_date')) or start_date
-        end_date = parse_date(request.args.get('end_date')) or end_date
+        all_results = []
         
-        query = """
+        # Query 1: Class B agencies from CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
+        query_class_b = """
             SELECT 
                 AGENCY_ID,
-                COUNT(DISTINCT ADVERTISER_ID) as ADVERTISER_COUNT,
-                SUM(CASE WHEN VISIT_TYPE = 'STORE' THEN 1 ELSE 0 END) as STORE_VISITS,
-                SUM(CASE WHEN VISIT_TYPE = 'WEB' THEN 1 ELSE 0 END) as WEB_VISITS,
-                COUNT(DISTINCT DEVICE_ID) as UNIQUE_VISITORS
-            FROM QUORUMDB.SEGMENT_DATA.V5_ALL_VISITS
-            WHERE VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+                SUM(IMPRESSIONS) as IMPRESSIONS,
+                SUM(VISITORS) as STORE_VISITS,
+                0 as WEB_VISITS,
+                COUNT(DISTINCT ADVERTISER_ID) as ADVERTISER_COUNT
+            FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
+            WHERE LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
             GROUP BY AGENCY_ID
-            ORDER BY STORE_VISITS + WEB_VISITS DESC
+            HAVING SUM(IMPRESSIONS) > 0 OR SUM(VISITORS) > 0
         """
+        cursor.execute(query_class_b, {'start_date': start_date, 'end_date': end_date})
+        for row in cursor.fetchall():
+            agency_id = row[0]
+            all_results.append({
+                'AGENCY_ID': agency_id,
+                'AGENCY_NAME': get_agency_name(agency_id),
+                'IMPRESSIONS': row[1] or 0,
+                'STORE_VISITS': row[2] or 0,
+                'WEB_VISITS': row[3] or 0,
+                'ADVERTISER_COUNT': row[4] or 0
+            })
         
-        cursor.execute(query, {'start_date': start_date, 'end_date': end_date})
-        columns = [desc[0] for desc in cursor.description]
-        rows = cursor.fetchall()
+        # Query 2: Paramount from PARAMOUNT_DASHBOARD_SUMMARY_STATS
+        query_paramount = """
+            SELECT 
+                1480 as AGENCY_ID,
+                SUM(IMPRESSIONS) as IMPRESSIONS,
+                SUM(STORE_VISITS) as STORE_VISITS,
+                SUM(SITE_VISITS) as WEB_VISITS,
+                COUNT(DISTINCT QUORUM_ADVERTISER_ID) as ADVERTISER_COUNT
+            FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_DASHBOARD_SUMMARY_STATS
+            WHERE DATE BETWEEN %(start_date)s AND %(end_date)s
+        """
+        cursor.execute(query_paramount, {'start_date': start_date, 'end_date': end_date})
+        row = cursor.fetchone()
+        if row and (row[1] or row[2] or row[3]):
+            all_results.append({
+                'AGENCY_ID': 1480,
+                'AGENCY_NAME': 'Paramount',
+                'IMPRESSIONS': row[1] or 0,
+                'STORE_VISITS': row[2] or 0,
+                'WEB_VISITS': row[3] or 0,
+                'ADVERTISER_COUNT': row[4] or 0
+            })
         
-        # Add agency names from mapping
-        results = []
-        for row in rows:
-            data = dict(zip(columns, row))
-            data['AGENCY_NAME'] = get_agency_name(data['AGENCY_ID'])
-            results.append(data)
+        # Sort by impressions descending
+        all_results.sort(key=lambda x: x.get('IMPRESSIONS', 0) or 0, reverse=True)
         
         cursor.close()
         conn.close()
         
-        return jsonify({'success': True, 'data': results})
+        return jsonify({'success': True, 'data': all_results})
         
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # =============================================================================
-# ADVERTISERS ENDPOINT
+# ADVERTISER OVERVIEW
 # =============================================================================
 
 @app.route('/api/v5/advertisers', methods=['GET'])
 def get_advertisers():
-    """Get advertisers for an agency with visit counts"""
+    """
+    Get advertisers for a specific agency.
+    """
     try:
-        agency_id = request.args.get('agency_id', type=int)
+        agency_id = request.args.get('agency_id')
         if not agency_id:
             return jsonify({'success': False, 'error': 'agency_id required'}), 400
         
+        agency_id = int(agency_id)
+        start_date, end_date = get_date_range()
         conn = get_snowflake_connection()
         cursor = conn.cursor()
         
-        start_date, end_date = get_default_dates()
-        start_date = parse_date(request.args.get('start_date')) or start_date
-        end_date = parse_date(request.args.get('end_date')) or end_date
-        
-        # Get advertiser names based on agency
-        adv_names = {}
-        if agency_id == 1480:  # Paramount - use URL mapping
-            name_query = """
-                SELECT DISTINCT ADVERTISER_ID, 
-                    REGEXP_REPLACE(ADVERTISER_NAME, '^[0-9A-Za-z]+ - ', '') as ADVERTISER_NAME
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_URL_MAPPING
-                WHERE ADVERTISER_ID IS NOT NULL
+        if agency_id == 1480:
+            # Paramount - use PARAMOUNT_DASHBOARD_SUMMARY_STATS
+            query = """
+                SELECT 
+                    QUORUM_ADVERTISER_ID as ADVERTISER_ID,
+                    MAX(ADVERTISER_NAME) as ADVERTISER_NAME,
+                    SUM(IMPRESSIONS) as IMPRESSIONS,
+                    SUM(STORE_VISITS) as STORE_VISITS,
+                    SUM(SITE_VISITS) as WEB_VISITS
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_DASHBOARD_SUMMARY_STATS
+                WHERE DATE BETWEEN %(start_date)s AND %(end_date)s
+                GROUP BY QUORUM_ADVERTISER_ID
+                HAVING SUM(IMPRESSIONS) > 0 OR SUM(STORE_VISITS) > 0 OR SUM(SITE_VISITS) > 0
+                ORDER BY SUM(IMPRESSIONS) DESC
             """
-            cursor.execute(name_query)
-            for row in cursor.fetchall():
-                adv_names[row[0]] = row[1]
-        else:  # Other agencies - use ADVERTISER_PIXEL_STATS
-            name_query = """
-                SELECT DISTINCT QUORUM_ADVERTISER_ID, IMP_ADV_NAME
-                FROM QUORUMDB.SEGMENT_DATA.ADVERTISER_PIXEL_STATS
-                WHERE AGENCY_ID = %(agency_id)s AND IMP_ADV_NAME IS NOT NULL
+            cursor.execute(query, {'start_date': start_date, 'end_date': end_date})
+        else:
+            # Class B - use CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
+            query = """
+                SELECT 
+                    w.ADVERTISER_ID,
+                    COALESCE(MAX(aa.COMP_NAME), 'Advertiser ' || w.ADVERTISER_ID) as ADVERTISER_NAME,
+                    SUM(w.IMPRESSIONS) as IMPRESSIONS,
+                    SUM(w.VISITORS) as STORE_VISITS,
+                    0 as WEB_VISITS
+                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS w
+                LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa 
+                    ON w.ADVERTISER_ID = aa.ID
+                WHERE w.AGENCY_ID = %(agency_id)s
+                  AND w.LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
+                GROUP BY w.ADVERTISER_ID
+                HAVING SUM(w.IMPRESSIONS) > 0 OR SUM(w.VISITORS) > 0
+                ORDER BY SUM(w.IMPRESSIONS) DESC
             """
-            cursor.execute(name_query, {'agency_id': agency_id})
-            for row in cursor.fetchall():
-                if row[0] and row[1]:
-                    adv_names[int(row[0])] = row[1]
+            cursor.execute(query, {
+                'agency_id': agency_id,
+                'start_date': start_date,
+                'end_date': end_date
+            })
         
-        query = """
-            SELECT 
-                ADVERTISER_ID,
-                SUM(CASE WHEN VISIT_TYPE = 'STORE' THEN 1 ELSE 0 END) as STORE_VISITS,
-                SUM(CASE WHEN VISIT_TYPE = 'WEB' THEN 1 ELSE 0 END) as WEB_VISITS,
-                COUNT(DISTINCT DEVICE_ID) as UNIQUE_VISITORS
-            FROM QUORUMDB.SEGMENT_DATA.V5_ALL_VISITS
-            WHERE AGENCY_ID = %(agency_id)s
-              AND VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
-            GROUP BY ADVERTISER_ID
-            ORDER BY STORE_VISITS + WEB_VISITS DESC
-        """
-        
-        cursor.execute(query, {
-            'agency_id': agency_id,
-            'start_date': start_date,
-            'end_date': end_date
-        })
         columns = [desc[0] for desc in cursor.description]
-        rows = cursor.fetchall()
+        results = [dict(zip(columns, row)) for row in cursor.fetchall()]
         
-        # Add advertiser names
-        results = []
-        for row in rows:
-            data = dict(zip(columns, row))
-            adv_id = data['ADVERTISER_ID']
-            data['ADVERTISER_NAME'] = adv_names.get(adv_id, f"Advertiser {adv_id}")
-            results.append(data)
+        # Clean up advertiser names for Paramount (remove prefix IDs)
+        if agency_id == 1480:
+            import re
+            for r in results:
+                if r.get('ADVERTISER_NAME'):
+                    # Remove patterns like "949515 - " or "001Kb00001Jy9wJIAR - "
+                    r['ADVERTISER_NAME'] = re.sub(r'^[0-9A-Za-z]+ - ', '', r['ADVERTISER_NAME'])
         
         cursor.close()
         conn.close()
@@ -225,41 +240,77 @@ def get_advertisers():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # =============================================================================
-# CAMPAIGN PERFORMANCE ENDPOINT
+# CAMPAIGN PERFORMANCE
 # =============================================================================
 
 @app.route('/api/v5/campaign-performance', methods=['GET'])
 def get_campaign_performance():
-    """Get campaign (IO) level performance for an advertiser"""
+    """
+    Get campaign/IO level performance for an advertiser.
+    """
     try:
-        agency_id = request.args.get('agency_id', type=int)
-        advertiser_id = request.args.get('advertiser_id', type=int)
+        agency_id = request.args.get('agency_id')
+        advertiser_id = request.args.get('advertiser_id')
         
         if not agency_id or not advertiser_id:
             return jsonify({'success': False, 'error': 'agency_id and advertiser_id required'}), 400
         
+        agency_id = int(agency_id)
+        start_date, end_date = get_date_range()
         conn = get_snowflake_connection()
         cursor = conn.cursor()
         
-        start_date, end_date = get_default_dates()
-        start_date = parse_date(request.args.get('start_date')) or start_date
-        end_date = parse_date(request.args.get('end_date')) or end_date
-        
-        query = """
-            SELECT 
-                IO_ID,
-                IO_NAME,
-                VISIT_TYPE,
-                COUNT(*) as VISITS,
-                COUNT(DISTINCT DEVICE_ID) as UNIQUE_VISITORS
-            FROM QUORUMDB.SEGMENT_DATA.V5_ALL_VISITS
-            WHERE AGENCY_ID = %(agency_id)s
-              AND ADVERTISER_ID = %(advertiser_id)s
-              AND VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
-              AND IO_ID IS NOT NULL
-            GROUP BY IO_ID, IO_NAME, VISIT_TYPE
-            ORDER BY VISITS DESC
-        """
+        if agency_id == 1480:
+            # Paramount - aggregate from PARAMOUNT_MAPPED_IMPRESSIONS + conversions
+            query = """
+                WITH impressions AS (
+                    SELECT 
+                        IO_ID,
+                        MAX(IO_NAME) as IO_NAME,
+                        COUNT(*) as IMPRESSIONS
+                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_MAPPED_IMPRESSIONS
+                    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                      AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
+                    GROUP BY IO_ID
+                ),
+                conversions AS (
+                    SELECT 
+                        IO_ID,
+                        COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
+                        COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITS
+                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+                    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                      AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
+                    GROUP BY IO_ID
+                )
+                SELECT 
+                    i.IO_ID,
+                    i.IO_NAME,
+                    i.IMPRESSIONS,
+                    COALESCE(c.STORE_VISITS, 0) as STORE_VISITS,
+                    COALESCE(c.WEB_VISITS, 0) as WEB_VISITS
+                FROM impressions i
+                LEFT JOIN conversions c ON i.IO_ID = c.IO_ID
+                WHERE i.IMPRESSIONS >= 100
+                ORDER BY i.IMPRESSIONS DESC
+            """
+        else:
+            # Class B - use CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
+            query = """
+                SELECT 
+                    CAST(IO_ID AS NUMBER) as IO_ID,
+                    MAX(IO_NAME) as IO_NAME,
+                    SUM(IMPRESSIONS) as IMPRESSIONS,
+                    SUM(VISITORS) as STORE_VISITS,
+                    0 as WEB_VISITS
+                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
+                WHERE AGENCY_ID = %(agency_id)s
+                  AND ADVERTISER_ID = %(advertiser_id)s
+                  AND LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
+                GROUP BY IO_ID
+                HAVING SUM(IMPRESSIONS) >= 100 OR SUM(VISITORS) >= 10
+                ORDER BY SUM(IMPRESSIONS) DESC
+            """
         
         cursor.execute(query, {
             'agency_id': agency_id,
@@ -267,6 +318,7 @@ def get_campaign_performance():
             'start_date': start_date,
             'end_date': end_date
         })
+        
         columns = [desc[0] for desc in cursor.description]
         results = [dict(zip(columns, row)) for row in cursor.fetchall()]
         
@@ -279,105 +331,70 @@ def get_campaign_performance():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # =============================================================================
-# LINEITEM PERFORMANCE ENDPOINT
+# LINE ITEM PERFORMANCE
 # =============================================================================
 
 @app.route('/api/v5/lineitem-performance', methods=['GET'])
 def get_lineitem_performance():
-    """Get line item level performance for an advertiser"""
+    """
+    Get line item level performance for an advertiser.
+    """
     try:
-        agency_id = request.args.get('agency_id', type=int)
-        advertiser_id = request.args.get('advertiser_id', type=int)
-        io_id = request.args.get('io_id', type=int)  # Optional filter
+        agency_id = request.args.get('agency_id')
+        advertiser_id = request.args.get('advertiser_id')
+        campaign_id = request.args.get('campaign_id')  # Optional IO filter
         
         if not agency_id or not advertiser_id:
             return jsonify({'success': False, 'error': 'agency_id and advertiser_id required'}), 400
         
+        agency_id = int(agency_id)
+        start_date, end_date = get_date_range()
         conn = get_snowflake_connection()
         cursor = conn.cursor()
         
-        start_date, end_date = get_default_dates()
-        start_date = parse_date(request.args.get('start_date')) or start_date
-        end_date = parse_date(request.args.get('end_date')) or end_date
+        campaign_filter = ""
+        if campaign_id:
+            campaign_filter = f"AND IO_ID = '{campaign_id}'"
         
-        io_filter = "AND IO_ID = %(io_id)s" if io_id else ""
-        
-        query = f"""
-            SELECT 
-                IO_ID,
-                IO_NAME,
-                LINEITEM_ID,
-                LINEITEM_NAME,
-                VISIT_TYPE,
-                COUNT(*) as VISITS,
-                COUNT(DISTINCT DEVICE_ID) as UNIQUE_VISITORS
-            FROM QUORUMDB.SEGMENT_DATA.V5_ALL_VISITS
-            WHERE AGENCY_ID = %(agency_id)s
-              AND ADVERTISER_ID = %(advertiser_id)s
-              AND VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
-              AND LINEITEM_ID IS NOT NULL
-              {io_filter}
-            GROUP BY IO_ID, IO_NAME, LINEITEM_ID, LINEITEM_NAME, VISIT_TYPE
-            ORDER BY VISITS DESC
-        """
-        
-        params = {
-            'agency_id': agency_id,
-            'advertiser_id': advertiser_id,
-            'start_date': start_date,
-            'end_date': end_date
-        }
-        if io_id:
-            params['io_id'] = io_id
-        
-        cursor.execute(query, params)
-        columns = [desc[0] for desc in cursor.description]
-        results = [dict(zip(columns, row)) for row in cursor.fetchall()]
-        
-        cursor.close()
-        conn.close()
-        
-        return jsonify({'success': True, 'data': results})
-        
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-# =============================================================================
-# CREATIVE PERFORMANCE ENDPOINT
-# =============================================================================
-
-@app.route('/api/v5/creative-performance', methods=['GET'])
-def get_creative_performance():
-    """Get creative level performance for an advertiser"""
-    try:
-        agency_id = request.args.get('agency_id', type=int)
-        advertiser_id = request.args.get('advertiser_id', type=int)
-        
-        if not agency_id or not advertiser_id:
-            return jsonify({'success': False, 'error': 'agency_id and advertiser_id required'}), 400
-        
-        conn = get_snowflake_connection()
-        cursor = conn.cursor()
-        
-        start_date, end_date = get_default_dates()
-        start_date = parse_date(request.args.get('start_date')) or start_date
-        end_date = parse_date(request.args.get('end_date')) or end_date
-        
-        query = """
-            SELECT 
-                CREATIVE_ID,
-                MAX(CREATIVE_NAME) as CREATIVE_NAME,
-                VISIT_TYPE,
-                COUNT(*) as VISITS,
-                COUNT(DISTINCT DEVICE_ID) as UNIQUE_VISITORS
-            FROM QUORUMDB.SEGMENT_DATA.V5_ALL_VISITS
-            WHERE AGENCY_ID = %(agency_id)s
-              AND ADVERTISER_ID = %(advertiser_id)s
-              AND VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
-              AND CREATIVE_ID IS NOT NULL
-            GROUP BY CREATIVE_ID, VISIT_TYPE
-            ORDER BY VISITS DESC
-        """
+        if agency_id == 1480:
+            # Paramount - aggregate from PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+            query = f"""
+                SELECT 
+                    LINEITEM_ID as LI_ID,
+                    MAX(LINEITEM_NAME) as LI_NAME,
+                    MAX(IO_NAME) as IO_NAME,
+                    COUNT(*) as IMPRESSIONS,
+                    COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
+                    COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITS
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+                WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                  AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
+                  {campaign_filter}
+                GROUP BY LINEITEM_ID
+                HAVING COUNT(*) >= 100
+                ORDER BY COUNT(*) DESC
+                LIMIT 100
+            """
+        else:
+            # Class B - use CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
+            query = f"""
+                SELECT 
+                    LI_ID,
+                    MAX(LI_NAME) as LI_NAME,
+                    MAX(IO_NAME) as IO_NAME,
+                    SUM(IMPRESSIONS) as IMPRESSIONS,
+                    SUM(VISITORS) as STORE_VISITS,
+                    0 as WEB_VISITS
+                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
+                WHERE AGENCY_ID = %(agency_id)s
+                  AND ADVERTISER_ID = %(advertiser_id)s
+                  AND LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
+                  {campaign_filter}
+                GROUP BY LI_ID
+                HAVING SUM(IMPRESSIONS) >= 100 OR SUM(VISITORS) >= 10
+                ORDER BY SUM(IMPRESSIONS) DESC
+                LIMIT 100
+            """
         
         cursor.execute(query, {
             'agency_id': agency_id,
@@ -385,6 +402,7 @@ def get_creative_performance():
             'start_date': start_date,
             'end_date': end_date
         })
+        
         columns = [desc[0] for desc in cursor.description]
         results = [dict(zip(columns, row)) for row in cursor.fetchall()]
         
@@ -397,15 +415,118 @@ def get_creative_performance():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # =============================================================================
-# GEOGRAPHIC PERFORMANCE ENDPOINT (ZIP)
+# PUBLISHER PERFORMANCE
+# =============================================================================
+
+@app.route('/api/v5/publisher-performance', methods=['GET'])
+def get_publisher_performance():
+    """
+    Get publisher level performance for an advertiser.
+    """
+    try:
+        agency_id = request.args.get('agency_id')
+        advertiser_id = request.args.get('advertiser_id')
+        campaign_id = request.args.get('campaign_id')
+        
+        if not agency_id or not advertiser_id:
+            return jsonify({'success': False, 'error': 'agency_id and advertiser_id required'}), 400
+        
+        agency_id = int(agency_id)
+        start_date, end_date = get_date_range()
+        conn = get_snowflake_connection()
+        cursor = conn.cursor()
+        
+        campaign_filter = ""
+        if campaign_id:
+            campaign_filter = f"AND IO_ID = '{campaign_id}'"
+        
+        if agency_id == 1480:
+            # Paramount - use SITE column
+            query = f"""
+                WITH impressions AS (
+                    SELECT 
+                        SITE as PUBLISHER,
+                        COUNT(*) as IMPRESSIONS
+                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_MAPPED_IMPRESSIONS
+                    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                      AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
+                      {campaign_filter}
+                    GROUP BY SITE
+                ),
+                conversions AS (
+                    SELECT 
+                        SITE as PUBLISHER,
+                        COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
+                        COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITS
+                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+                    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                      AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
+                      {campaign_filter}
+                    GROUP BY SITE
+                )
+                SELECT 
+                    COALESCE(i.PUBLISHER, c.PUBLISHER) as PUBLISHER,
+                    COALESCE(i.IMPRESSIONS, 0) as IMPRESSIONS,
+                    COALESCE(c.STORE_VISITS, 0) as STORE_VISITS,
+                    COALESCE(c.WEB_VISITS, 0) as WEB_VISITS
+                FROM impressions i
+                FULL OUTER JOIN conversions c ON i.PUBLISHER = c.PUBLISHER
+                WHERE COALESCE(i.IMPRESSIONS, 0) >= 100
+                ORDER BY COALESCE(i.IMPRESSIONS, 0) DESC
+                LIMIT 50
+            """
+        else:
+            # Class B - use PUBLISHER column from WEEKLY_STATS
+            query = f"""
+                SELECT 
+                    PUBLISHER,
+                    SUM(IMPRESSIONS) as IMPRESSIONS,
+                    SUM(VISITORS) as STORE_VISITS,
+                    0 as WEB_VISITS
+                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
+                WHERE AGENCY_ID = %(agency_id)s
+                  AND ADVERTISER_ID = %(advertiser_id)s
+                  AND LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
+                  {campaign_filter}
+                GROUP BY PUBLISHER
+                HAVING SUM(IMPRESSIONS) >= 100
+                ORDER BY SUM(IMPRESSIONS) DESC
+                LIMIT 50
+            """
+        
+        cursor.execute(query, {
+            'agency_id': agency_id,
+            'advertiser_id': advertiser_id,
+            'start_date': start_date,
+            'end_date': end_date
+        })
+        
+        columns = [desc[0] for desc in cursor.description]
+        results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        
+        cursor.close()
+        conn.close()
+        
+        return jsonify({'success': True, 'data': results})
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# =============================================================================
+# GEOGRAPHIC / ZIP PERFORMANCE
+# Uses CAMPAIGN_POSTAL_REPORTING - full history, no date filter
 # =============================================================================
 
 @app.route('/api/v5/zip-performance', methods=['GET'])
 def get_zip_performance():
-    """Get ZIP code level performance for an advertiser"""
+    """
+    Get geographic/ZIP code performance for an advertiser.
+    Uses CAMPAIGN_POSTAL_REPORTING - full history, NO date filter.
+    """
     try:
-        agency_id = request.args.get('agency_id', type=int)
-        advertiser_id = request.args.get('advertiser_id', type=int)
+        agency_id = request.args.get('agency_id')
+        advertiser_id = request.args.get('advertiser_id')
+        campaign_id = request.args.get('campaign_id')
         
         if not agency_id or not advertiser_id:
             return jsonify({'success': False, 'error': 'agency_id and advertiser_id required'}), 400
@@ -413,91 +534,107 @@ def get_zip_performance():
         conn = get_snowflake_connection()
         cursor = conn.cursor()
         
-        start_date, end_date = get_default_dates()
-        start_date = parse_date(request.args.get('start_date')) or start_date
-        end_date = parse_date(request.args.get('end_date')) or end_date
+        # Build campaign filter if provided
+        campaign_filter = ""
+        if campaign_id:
+            campaign_filter = f"AND CAMPAIGN_ID = {campaign_id}"
         
-        query = """
+        # CAMPAIGN_POSTAL_REPORTING - all agencies, all-time data
+        query = f"""
             SELECT 
-                ZIP_CODE,
-                DMA,
-                VISIT_TYPE,
-                COUNT(*) as VISITS,
-                COUNT(DISTINCT DEVICE_ID) as UNIQUE_VISITORS
-            FROM QUORUMDB.SEGMENT_DATA.V5_ALL_VISITS
+                USER_HOME_POSTAL_CODE as ZIP_CODE,
+                SUM(IMPRESSIONS) as IMPRESSIONS,
+                SUM(STORE_VISITS) as STORE_VISITS,
+                ROUND(SUM(STORE_VISITS) * 100.0 / NULLIF(SUM(IMPRESSIONS), 0), 4) as VISIT_RATE
+            FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING
             WHERE AGENCY_ID = %(agency_id)s
               AND ADVERTISER_ID = %(advertiser_id)s
-              AND VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
-              AND ZIP_CODE IS NOT NULL
-              AND ZIP_CODE != '0'
-              AND ZIP_CODE != ''
-            GROUP BY ZIP_CODE, DMA, VISIT_TYPE
-            ORDER BY VISITS DESC
+              {campaign_filter}
+            GROUP BY USER_HOME_POSTAL_CODE
+            HAVING SUM(IMPRESSIONS) >= 100 OR SUM(STORE_VISITS) >= 1
+            ORDER BY SUM(STORE_VISITS) DESC, SUM(IMPRESSIONS) DESC
             LIMIT 100
         """
         
         cursor.execute(query, {
             'agency_id': agency_id,
-            'advertiser_id': advertiser_id,
-            'start_date': start_date,
-            'end_date': end_date
+            'advertiser_id': advertiser_id
         })
+        
         columns = [desc[0] for desc in cursor.description]
         results = [dict(zip(columns, row)) for row in cursor.fetchall()]
         
         cursor.close()
         conn.close()
         
-        return jsonify({'success': True, 'data': results})
+        return jsonify({'success': True, 'data': results, 'note': 'Full history (no date filter)'})
         
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # =============================================================================
-# DMA PERFORMANCE ENDPOINT
+# DMA PERFORMANCE
+# Uses CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS (has DMA column)
 # =============================================================================
 
 @app.route('/api/v5/dma-performance', methods=['GET'])
 def get_dma_performance():
-    """Get DMA level performance for an advertiser"""
+    """
+    Get DMA level performance for an advertiser.
+    """
     try:
-        agency_id = request.args.get('agency_id', type=int)
-        advertiser_id = request.args.get('advertiser_id', type=int)
+        agency_id = request.args.get('agency_id')
+        advertiser_id = request.args.get('advertiser_id')
+        campaign_id = request.args.get('campaign_id')
         
         if not agency_id or not advertiser_id:
             return jsonify({'success': False, 'error': 'agency_id and advertiser_id required'}), 400
         
+        agency_id = int(agency_id)
+        start_date, end_date = get_date_range()
         conn = get_snowflake_connection()
         cursor = conn.cursor()
         
-        start_date, end_date = get_default_dates()
-        start_date = parse_date(request.args.get('start_date')) or start_date
-        end_date = parse_date(request.args.get('end_date')) or end_date
+        campaign_filter = ""
+        if campaign_id:
+            campaign_filter = f"AND IO_ID = '{campaign_id}'"
         
-        query = """
-            SELECT 
-                DMA,
-                VISIT_TYPE,
-                COUNT(*) as VISITS,
-                COUNT(DISTINCT DEVICE_ID) as UNIQUE_VISITORS,
-                COUNT(DISTINCT ZIP_CODE) as ZIP_COUNT
-            FROM QUORUMDB.SEGMENT_DATA.V5_ALL_VISITS
-            WHERE AGENCY_ID = %(agency_id)s
-              AND ADVERTISER_ID = %(advertiser_id)s
-              AND VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
-              AND DMA IS NOT NULL
-            GROUP BY DMA, VISIT_TYPE
-            ORDER BY VISITS DESC
-        """
+        # Both Paramount and Class B can use WEEKLY_STATS pattern for DMA
+        # But Paramount isn't in WEEKLY_STATS, so we need different handling
         
-        cursor.execute(query, {
-            'agency_id': agency_id,
-            'advertiser_id': advertiser_id,
-            'start_date': start_date,
-            'end_date': end_date
-        })
-        columns = [desc[0] for desc in cursor.description]
-        results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        if agency_id == 1480:
+            # Paramount - no DMA in standard tables, return empty for now
+            # Could add from PARAMOUNT_IMPRESSIONS_REPORT if ZIP_CODE -> DMA mapping exists
+            results = []
+        else:
+            query = f"""
+                SELECT 
+                    DMA,
+                    SUM(IMPRESSIONS) as IMPRESSIONS,
+                    SUM(VISITORS) as STORE_VISITS,
+                    0 as WEB_VISITS,
+                    ROUND(SUM(VISITORS) * 100.0 / NULLIF(SUM(IMPRESSIONS), 0), 4) as VISIT_RATE
+                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
+                WHERE AGENCY_ID = %(agency_id)s
+                  AND ADVERTISER_ID = %(advertiser_id)s
+                  AND LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
+                  AND DMA IS NOT NULL AND DMA != ''
+                  {campaign_filter}
+                GROUP BY DMA
+                HAVING SUM(IMPRESSIONS) >= 100
+                ORDER BY SUM(IMPRESSIONS) DESC
+                LIMIT 50
+            """
+            
+            cursor.execute(query, {
+                'agency_id': agency_id,
+                'advertiser_id': advertiser_id,
+                'start_date': start_date,
+                'end_date': end_date
+            })
+            
+            columns = [desc[0] for desc in cursor.description]
+            results = [dict(zip(columns, row)) for row in cursor.fetchall()]
         
         cursor.close()
         conn.close()
@@ -508,101 +645,55 @@ def get_dma_performance():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # =============================================================================
-# TIMESERIES ENDPOINT (for charts)
-# =============================================================================
-
-@app.route('/api/v5/timeseries', methods=['GET'])
-def get_timeseries():
-    """Get daily visit counts for charts"""
-    try:
-        agency_id = request.args.get('agency_id', type=int)
-        advertiser_id = request.args.get('advertiser_id', type=int)
-        
-        conn = get_snowflake_connection()
-        cursor = conn.cursor()
-        
-        start_date, end_date = get_default_dates()
-        start_date = parse_date(request.args.get('start_date')) or start_date
-        end_date = parse_date(request.args.get('end_date')) or end_date
-        
-        # Build WHERE clause based on filters
-        where_parts = ["VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s"]
-        params = {'start_date': start_date, 'end_date': end_date}
-        
-        if agency_id:
-            where_parts.append("AGENCY_ID = %(agency_id)s")
-            params['agency_id'] = agency_id
-        if advertiser_id:
-            where_parts.append("ADVERTISER_ID = %(advertiser_id)s")
-            params['advertiser_id'] = advertiser_id
-        
-        where_clause = " AND ".join(where_parts)
-        
-        query = f"""
-            SELECT 
-                VISIT_DATE,
-                SUM(CASE WHEN VISIT_TYPE = 'STORE' THEN 1 ELSE 0 END) as STORE_VISITS,
-                SUM(CASE WHEN VISIT_TYPE = 'WEB' THEN 1 ELSE 0 END) as WEB_VISITS,
-                COUNT(DISTINCT DEVICE_ID) as UNIQUE_VISITORS
-            FROM QUORUMDB.SEGMENT_DATA.V5_ALL_VISITS
-            WHERE {where_clause}
-            GROUP BY VISIT_DATE
-            ORDER BY VISIT_DATE
-        """
-        
-        cursor.execute(query, params)
-        columns = [desc[0] for desc in cursor.description]
-        results = [dict(zip(columns, row)) for row in cursor.fetchall()]
-        
-        # Convert dates to strings for JSON
-        for row in results:
-            if row.get('VISIT_DATE'):
-                row['VISIT_DATE'] = str(row['VISIT_DATE'])
-        
-        cursor.close()
-        conn.close()
-        
-        return jsonify({'success': True, 'data': results})
-        
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-# =============================================================================
-# SUMMARY ENDPOINT (combined metrics)
+# SUMMARY ENDPOINT
 # =============================================================================
 
 @app.route('/api/v5/summary', methods=['GET'])
 def get_summary():
-    """Get summary metrics for an advertiser"""
+    """
+    Get summary metrics for an advertiser.
+    """
     try:
-        agency_id = request.args.get('agency_id', type=int)
-        advertiser_id = request.args.get('advertiser_id', type=int)
+        agency_id = request.args.get('agency_id')
+        advertiser_id = request.args.get('advertiser_id')
         
         if not agency_id or not advertiser_id:
             return jsonify({'success': False, 'error': 'agency_id and advertiser_id required'}), 400
         
+        agency_id = int(agency_id)
+        start_date, end_date = get_date_range()
         conn = get_snowflake_connection()
         cursor = conn.cursor()
         
-        start_date, end_date = get_default_dates()
-        start_date = parse_date(request.args.get('start_date')) or start_date
-        end_date = parse_date(request.args.get('end_date')) or end_date
-        
-        query = """
-            SELECT 
-                COUNT(*) as TOTAL_VISITS,
-                SUM(CASE WHEN VISIT_TYPE = 'STORE' THEN 1 ELSE 0 END) as STORE_VISITS,
-                SUM(CASE WHEN VISIT_TYPE = 'WEB' THEN 1 ELSE 0 END) as WEB_VISITS,
-                COUNT(DISTINCT DEVICE_ID) as UNIQUE_VISITORS,
-                COUNT(DISTINCT IO_ID) as CAMPAIGN_COUNT,
-                COUNT(DISTINCT LINEITEM_ID) as LINEITEM_COUNT,
-                MIN(VISIT_DATE) as MIN_DATE,
-                MAX(VISIT_DATE) as MAX_DATE
-            FROM QUORUMDB.SEGMENT_DATA.V5_ALL_VISITS
-            WHERE AGENCY_ID = %(agency_id)s
-              AND ADVERTISER_ID = %(advertiser_id)s
-              AND VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
-        """
+        if agency_id == 1480:
+            # Paramount
+            query = """
+                SELECT 
+                    SUM(IMPRESSIONS) as IMPRESSIONS,
+                    SUM(STORE_VISITS) as STORE_VISITS,
+                    SUM(SITE_VISITS) as WEB_VISITS,
+                    MIN(DATE) as MIN_DATE,
+                    MAX(DATE) as MAX_DATE
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_DASHBOARD_SUMMARY_STATS
+                WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                  AND DATE BETWEEN %(start_date)s AND %(end_date)s
+            """
+        else:
+            # Class B
+            query = """
+                SELECT 
+                    SUM(IMPRESSIONS) as IMPRESSIONS,
+                    SUM(VISITORS) as STORE_VISITS,
+                    0 as WEB_VISITS,
+                    MIN(LOG_DATE) as MIN_DATE,
+                    MAX(LOG_DATE) as MAX_DATE,
+                    COUNT(DISTINCT IO_ID) as CAMPAIGN_COUNT,
+                    COUNT(DISTINCT LI_ID) as LINEITEM_COUNT
+                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
+                WHERE AGENCY_ID = %(agency_id)s
+                  AND ADVERTISER_ID = %(advertiser_id)s
+                  AND LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
+            """
         
         cursor.execute(query, {
             'agency_id': agency_id,
@@ -610,16 +701,18 @@ def get_summary():
             'start_date': start_date,
             'end_date': end_date
         })
+        
         columns = [desc[0] for desc in cursor.description]
         row = cursor.fetchone()
-        
         result = dict(zip(columns, row)) if row else {}
         
-        # Convert dates to strings
-        if result.get('MIN_DATE'):
-            result['MIN_DATE'] = str(result['MIN_DATE'])
-        if result.get('MAX_DATE'):
-            result['MAX_DATE'] = str(result['MAX_DATE'])
+        # Calculate visit rate
+        imps = result.get('IMPRESSIONS') or 0
+        store = result.get('STORE_VISITS') or 0
+        web = result.get('WEB_VISITS') or 0
+        result['STORE_VISIT_RATE'] = round(store * 100.0 / imps, 4) if imps > 0 else 0
+        result['WEB_VISIT_RATE'] = round(web * 100.0 / imps, 4) if imps > 0 else 0
+        result['TOTAL_VISITS'] = store + web
         
         cursor.close()
         conn.close()
@@ -630,41 +723,54 @@ def get_summary():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # =============================================================================
-# HOUSEHOLD ATTRIBUTION ENDPOINT
+# TIMESERIES ENDPOINT
 # =============================================================================
 
-@app.route('/api/v5/household-summary', methods=['GET'])
-def get_household_summary():
-    """Get household attribution summary for an advertiser"""
+@app.route('/api/v5/timeseries', methods=['GET'])
+def get_timeseries():
+    """
+    Get daily timeseries data for charts.
+    """
     try:
-        agency_id = request.args.get('agency_id', type=int)
-        advertiser_id = request.args.get('advertiser_id', type=int)
+        agency_id = request.args.get('agency_id')
+        advertiser_id = request.args.get('advertiser_id')
         
         if not agency_id or not advertiser_id:
             return jsonify({'success': False, 'error': 'agency_id and advertiser_id required'}), 400
         
+        agency_id = int(agency_id)
+        start_date, end_date = get_date_range()
         conn = get_snowflake_connection()
         cursor = conn.cursor()
         
-        start_date, end_date = get_default_dates()
-        start_date = parse_date(request.args.get('start_date')) or start_date
-        end_date = parse_date(request.args.get('end_date')) or end_date
-        
-        query = """
-            SELECT 
-                IO_NAME,
-                COUNT(*) as STORE_VISITS,
-                COUNT(DISTINCT DEVICE_ID) as UNIQUE_DEVICES,
-                COUNT(DISTINCT HOUSEHOLD_ID) as UNIQUE_HOUSEHOLDS,
-                ROUND(AVG(HOUSEHOLD_CONFIDENCE), 2) as AVG_HH_CONFIDENCE,
-                SUM(HAS_HOUSEHOLD) as WITH_HOUSEHOLD_MATCH
-            FROM QUORUMDB.SEGMENT_DATA.V5_STORE_VISITS_WITH_HOUSEHOLD
-            WHERE AGENCY_ID = %(agency_id)s
-              AND ADVERTISER_ID = %(advertiser_id)s
-              AND DRIVE_BY_DATE BETWEEN %(start_date)s AND %(end_date)s
-            GROUP BY IO_NAME
-            ORDER BY STORE_VISITS DESC
-        """
+        if agency_id == 1480:
+            # Paramount
+            query = """
+                SELECT 
+                    DATE as LOG_DATE,
+                    IMPRESSIONS,
+                    STORE_VISITS,
+                    SITE_VISITS as WEB_VISITS
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_DASHBOARD_SUMMARY_STATS
+                WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                  AND DATE BETWEEN %(start_date)s AND %(end_date)s
+                ORDER BY DATE
+            """
+        else:
+            # Class B - aggregate by day
+            query = """
+                SELECT 
+                    LOG_DATE,
+                    SUM(IMPRESSIONS) as IMPRESSIONS,
+                    SUM(VISITORS) as STORE_VISITS,
+                    0 as WEB_VISITS
+                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
+                WHERE AGENCY_ID = %(agency_id)s
+                  AND ADVERTISER_ID = %(advertiser_id)s
+                  AND LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
+                GROUP BY LOG_DATE
+                ORDER BY LOG_DATE
+            """
         
         cursor.execute(query, {
             'agency_id': agency_id,
@@ -672,8 +778,15 @@ def get_household_summary():
             'start_date': start_date,
             'end_date': end_date
         })
+        
         columns = [desc[0] for desc in cursor.description]
-        results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        results = []
+        for row in cursor.fetchall():
+            d = dict(zip(columns, row))
+            # Convert date to string for JSON
+            if d.get('LOG_DATE'):
+                d['LOG_DATE'] = str(d['LOG_DATE'])
+            results.append(d)
         
         cursor.close()
         conn.close()
@@ -684,92 +797,9 @@ def get_household_summary():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # =============================================================================
-# ADVERTISER OVERVIEW (combined endpoint for detail page)
-# =============================================================================
-
-@app.route('/api/v5/advertiser-overview', methods=['GET'])
-def get_advertiser_overview():
-    """Get complete overview for an advertiser (summary + top campaigns)"""
-    try:
-        agency_id = request.args.get('agency_id', type=int)
-        advertiser_id = request.args.get('advertiser_id', type=int)
-        
-        if not agency_id or not advertiser_id:
-            return jsonify({'success': False, 'error': 'agency_id and advertiser_id required'}), 400
-        
-        conn = get_snowflake_connection()
-        cursor = conn.cursor()
-        
-        start_date, end_date = get_default_dates()
-        start_date = parse_date(request.args.get('start_date')) or start_date
-        end_date = parse_date(request.args.get('end_date')) or end_date
-        
-        params = {
-            'agency_id': agency_id,
-            'advertiser_id': advertiser_id,
-            'start_date': start_date,
-            'end_date': end_date
-        }
-        
-        # Summary query
-        summary_query = """
-            SELECT 
-                COUNT(*) as TOTAL_VISITS,
-                SUM(CASE WHEN VISIT_TYPE = 'STORE' THEN 1 ELSE 0 END) as STORE_VISITS,
-                SUM(CASE WHEN VISIT_TYPE = 'WEB' THEN 1 ELSE 0 END) as WEB_VISITS,
-                COUNT(DISTINCT DEVICE_ID) as UNIQUE_VISITORS,
-                COUNT(DISTINCT IO_ID) as CAMPAIGN_COUNT
-            FROM QUORUMDB.SEGMENT_DATA.V5_ALL_VISITS
-            WHERE AGENCY_ID = %(agency_id)s
-              AND ADVERTISER_ID = %(advertiser_id)s
-              AND VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
-        """
-        
-        cursor.execute(summary_query, params)
-        summary_columns = [desc[0] for desc in cursor.description]
-        summary_row = cursor.fetchone()
-        summary = dict(zip(summary_columns, summary_row)) if summary_row else {}
-        
-        # Top campaigns query
-        campaigns_query = """
-            SELECT 
-                IO_ID,
-                IO_NAME,
-                SUM(CASE WHEN VISIT_TYPE = 'STORE' THEN 1 ELSE 0 END) as STORE_VISITS,
-                SUM(CASE WHEN VISIT_TYPE = 'WEB' THEN 1 ELSE 0 END) as WEB_VISITS,
-                COUNT(DISTINCT DEVICE_ID) as UNIQUE_VISITORS
-            FROM QUORUMDB.SEGMENT_DATA.V5_ALL_VISITS
-            WHERE AGENCY_ID = %(agency_id)s
-              AND ADVERTISER_ID = %(advertiser_id)s
-              AND VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
-              AND IO_ID IS NOT NULL
-            GROUP BY IO_ID, IO_NAME
-            ORDER BY STORE_VISITS + WEB_VISITS DESC
-            LIMIT 10
-        """
-        
-        cursor.execute(campaigns_query, params)
-        campaigns_columns = [desc[0] for desc in cursor.description]
-        campaigns = [dict(zip(campaigns_columns, row)) for row in cursor.fetchall()]
-        
-        cursor.close()
-        conn.close()
-        
-        return jsonify({
-            'success': True,
-            'data': {
-                'summary': summary,
-                'top_campaigns': campaigns
-            }
-        })
-        
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-# =============================================================================
 # MAIN
 # =============================================================================
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=True)
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port, debug=False)
