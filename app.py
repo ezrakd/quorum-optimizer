@@ -506,7 +506,8 @@ def get_publisher_performance():
 def get_zip_performance():
     """
     Get geographic/ZIP code performance for an advertiser.
-    Uses CAMPAIGN_POSTAL_REPORTING - full history, NO date filter.
+    Paramount: uses PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS (date filtered)
+    Class B: uses CAMPAIGN_POSTAL_REPORTING (full history, no date filter)
     """
     try:
         agency_id = request.args.get('agency_id')
@@ -517,43 +518,79 @@ def get_zip_performance():
         if not agency_id or not advertiser_id:
             return jsonify({'success': False, 'error': 'agency_id and advertiser_id required'}), 400
         
+        agency_id = int(agency_id)
         conn = get_snowflake_connection()
         cursor = conn.cursor()
         
-        # Build filters
-        filters = ""
-        if campaign_id:
-            filters += f" AND CAMPAIGN_ID = {campaign_id}"
-        if lineitem_id:
-            filters += f" AND LINEITEM_ID = '{lineitem_id}'"
-        
-        # CAMPAIGN_POSTAL_REPORTING - all agencies, all-time data
-        # Filter out null/empty ZIP codes
-        query = f"""
-            SELECT 
-                USER_HOME_POSTAL_CODE as ZIP_CODE,
-                SUM(IMPRESSIONS) as IMPRESSIONS,
-                SUM(STORE_VISITS) as STORE_VISITS,
-                0 as WEB_VISITS,
-                ROUND(SUM(STORE_VISITS) * 100.0 / NULLIF(SUM(IMPRESSIONS), 0), 4) as VISIT_RATE
-            FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING
-            WHERE AGENCY_ID = %(agency_id)s
-              AND ADVERTISER_ID = %(advertiser_id)s
-              AND USER_HOME_POSTAL_CODE IS NOT NULL 
-              AND USER_HOME_POSTAL_CODE != ''
-              AND USER_HOME_POSTAL_CODE != 'null'
-              AND USER_HOME_POSTAL_CODE != 'UNKNOWN'
-              {filters}
-            GROUP BY USER_HOME_POSTAL_CODE
-            HAVING SUM(IMPRESSIONS) >= 100 OR SUM(STORE_VISITS) >= 1
-            ORDER BY 3 DESC, 2 DESC
-            LIMIT 100
-        """
-        
-        cursor.execute(query, {
-            'agency_id': agency_id,
-            'advertiser_id': advertiser_id
-        })
+        if agency_id == 1480:
+            # Paramount - use PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS with ZIP_CODE
+            start_date, end_date = get_date_range()
+            
+            filters = ""
+            if campaign_id:
+                filters += f" AND IO_ID = '{campaign_id}'"
+            if lineitem_id:
+                filters += f" AND LINEITEM_ID = '{lineitem_id}'"
+            
+            query = f"""
+                SELECT 
+                    ZIP_CODE,
+                    COUNT(*) as IMPRESSIONS,
+                    COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
+                    COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITS
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+                WHERE QUORUM_ADVERTISER_ID = CAST(%(advertiser_id)s AS VARCHAR)
+                  AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
+                  AND ZIP_CODE IS NOT NULL 
+                  AND ZIP_CODE != ''
+                  AND ZIP_CODE != 'null'
+                  AND ZIP_CODE != 'UNKNOWN'
+                  {filters}
+                GROUP BY ZIP_CODE
+                HAVING COUNT(*) >= 100
+                ORDER BY 3 DESC, 2 DESC
+                LIMIT 100
+            """
+            
+            cursor.execute(query, {
+                'advertiser_id': advertiser_id,
+                'start_date': start_date,
+                'end_date': end_date
+            })
+            note = 'Date filtered (matches date selector)'
+        else:
+            # Class B - use CAMPAIGN_POSTAL_REPORTING (full history)
+            filters = ""
+            if campaign_id:
+                filters += f" AND CAMPAIGN_ID = {campaign_id}"
+            if lineitem_id:
+                filters += f" AND LINEITEM_ID = '{lineitem_id}'"
+            
+            query = f"""
+                SELECT 
+                    USER_HOME_POSTAL_CODE as ZIP_CODE,
+                    SUM(IMPRESSIONS) as IMPRESSIONS,
+                    SUM(STORE_VISITS) as STORE_VISITS,
+                    0 as WEB_VISITS
+                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING
+                WHERE AGENCY_ID = %(agency_id)s
+                  AND ADVERTISER_ID = %(advertiser_id)s
+                  AND USER_HOME_POSTAL_CODE IS NOT NULL 
+                  AND USER_HOME_POSTAL_CODE != ''
+                  AND USER_HOME_POSTAL_CODE != 'null'
+                  AND USER_HOME_POSTAL_CODE != 'UNKNOWN'
+                  {filters}
+                GROUP BY USER_HOME_POSTAL_CODE
+                HAVING SUM(IMPRESSIONS) >= 100 OR SUM(STORE_VISITS) >= 1
+                ORDER BY 3 DESC, 2 DESC
+                LIMIT 100
+            """
+            
+            cursor.execute(query, {
+                'agency_id': agency_id,
+                'advertiser_id': advertiser_id
+            })
+            note = 'Full history (all-time data)'
         
         columns = [desc[0] for desc in cursor.description]
         results = [dict(zip(columns, row)) for row in cursor.fetchall()]
@@ -561,7 +598,7 @@ def get_zip_performance():
         cursor.close()
         conn.close()
         
-        return jsonify({'success': True, 'data': results, 'note': 'Full history (no date filter)'})
+        return jsonify({'success': True, 'data': results, 'note': note})
         
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
