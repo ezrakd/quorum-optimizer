@@ -534,6 +534,7 @@ def get_zip_performance():
                 USER_HOME_POSTAL_CODE as ZIP_CODE,
                 SUM(IMPRESSIONS) as IMPRESSIONS,
                 SUM(STORE_VISITS) as STORE_VISITS,
+                0 as WEB_VISITS,
                 ROUND(SUM(STORE_VISITS) * 100.0 / NULLIF(SUM(IMPRESSIONS), 0), 4) as VISIT_RATE
             FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING
             WHERE AGENCY_ID = %(agency_id)s
