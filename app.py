@@ -127,16 +127,21 @@ def get_agencies():
                 'ADVERTISER_COUNT': row[4] or 0
             })
         
-        # Query 2: Paramount from PARAMOUNT_DASHBOARD_SUMMARY_STATS
+        # Query 2: Paramount from PARAMOUNT_DASHBOARD_SUMMARY_STATS (deduplicated)
         query_paramount = """
+            WITH deduped AS (
+                SELECT DISTINCT DATE, QUORUM_ADVERTISER_ID, ADVERTISER_NAME, 
+                       IMPRESSIONS, STORE_VISITS, SITE_VISITS
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_DASHBOARD_SUMMARY_STATS
+                WHERE DATE BETWEEN %(start_date)s AND %(end_date)s
+            )
             SELECT 
                 1480 as AGENCY_ID,
                 SUM(IMPRESSIONS) as IMPRESSIONS,
                 SUM(STORE_VISITS) as STORE_VISITS,
                 SUM(SITE_VISITS) as WEB_VISITS,
                 COUNT(DISTINCT QUORUM_ADVERTISER_ID) as ADVERTISER_COUNT
-            FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_DASHBOARD_SUMMARY_STATS
-            WHERE DATE BETWEEN %(start_date)s AND %(end_date)s
+            FROM deduped
         """
         cursor.execute(query_paramount, {'start_date': start_date, 'end_date': end_date})
         row = cursor.fetchone()
@@ -181,16 +186,21 @@ def get_advertisers():
         cursor = conn.cursor()
         
         if agency_id == 1480:
-            # Paramount - use PARAMOUNT_DASHBOARD_SUMMARY_STATS
+            # Paramount - use PARAMOUNT_DASHBOARD_SUMMARY_STATS (deduplicated)
             query = """
+                WITH deduped AS (
+                    SELECT DISTINCT DATE, QUORUM_ADVERTISER_ID, ADVERTISER_NAME, 
+                           IMPRESSIONS, STORE_VISITS, SITE_VISITS
+                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_DASHBOARD_SUMMARY_STATS
+                    WHERE DATE BETWEEN %(start_date)s AND %(end_date)s
+                )
                 SELECT 
                     QUORUM_ADVERTISER_ID as ADVERTISER_ID,
                     MAX(ADVERTISER_NAME) as ADVERTISER_NAME,
                     SUM(IMPRESSIONS) as IMPRESSIONS,
                     SUM(STORE_VISITS) as STORE_VISITS,
                     SUM(SITE_VISITS) as WEB_VISITS
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_DASHBOARD_SUMMARY_STATS
-                WHERE DATE BETWEEN %(start_date)s AND %(end_date)s
+                FROM deduped
                 GROUP BY QUORUM_ADVERTISER_ID
                 HAVING SUM(IMPRESSIONS) > 0 OR SUM(STORE_VISITS) > 0 OR SUM(SITE_VISITS) > 0
                 ORDER BY 3 DESC
@@ -262,6 +272,7 @@ def get_campaign_performance():
         
         if agency_id == 1480:
             # Paramount - aggregate from PARAMOUNT_MAPPED_IMPRESSIONS + conversions
+            # QUORUM_ADVERTISER_ID is VARCHAR, so cast to string
             query = """
                 WITH impressions AS (
                     SELECT 
@@ -269,7 +280,7 @@ def get_campaign_performance():
                         MAX(IO_NAME) as IO_NAME,
                         COUNT(*) as IMPRESSIONS
                     FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_MAPPED_IMPRESSIONS
-                    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                    WHERE QUORUM_ADVERTISER_ID = CAST(%(advertiser_id)s AS VARCHAR)
                       AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
                     GROUP BY IO_ID
                 ),
@@ -279,7 +290,7 @@ def get_campaign_performance():
                         COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
                         COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITS
                     FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                    WHERE QUORUM_ADVERTISER_ID = CAST(%(advertiser_id)s AS VARCHAR)
                       AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
                     GROUP BY IO_ID
                 )
@@ -367,7 +378,7 @@ def get_lineitem_performance():
                     COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
                     COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITS
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                WHERE QUORUM_ADVERTISER_ID = CAST(%(advertiser_id)s AS VARCHAR)
                   AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
                   {campaign_filter}
                 GROUP BY LINEITEM_ID
@@ -448,7 +459,7 @@ def get_publisher_performance():
                         SITE as PUBLISHER,
                         COUNT(*) as IMPRESSIONS
                     FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_MAPPED_IMPRESSIONS
-                    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                    WHERE QUORUM_ADVERTISER_ID = CAST(%(advertiser_id)s AS VARCHAR)
                       AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
                       {campaign_filter}
                     GROUP BY SITE
@@ -459,7 +470,7 @@ def get_publisher_performance():
                         COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
                         COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITS
                     FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                    WHERE QUORUM_ADVERTISER_ID = CAST(%(advertiser_id)s AS VARCHAR)
                       AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
                       {campaign_filter}
                     GROUP BY SITE
