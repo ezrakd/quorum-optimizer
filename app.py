@@ -1,7 +1,7 @@
 """
 Quorum Optimizer API v5.3 - Unified Platform Architecture with Lift
 ====================================================================
-All queries now use BASE_TABLES.AD_IMPRESSION_LOG as the single source of truth.
+All queries now use SEGMENT_DATA.XANDR_IMPRESSION_LOG as the single source of truth.
 
 Key changes in v5.3:
 - Unified Lift Analysis for ALL agencies (no more class delineation)
@@ -15,8 +15,8 @@ Key changes in v5.2:
 - Correct join key: AD_IMPRESSION_LOG.ID = CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW.IMP_ID
 
 Tables:
-- BASE_TABLES.AD_IMPRESSION_LOG: All impressions with QUORUM_ADVERTISER_ID, PT, DMA, POSTAL_CODE
-- BASE_TABLES.MAID_CENTROID_DATA: Device home ZIP (0.04% coverage, will improve)
+- SEGMENT_DATA.XANDR_IMPRESSION_LOG: All impressions with QUORUM_ADVERTISER_ID, PT, DMA, POSTAL_CODE
+- SEGMENT_DATA.MAID_CENTROID_DATA: Device home ZIP (0.04% coverage, will improve)
 - SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW: Store visit attribution (+ advertiser mapping)
 - SEGMENT_DATA.PT_TO_PLATFORM: Platform code lookup (PT → Platform name)
 - SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS: Paramount impressions with IS_SITE_VISIT
@@ -129,7 +129,7 @@ def get_agencies():
                 COUNT(DISTINCT i.ID) as IMPRESSIONS,
                 COUNT(DISTINCT sv.DEVICE_ID) as STORE_VISITS,
                 COUNT(DISTINCT i.QUORUM_ADVERTISER_ID) as ADVERTISER_COUNT
-            FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG i
+            FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG i
             LEFT JOIN QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW sv 
                 ON sv.IMP_ID = i.ID 
                 AND sv.AGENCY_ID = i.AGENCY_ID
@@ -238,7 +238,7 @@ def get_advertisers():
                     COUNT(DISTINCT i.ID) as IMPRESSIONS,
                     COUNT(DISTINCT sv.DEVICE_ID) as STORE_VISITS,
                     0 as WEB_VISITS
-                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG i
+                FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG i
                 LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa 
                     ON i.QUORUM_ADVERTISER_ID = aa.ID::VARCHAR
                 LEFT JOIN QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW sv 
@@ -323,7 +323,7 @@ def get_campaign_performance():
                     COUNT(DISTINCT i.ID) as IMPRESSIONS,
                     COUNT(DISTINCT sv.DEVICE_ID) as STORE_VISITS,
                     0 as WEB_VISITS
-                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG i
+                FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG i
                 LEFT JOIN QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW sv 
                     ON sv.IMP_ID = i.ID 
                     AND sv.AGENCY_ID = i.AGENCY_ID
@@ -420,7 +420,7 @@ def get_lineitem_performance():
                     COUNT(DISTINCT sv.DEVICE_ID) as STORE_VISITS,
                     0 as WEB_VISITS,
                     COALESCE(MAX(p.PLATFORM), 'PT=' || COALESCE(MAX(i.PT)::VARCHAR, '?')) as PLATFORM
-                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG i
+                FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG i
                 LEFT JOIN QUORUMDB.SEGMENT_DATA.PT_TO_PLATFORM p ON i.PT = p.PT
                 LEFT JOIN QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW sv 
                     ON sv.IMP_ID = i.ID 
@@ -517,7 +517,7 @@ def get_publisher_performance():
                     COUNT(DISTINCT i.ID) as IMPRESSIONS,
                     COUNT(DISTINCT sv.DEVICE_ID) as STORE_VISITS,
                     0 as WEB_VISITS
-                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG i
+                FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG i
                 LEFT JOIN QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW sv 
                     ON sv.IMP_ID = i.ID 
                     AND sv.AGENCY_ID = i.AGENCY_ID
@@ -619,7 +619,7 @@ def get_zip_performance():
             query = f"""
                 WITH device_geo AS (
                     SELECT MAID, ZIP_CODE as HOME_ZIP
-                    FROM QUORUMDB.BASE_TABLES.MAID_CENTROID_DATA
+                    FROM QUORUMDB.SEGMENT_DATA.MAID_CENTROID_DATA
                     WHERE ZIP_CODE IS NOT NULL AND ZIP_CODE != ''
                 )
                 SELECT 
@@ -627,7 +627,7 @@ def get_zip_performance():
                     COUNT(DISTINCT i.ID) as IMPRESSIONS,
                     COUNT(DISTINCT sv.DEVICE_ID) as STORE_VISITS,
                     0 as WEB_VISITS
-                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG i
+                FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG i
                 LEFT JOIN device_geo dg ON REPLACE(i.DEVICE_UNIQUE_ID, 'SYS-', '') = dg.MAID
                 LEFT JOIN QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW sv 
                     ON sv.IMP_ID = i.ID 
@@ -738,7 +738,7 @@ def get_dma_performance():
             query = f"""
                 WITH device_geo AS (
                     SELECT MAID, ZIP_CODE as HOME_ZIP
-                    FROM QUORUMDB.BASE_TABLES.MAID_CENTROID_DATA
+                    FROM QUORUMDB.SEGMENT_DATA.MAID_CENTROID_DATA
                     WHERE ZIP_CODE IS NOT NULL AND ZIP_CODE != ''
                 ),
                 zip_dma AS (
@@ -752,7 +752,7 @@ def get_dma_performance():
                     COUNT(DISTINCT i.ID) as IMPRESSIONS,
                     COUNT(DISTINCT sv.DEVICE_ID) as STORE_VISITS,
                     0 as WEB_VISITS
-                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG i
+                FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG i
                 LEFT JOIN device_geo dg ON REPLACE(i.DEVICE_UNIQUE_ID, 'SYS-', '') = dg.MAID
                 JOIN zip_dma d ON COALESCE(dg.HOME_ZIP, i.POSTAL_CODE) = d.ZIPCODE
                 LEFT JOIN QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW sv 
@@ -835,7 +835,7 @@ def get_summary():
                     MAX(i.TIMESTAMP::DATE) as MAX_DATE,
                     COUNT(DISTINCT i.IO_ID) as CAMPAIGN_COUNT,
                     COUNT(DISTINCT i.LINEITEM_ID) as LINEITEM_COUNT
-                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG i
+                FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG i
                 LEFT JOIN QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW sv 
                     ON sv.IMP_ID = i.ID 
                     AND sv.AGENCY_ID = i.AGENCY_ID
@@ -921,7 +921,7 @@ def get_timeseries():
                     COUNT(DISTINCT i.ID) as IMPRESSIONS,
                     COUNT(DISTINCT sv.DEVICE_ID) as STORE_VISITS,
                     0 as WEB_VISITS
-                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG i
+                FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG i
                 LEFT JOIN QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW sv 
                     ON sv.IMP_ID = i.ID 
                     AND sv.AGENCY_ID = i.AGENCY_ID
@@ -1067,83 +1067,71 @@ def get_lift_analysis():
             
         else:
             # =================================================================
-            # ALL OTHER AGENCIES: Store-based lift from unified tables
-            # Uses IO-based advertiser mapping from CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW
+            # ALL OTHER AGENCIES: Use pre-aggregated CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
+            # Fast query using already-aggregated data with correct advertiser IDs
             # =================================================================
             if group_by == 'lineitem':
-                group_cols = "aio.IO_ID, i.LINEITEM_ID"
+                group_cols = "IO_ID, IO_NAME, LI_ID, LI_NAME"
                 name_cols = """
-                    COALESCE(MAX(i.LI_NAME), 'LI-' || i.LINEITEM_ID::VARCHAR) as NAME,
-                    COALESCE(MAX(i.IO_NAME), 'IO-' || aio.IO_ID::VARCHAR) as PARENT_NAME,
-                    i.LINEITEM_ID as ID,
-                    aio.IO_ID as PARENT_ID,
+                    LI_NAME as NAME,
+                    IO_NAME as PARENT_NAME,
+                    LI_ID as ID,
+                    IO_ID as PARENT_ID,
                 """
             else:  # campaign
-                group_cols = "aio.IO_ID"
+                group_cols = "IO_ID, IO_NAME"
                 name_cols = """
-                    COALESCE(MAX(i.IO_NAME), 'IO-' || aio.IO_ID::VARCHAR) as NAME,
+                    IO_NAME as NAME,
                     NULL as PARENT_NAME,
-                    aio.IO_ID as ID,
+                    IO_ID as ID,
                     NULL as PARENT_ID,
                 """
             
             query = f"""
-                WITH advertiser_ios AS (
-                    -- Get advertiser -> IO mapping from CPSV_RAW (which has correct ADVERTISER_ID)
-                    SELECT DISTINCT 
-                        sv.AGENCY_ID, 
-                        sv.ADVERTISER_ID, 
-                        imp.IO_ID
-                    FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW sv
-                    INNER JOIN QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG imp ON sv.IMP_ID = imp.ID
-                    WHERE sv.AGENCY_ID = %(agency_id)s
-                      AND sv.ADVERTISER_ID = %(advertiser_id)s
-                      AND sv.DRIVE_BY_DATE >= DATEADD(day, -90, CURRENT_DATE())
-                ),
-                campaign_metrics AS (
+                WITH campaign_metrics AS (
                     SELECT 
                         {group_cols},
                         {name_cols}
-                        COUNT(DISTINCT i.ID) as IMPRESSIONS,
-                        COUNT(DISTINCT i.DEVICE_UNIQUE_ID) as REACH,
-                        COUNT(DISTINCT sv.DEVICE_ID) as VISITORS
-                    FROM advertiser_ios aio
-                    INNER JOIN QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG i 
-                        ON i.IO_ID = aio.IO_ID AND i.AGENCY_ID = aio.AGENCY_ID
-                    LEFT JOIN QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW sv 
-                        ON sv.IMP_ID = i.ID AND sv.AGENCY_ID = i.AGENCY_ID
-                    WHERE i.TIMESTAMP BETWEEN %(start_date)s AND %(end_date)s
+                        SUM(IMPRESSIONS) as IMPRESSIONS,
+                        SUM(REACH) as REACH,
+                        SUM(PANEL_REACH) as PANEL_REACH,
+                        SUM(VISITORS) as VISITORS
+                    FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
+                    WHERE AGENCY_ID = %(agency_id)s
+                      AND ADVERTISER_ID = %(advertiser_id)s
+                      AND LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
+                      AND PANEL_REACH > 0
                     GROUP BY {group_cols}
-                    HAVING COUNT(DISTINCT i.ID) >= 1000
+                    HAVING SUM(PANEL_REACH) >= 1000
                 ),
                 baseline AS (
-                    SELECT SUM(VISITORS)::FLOAT / NULLIF(SUM(REACH), 0) * 100 as BASELINE_VR
+                    SELECT SUM(VISITORS)::FLOAT / NULLIF(SUM(PANEL_REACH), 0) * 100 as BASELINE_VR
                     FROM campaign_metrics
                 )
                 SELECT 
-                    c.NAME,
+                    COALESCE(c.NAME, 'IO-' || c.ID::VARCHAR) as NAME,
                     c.PARENT_NAME,
                     c.ID,
                     c.PARENT_ID,
                     c.IMPRESSIONS,
                     c.REACH,
-                    c.REACH as PANEL_REACH,
+                    c.PANEL_REACH,
                     c.VISITORS,
-                    ROUND(c.VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100, 4) as VISIT_RATE,
+                    ROUND(c.VISITORS::FLOAT / NULLIF(c.PANEL_REACH, 0) * 100, 4) as VISIT_RATE,
                     ROUND(b.BASELINE_VR, 4) as BASELINE_VR,
                     CASE 
                         WHEN b.BASELINE_VR > 0 
-                        THEN ROUND(c.VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100 / b.BASELINE_VR * 100, 1)
+                        THEN ROUND(c.VISITORS::FLOAT / NULLIF(c.PANEL_REACH, 0) * 100 / b.BASELINE_VR * 100, 1)
                         ELSE NULL 
                     END as INDEX_VS_AVG,
                     CASE 
                         WHEN b.BASELINE_VR > 0 
-                        THEN ROUND((c.VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100 - b.BASELINE_VR) / b.BASELINE_VR * 100, 1)
+                        THEN ROUND((c.VISITORS::FLOAT / NULLIF(c.PANEL_REACH, 0) * 100 - b.BASELINE_VR) / b.BASELINE_VR * 100, 1)
                         ELSE NULL 
                     END as LIFT_PCT
                 FROM campaign_metrics c
                 CROSS JOIN baseline b
-                WHERE c.REACH >= 100
+                WHERE c.PANEL_REACH >= 1000
                 ORDER BY c.IMPRESSIONS DESC
                 LIMIT 100
             """
