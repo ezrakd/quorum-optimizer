@@ -231,19 +231,19 @@ def get_advertisers():
             # Other agencies - use CPRS for accurate advertiser data
             query = """
                 SELECT 
-                    ADVERTISER_ID,
-                    COALESCE(MAX(aa.COMP_NAME), 'Advertiser ' || ADVERTISER_ID) as ADVERTISER_NAME,
-                    SUM(IMPRESSIONS) as IMPRESSIONS,
-                    SUM(VISITORS) as STORE_VISITS,
+                    c.ADVERTISER_ID,
+                    COALESCE(MAX(aa.COMP_NAME), 'Advertiser ' || c.ADVERTISER_ID) as ADVERTISER_NAME,
+                    SUM(c.IMPRESSIONS) as IMPRESSIONS,
+                    SUM(c.VISITORS) as STORE_VISITS,
                     0 as WEB_VISITS
                 FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS c
                 LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa 
                     ON c.ADVERTISER_ID = aa.ID
                 WHERE c.AGENCY_ID = %(agency_id)s
                   AND c.LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
-                GROUP BY ADVERTISER_ID
-                HAVING SUM(IMPRESSIONS) > 0
-                ORDER BY SUM(IMPRESSIONS) DESC
+                GROUP BY c.ADVERTISER_ID
+                HAVING SUM(c.IMPRESSIONS) > 0
+                ORDER BY SUM(c.IMPRESSIONS) DESC
             """
             cursor.execute(query, {
                 'agency_id': agency_id,
