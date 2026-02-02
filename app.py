@@ -1,22 +1,31 @@
 """
-Quorum Optimizer API v5.2 - Unified Platform Architecture
-==========================================================
+Quorum Optimizer API v5.3 - Unified Platform Architecture with Lift
+====================================================================
 All queries now use BASE_TABLES.AD_IMPRESSION_LOG as the single source of truth.
+
+Key changes in v5.3:
+- Unified Lift Analysis for ALL agencies (no more class delineation)
+- Paramount: Web-based lift from PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+- Others: Store-based lift from AD_IMPRESSION_LOG + CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW
+- IO-based advertiser mapping (uses CPSV_RAW.ADVERTISER_ID to identify campaigns)
 
 Key changes in v5.2:
 - Direct QUORUM_ADVERTISER_ID filtering (no ADVERTISER_PIXEL_STATS join needed)
 - Device-home geo fallback: COALESCE(MAID_CENTROID_DATA.ZIP_CODE, POSTAL_CODE)
 - Correct join key: AD_IMPRESSION_LOG.ID = CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW.IMP_ID
-- Paramount still uses special tables for store/web visits (different pipeline)
 
 Tables:
 - BASE_TABLES.AD_IMPRESSION_LOG: All impressions with QUORUM_ADVERTISER_ID, PT, DMA, POSTAL_CODE
 - BASE_TABLES.MAID_CENTROID_DATA: Device home ZIP (0.04% coverage, will improve)
-- SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW: Store visit attribution
+- SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW: Store visit attribution (+ advertiser mapping)
 - SEGMENT_DATA.PT_TO_PLATFORM: Platform code lookup (PT → Platform name)
-- SEGMENT_DATA.PARAMOUNT_*: Paramount-specific tables
+- SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS: Paramount impressions with IS_SITE_VISIT
 
-Geo priority: Device home ZIP (from mobility) → Impression ZIP (from IP)
+Lift Methodology:
+- Visit Rate = VISITORS / REACH × 100
+- Baseline = Average visit rate for the advertiser
+- Lift % = (Visit Rate - Baseline) / Baseline × 100
+- Index = Visit Rate / Baseline × 100 (100 = average)
 """
 
 from flask import Flask, jsonify, request
@@ -92,8 +101,8 @@ def clean_advertiser_name(name):
 def health_check():
     return jsonify({
         'status': 'healthy',
-        'version': '5.2-unified',
-        'description': 'Unified AD_IMPRESSION_LOG with device-geo fallback'
+        'version': '5.3-unified-lift',
+        'description': 'Unified AD_IMPRESSION_LOG with device-geo fallback and unified lift analysis'
     })
 
 # =============================================================================
@@ -941,6 +950,235 @@ def get_timeseries():
         conn.close()
         
         return jsonify({'success': True, 'data': results})
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# =============================================================================
+# LIFT ANALYSIS ENDPOINT - UNIFIED
+# =============================================================================
+
+@app.route('/api/v5/lift-analysis', methods=['GET'])
+def get_lift_analysis():
+    """
+    Unified lift analysis using AD_IMPRESSION_LOG + CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW.
+    
+    Lift methodology:
+    - Visit Rate = VISITORS / REACH × 100
+    - Baseline = Overall average visit rate for the advertiser
+    - Lift % = (Visit Rate - Baseline) / Baseline × 100
+    - Index = Visit Rate / Baseline × 100 (100 = average performance)
+    
+    Data Sources:
+    - Paramount (1480): PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS (web visits via IS_SITE_VISIT)
+    - All Others: AD_IMPRESSION_LOG + CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW (store visits)
+    
+    Parameters:
+    - agency_id: Required
+    - advertiser_id: Required
+    - group_by: 'campaign' (default) or 'lineitem'
+    """
+    try:
+        agency_id = request.args.get('agency_id')
+        advertiser_id = request.args.get('advertiser_id')
+        group_by = request.args.get('group_by', 'campaign')
+        
+        if not agency_id or not advertiser_id:
+            return jsonify({'success': False, 'error': 'agency_id and advertiser_id required'}), 400
+        
+        agency_id = int(agency_id)
+        start_date, end_date = get_date_range()
+        conn = get_snowflake_connection()
+        cursor = conn.cursor()
+        
+        if agency_id == 1480:
+            # =================================================================
+            # PARAMOUNT: Web-based lift from PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+            # =================================================================
+            if group_by == 'lineitem':
+                group_cols = "IO_ID, LINEITEM_ID"
+                name_cols = """
+                    COALESCE(MAX(LI_NAME), 'LI-' || LINEITEM_ID::VARCHAR) as NAME,
+                    COALESCE(MAX(IO_NAME), 'IO-' || IO_ID::VARCHAR) as PARENT_NAME,
+                    LINEITEM_ID as ID,
+                    IO_ID as PARENT_ID,
+                """
+            else:  # campaign
+                group_cols = "IO_ID"
+                name_cols = """
+                    COALESCE(MAX(IO_NAME), 'IO-' || IO_ID::VARCHAR) as NAME,
+                    NULL as PARENT_NAME,
+                    IO_ID as ID,
+                    NULL as PARENT_ID,
+                """
+            
+            query = f"""
+                WITH campaign_metrics AS (
+                    SELECT 
+                        {group_cols},
+                        {name_cols}
+                        COUNT(*) as IMPRESSIONS,
+                        COUNT(DISTINCT IMP_MAID) as REACH,
+                        COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as VISITORS
+                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+                    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                      AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
+                    GROUP BY {group_cols}
+                    HAVING COUNT(*) >= 1000
+                ),
+                baseline AS (
+                    SELECT SUM(VISITORS)::FLOAT / NULLIF(SUM(REACH), 0) * 100 as BASELINE_VR
+                    FROM campaign_metrics
+                )
+                SELECT 
+                    c.NAME,
+                    c.PARENT_NAME,
+                    c.ID,
+                    c.PARENT_ID,
+                    c.IMPRESSIONS,
+                    c.REACH,
+                    c.REACH as PANEL_REACH,
+                    c.VISITORS,
+                    ROUND(c.VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100, 4) as VISIT_RATE,
+                    ROUND(b.BASELINE_VR, 4) as BASELINE_VR,
+                    CASE 
+                        WHEN b.BASELINE_VR > 0 
+                        THEN ROUND(c.VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100 / b.BASELINE_VR * 100, 1)
+                        ELSE NULL 
+                    END as INDEX_VS_AVG,
+                    CASE 
+                        WHEN b.BASELINE_VR > 0 
+                        THEN ROUND((c.VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100 - b.BASELINE_VR) / b.BASELINE_VR * 100, 1)
+                        ELSE NULL 
+                    END as LIFT_PCT
+                FROM campaign_metrics c
+                CROSS JOIN baseline b
+                WHERE c.REACH >= 100
+                ORDER BY c.IMPRESSIONS DESC
+                LIMIT 100
+            """
+            
+            cursor.execute(query, {
+                'advertiser_id': int(advertiser_id),
+                'start_date': start_date,
+                'end_date': end_date
+            })
+            visit_type = 'web'
+            
+        else:
+            # =================================================================
+            # ALL OTHER AGENCIES: Store-based lift from unified tables
+            # Uses IO-based advertiser mapping from CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW
+            # =================================================================
+            if group_by == 'lineitem':
+                group_cols = "aio.IO_ID, i.LINEITEM_ID"
+                name_cols = """
+                    COALESCE(MAX(i.LI_NAME), 'LI-' || i.LINEITEM_ID::VARCHAR) as NAME,
+                    COALESCE(MAX(i.IO_NAME), 'IO-' || aio.IO_ID::VARCHAR) as PARENT_NAME,
+                    i.LINEITEM_ID as ID,
+                    aio.IO_ID as PARENT_ID,
+                """
+            else:  # campaign
+                group_cols = "aio.IO_ID"
+                name_cols = """
+                    COALESCE(MAX(i.IO_NAME), 'IO-' || aio.IO_ID::VARCHAR) as NAME,
+                    NULL as PARENT_NAME,
+                    aio.IO_ID as ID,
+                    NULL as PARENT_ID,
+                """
+            
+            query = f"""
+                WITH advertiser_ios AS (
+                    -- Get advertiser -> IO mapping from CPSV_RAW (which has correct ADVERTISER_ID)
+                    SELECT DISTINCT 
+                        sv.AGENCY_ID, 
+                        sv.ADVERTISER_ID, 
+                        imp.IO_ID
+                    FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW sv
+                    INNER JOIN QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG imp ON sv.IMP_ID = imp.ID
+                    WHERE sv.AGENCY_ID = %(agency_id)s
+                      AND sv.ADVERTISER_ID = %(advertiser_id)s
+                      AND sv.DRIVE_BY_DATE >= DATEADD(day, -90, CURRENT_DATE())
+                ),
+                campaign_metrics AS (
+                    SELECT 
+                        {group_cols},
+                        {name_cols}
+                        COUNT(DISTINCT i.ID) as IMPRESSIONS,
+                        COUNT(DISTINCT i.DEVICE_UNIQUE_ID) as REACH,
+                        COUNT(DISTINCT sv.DEVICE_ID) as VISITORS
+                    FROM advertiser_ios aio
+                    INNER JOIN QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG i 
+                        ON i.IO_ID = aio.IO_ID AND i.AGENCY_ID = aio.AGENCY_ID
+                    LEFT JOIN QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW sv 
+                        ON sv.IMP_ID = i.ID AND sv.AGENCY_ID = i.AGENCY_ID
+                    WHERE i.TIMESTAMP BETWEEN %(start_date)s AND %(end_date)s
+                    GROUP BY {group_cols}
+                    HAVING COUNT(DISTINCT i.ID) >= 1000
+                ),
+                baseline AS (
+                    SELECT SUM(VISITORS)::FLOAT / NULLIF(SUM(REACH), 0) * 100 as BASELINE_VR
+                    FROM campaign_metrics
+                )
+                SELECT 
+                    c.NAME,
+                    c.PARENT_NAME,
+                    c.ID,
+                    c.PARENT_ID,
+                    c.IMPRESSIONS,
+                    c.REACH,
+                    c.REACH as PANEL_REACH,
+                    c.VISITORS,
+                    ROUND(c.VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100, 4) as VISIT_RATE,
+                    ROUND(b.BASELINE_VR, 4) as BASELINE_VR,
+                    CASE 
+                        WHEN b.BASELINE_VR > 0 
+                        THEN ROUND(c.VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100 / b.BASELINE_VR * 100, 1)
+                        ELSE NULL 
+                    END as INDEX_VS_AVG,
+                    CASE 
+                        WHEN b.BASELINE_VR > 0 
+                        THEN ROUND((c.VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100 - b.BASELINE_VR) / b.BASELINE_VR * 100, 1)
+                        ELSE NULL 
+                    END as LIFT_PCT
+                FROM campaign_metrics c
+                CROSS JOIN baseline b
+                WHERE c.REACH >= 100
+                ORDER BY c.IMPRESSIONS DESC
+                LIMIT 100
+            """
+            
+            cursor.execute(query, {
+                'agency_id': agency_id,
+                'advertiser_id': int(advertiser_id),
+                'start_date': start_date,
+                'end_date': end_date
+            })
+            visit_type = 'store'
+        
+        columns = [desc[0] for desc in cursor.description]
+        results = []
+        baseline = None
+        
+        for row in cursor.fetchall():
+            d = dict(zip(columns, row))
+            if baseline is None and d.get('BASELINE_VR') is not None:
+                baseline = round(float(d['BASELINE_VR']), 4) if d['BASELINE_VR'] else None
+            # Clean up the result
+            d['NAME'] = d.get('NAME') or d.get('ID') or 'Unknown'
+            results.append(d)
+        
+        cursor.close()
+        conn.close()
+        
+        return jsonify({
+            'success': True, 
+            'data': results,
+            'baseline': baseline,
+            'group_by': group_by,
+            'visit_type': visit_type,
+            'note': f'Lift calculated vs advertiser average ({visit_type} visits). Index 100 = average performance.'
+        })
         
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
