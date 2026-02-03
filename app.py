@@ -102,9 +102,69 @@ def clean_advertiser_name(name):
 def health_check():
     return jsonify({
         'status': 'healthy',
-        'version': '5.3-unified-lift',
-        'description': 'Unified AD_IMPRESSION_LOG with device-geo fallback and unified lift analysis'
+        'version': '5.4-cprs-publisher-fix',
+        'description': 'CPRS migration with publisher platform names'
     })
+
+@app.route('/api/v5/debug/paramount', methods=['GET'])
+def debug_paramount():
+    """Debug endpoint to test Paramount queries"""
+    try:
+        advertiser_id = request.args.get('advertiser_id', '40514')
+        start_date, end_date = get_date_range()
+        
+        conn = get_snowflake_connection()
+        cursor = conn.cursor()
+        
+        # Test summary query
+        cursor.execute("""
+            SELECT 
+                SUM(IMPRESSIONS) as IMPRESSIONS,
+                SUM(SITE_VISITS) as WEB_VISITS,
+                COUNT(*) as ROW_COUNT
+            FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_DASHBOARD_SUMMARY_STATS
+            WHERE QUORUM_ADVERTISER_ID::INT = %(advertiser_id)s
+              AND DATE BETWEEN %(start_date)s AND %(end_date)s
+        """, {
+            'advertiser_id': int(advertiser_id),
+            'start_date': start_date,
+            'end_date': end_date
+        })
+        
+        summary_row = cursor.fetchone()
+        
+        # Test campaign query
+        cursor.execute("""
+            SELECT COUNT(DISTINCT IO_ID) as CAMPAIGN_COUNT
+            FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+            WHERE QUORUM_ADVERTISER_ID::INT = %(advertiser_id)s
+              AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
+        """, {
+            'advertiser_id': int(advertiser_id),
+            'start_date': start_date,
+            'end_date': end_date
+        })
+        
+        campaign_row = cursor.fetchone()
+        
+        cursor.close()
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'debug': {
+                'advertiser_id': advertiser_id,
+                'advertiser_id_int': int(advertiser_id),
+                'start_date': start_date,
+                'end_date': end_date,
+                'summary_impressions': summary_row[0] if summary_row else None,
+                'summary_web_visits': summary_row[1] if summary_row else None,
+                'summary_row_count': summary_row[2] if summary_row else None,
+                'campaign_count': campaign_row[0] if campaign_row else None
+            }
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 # =============================================================================
 # AGENCY OVERVIEW
@@ -491,7 +551,7 @@ def get_publisher_performance():
                 'end_date': end_date
             })
         else:
-            # Other agencies - use CPRS for publisher data
+            # Other agencies - use CPRS for publisher data with platform name lookup
             filters = ""
             if campaign_id:
                 filters += f" AND c.IO_ID = '{campaign_id}'"
@@ -500,16 +560,18 @@ def get_publisher_performance():
             
             query = f"""
                 SELECT 
-                    COALESCE(c.PUBLISHER, 'Unknown') as PUBLISHER,
+                    COALESCE(p.PLATFORM, 'Platform ' || c.PUBLISHER) as PUBLISHER,
                     SUM(c.IMPRESSIONS) as IMPRESSIONS,
                     SUM(c.VISITORS) as STORE_VISITS,
                     0 as WEB_VISITS
                 FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS c
+                LEFT JOIN QUORUMDB.SEGMENT_DATA.PT_TO_PLATFORM p 
+                    ON TRY_CAST(c.PUBLISHER AS INT) = p.PT
                 WHERE c.AGENCY_ID = %(agency_id)s
                   AND c.ADVERTISER_ID = %(advertiser_id)s
                   AND c.LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
                   {filters}
-                GROUP BY c.PUBLISHER
+                GROUP BY COALESCE(p.PLATFORM, 'Platform ' || c.PUBLISHER)
                 HAVING SUM(c.IMPRESSIONS) >= 100
                 ORDER BY SUM(c.IMPRESSIONS) DESC
                 LIMIT 50
