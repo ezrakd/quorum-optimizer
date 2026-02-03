@@ -88,9 +88,10 @@ def get_date_range():
     return start_date, end_date
 
 def clean_advertiser_name(name):
-    """Remove prefix IDs from advertiser names"""
+    """Remove numeric prefix IDs from advertiser names (e.g., '924962 - LEAN RX' -> 'LEAN RX')"""
     if name:
-        return re.sub(r'^[0-9A-Za-z]+ - ', '', str(name))
+        # Only remove numeric ID prefixes, not word prefixes like "Mooyah - Reporting"
+        return re.sub(r'^[0-9]+ - ', '', str(name))
     return name
 
 # =============================================================================
@@ -311,18 +312,18 @@ def get_campaign_performance():
             # Other agencies - use CPRS for accurate data
             query = """
                 SELECT 
-                    IO_ID,
-                    MAX(IO_NAME) as IO_NAME,
-                    SUM(IMPRESSIONS) as IMPRESSIONS,
-                    SUM(VISITORS) as STORE_VISITS,
+                    c.IO_ID,
+                    MAX(c.IO_NAME) as IO_NAME,
+                    SUM(c.IMPRESSIONS) as IMPRESSIONS,
+                    SUM(c.VISITORS) as STORE_VISITS,
                     0 as WEB_VISITS
-                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
-                WHERE AGENCY_ID = %(agency_id)s
-                  AND ADVERTISER_ID = %(advertiser_id)s
-                  AND LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
-                GROUP BY IO_ID
-                HAVING SUM(IMPRESSIONS) >= 100
-                ORDER BY SUM(IMPRESSIONS) DESC
+                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS c
+                WHERE c.AGENCY_ID = %(agency_id)s
+                  AND c.ADVERTISER_ID = %(advertiser_id)s
+                  AND c.LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
+                GROUP BY c.IO_ID
+                HAVING SUM(c.IMPRESSIONS) >= 100
+                ORDER BY SUM(c.IMPRESSIONS) DESC
             """
             cursor.execute(query, {
                 'agency_id': agency_id,
@@ -373,7 +374,7 @@ def get_lineitem_performance():
             query = f"""
                 SELECT 
                     LINEITEM_ID as LI_ID,
-                    MAX(LI_NAME) as LI_NAME,
+                    MAX(LINEITEM_NAME) as LI_NAME,
                     MAX(IO_ID) as IO_ID,
                     MAX(IO_NAME) as IO_NAME,
                     COUNT(*) as IMPRESSIONS,
@@ -398,26 +399,26 @@ def get_lineitem_performance():
             # Other agencies - use CPRS for accurate data
             filters = ""
             if campaign_id:
-                filters = f"AND IO_ID = {int(campaign_id)}"
+                filters = f"AND c.IO_ID = '{campaign_id}'"
             
             query = f"""
                 SELECT 
-                    LI_ID,
-                    MAX(LI_NAME) as LI_NAME,
-                    MAX(IO_ID) as IO_ID,
-                    MAX(IO_NAME) as IO_NAME,
-                    SUM(IMPRESSIONS) as IMPRESSIONS,
-                    SUM(VISITORS) as STORE_VISITS,
+                    c.LI_ID,
+                    MAX(c.LI_NAME) as LI_NAME,
+                    MAX(c.IO_ID) as IO_ID,
+                    MAX(c.IO_NAME) as IO_NAME,
+                    SUM(c.IMPRESSIONS) as IMPRESSIONS,
+                    SUM(c.VISITORS) as STORE_VISITS,
                     0 as WEB_VISITS,
                     'N/A' as PLATFORM
-                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
-                WHERE AGENCY_ID = %(agency_id)s
-                  AND ADVERTISER_ID = %(advertiser_id)s
-                  AND LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
+                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS c
+                WHERE c.AGENCY_ID = %(agency_id)s
+                  AND c.ADVERTISER_ID = %(advertiser_id)s
+                  AND c.LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
                   {filters}
-                GROUP BY LI_ID
-                HAVING SUM(IMPRESSIONS) >= 100
-                ORDER BY SUM(IMPRESSIONS) DESC
+                GROUP BY c.LI_ID
+                HAVING SUM(c.IMPRESSIONS) >= 100
+                ORDER BY SUM(c.IMPRESSIONS) DESC
                 LIMIT 100
             """
             cursor.execute(query, {
@@ -493,24 +494,24 @@ def get_publisher_performance():
             # Other agencies - use CPRS for publisher data
             filters = ""
             if campaign_id:
-                filters += f" AND IO_ID = {int(campaign_id)}"
+                filters += f" AND c.IO_ID = '{campaign_id}'"
             if lineitem_id:
-                filters += f" AND LI_ID = {int(lineitem_id)}"
+                filters += f" AND c.LI_ID = '{lineitem_id}'"
             
             query = f"""
                 SELECT 
-                    COALESCE(PUBLISHER, 'Unknown') as PUBLISHER,
-                    SUM(IMPRESSIONS) as IMPRESSIONS,
-                    SUM(VISITORS) as STORE_VISITS,
+                    COALESCE(c.PUBLISHER, 'Unknown') as PUBLISHER,
+                    SUM(c.IMPRESSIONS) as IMPRESSIONS,
+                    SUM(c.VISITORS) as STORE_VISITS,
                     0 as WEB_VISITS
-                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
-                WHERE AGENCY_ID = %(agency_id)s
-                  AND ADVERTISER_ID = %(advertiser_id)s
-                  AND LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
+                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS c
+                WHERE c.AGENCY_ID = %(agency_id)s
+                  AND c.ADVERTISER_ID = %(advertiser_id)s
+                  AND c.LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
                   {filters}
-                GROUP BY PUBLISHER
-                HAVING SUM(IMPRESSIONS) >= 100
-                ORDER BY SUM(IMPRESSIONS) DESC
+                GROUP BY c.PUBLISHER
+                HAVING SUM(c.IMPRESSIONS) >= 100
+                ORDER BY SUM(c.IMPRESSIONS) DESC
                 LIMIT 50
             """
             cursor.execute(query, {
@@ -591,45 +592,35 @@ def get_zip_performance():
                 'end_date': end_date
             })
         else:
-            # Other agencies - unified query with device-geo fallback
+            # Other agencies - use CPRS ZIP data
             filters = ""
             if campaign_id:
-                filters += f" AND i.IO_ID = {campaign_id}"
+                filters += f" AND c.IO_ID = '{campaign_id}'"
             if lineitem_id:
-                filters += f" AND i.LINEITEM_ID = '{lineitem_id}'"
+                filters += f" AND c.LI_ID = '{lineitem_id}'"
             
-            # Device-geo fallback: prefer home ZIP from mobility data, fall back to impression ZIP
             query = f"""
-                WITH device_geo AS (
-                    SELECT MAID, ZIP_CODE as HOME_ZIP
-                    FROM QUORUMDB.SEGMENT_DATA.MAID_CENTROID_DATA
-                    WHERE ZIP_CODE IS NOT NULL AND ZIP_CODE != ''
-                )
                 SELECT 
-                    COALESCE(dg.HOME_ZIP, i.POSTAL_CODE) as ZIP_CODE,
-                    COUNT(DISTINCT i.ID) as IMPRESSIONS,
-                    COUNT(DISTINCT sv.DEVICE_ID) as STORE_VISITS,
+                    c.ZIP as ZIP_CODE,
+                    SUM(c.IMPRESSIONS) as IMPRESSIONS,
+                    SUM(c.VISITORS) as STORE_VISITS,
                     0 as WEB_VISITS
-                FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG i
-                LEFT JOIN device_geo dg ON REPLACE(i.DEVICE_UNIQUE_ID, 'SYS-', '') = dg.MAID
-                LEFT JOIN QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW sv 
-                    ON sv.IMP_ID = i.ID 
-                    AND sv.AGENCY_ID = i.AGENCY_ID
-                WHERE i.AGENCY_ID = %(agency_id)s
-                  AND i.QUORUM_ADVERTISER_ID = %(advertiser_id)s
-                  AND i.TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
-                  AND COALESCE(dg.HOME_ZIP, i.POSTAL_CODE) IS NOT NULL 
-                  AND COALESCE(dg.HOME_ZIP, i.POSTAL_CODE) != ''
-                  AND COALESCE(dg.HOME_ZIP, i.POSTAL_CODE) != 'null'
+                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS c
+                WHERE c.AGENCY_ID = %(agency_id)s
+                  AND c.ADVERTISER_ID = %(advertiser_id)s
+                  AND c.LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
+                  AND c.ZIP IS NOT NULL 
+                  AND c.ZIP != ''
+                  AND c.ZIP != '0'
                   {filters}
-                GROUP BY COALESCE(dg.HOME_ZIP, i.POSTAL_CODE)
-                HAVING COUNT(DISTINCT i.ID) >= 100
-                ORDER BY COUNT(DISTINCT sv.DEVICE_ID) DESC, COUNT(DISTINCT i.ID) DESC
+                GROUP BY c.ZIP
+                HAVING SUM(c.IMPRESSIONS) >= 100
+                ORDER BY SUM(c.VISITORS) DESC, SUM(c.IMPRESSIONS) DESC
                 LIMIT 100
             """
             cursor.execute(query, {
                 'agency_id': agency_id,
-                'advertiser_id': str(advertiser_id),
+                'advertiser_id': int(advertiser_id),
                 'start_date': start_date,
                 'end_date': end_date
             })
@@ -695,7 +686,7 @@ def get_dma_performance():
                     COUNT(DISTINCT CASE WHEN p.IS_SITE_VISIT = 'TRUE' THEN p.IMP_MAID END) as WEB_VISITS
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS p
                 JOIN zip_dma d ON p.ZIP_CODE = d.ZIPCODE
-                WHERE p.QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                WHERE p.QUORUM_ADVERTISER_ID::INT = %(advertiser_id)s
                   AND p.IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
                   {filters}
                 GROUP BY d.DMA_NAME
@@ -709,50 +700,34 @@ def get_dma_performance():
                 'end_date': end_date
             })
         else:
-            # Other agencies - unified query with device-geo fallback
+            # Other agencies - use CPRS DMA data
             filters = ""
             if campaign_id:
-                filters += f" AND i.IO_ID = {campaign_id}"
+                filters += f" AND c.IO_ID = '{campaign_id}'"
             if lineitem_id:
-                filters += f" AND i.LINEITEM_ID = '{lineitem_id}'"
+                filters += f" AND c.LI_ID = '{lineitem_id}'"
             
-            # Device-geo fallback: prefer home ZIP from mobility data, fall back to impression ZIP
-            # Then derive DMA from the resolved ZIP
             query = f"""
-                WITH device_geo AS (
-                    SELECT MAID, ZIP_CODE as HOME_ZIP
-                    FROM QUORUMDB.SEGMENT_DATA.MAID_CENTROID_DATA
-                    WHERE ZIP_CODE IS NOT NULL AND ZIP_CODE != ''
-                ),
-                zip_dma AS (
-                    SELECT ZIPCODE, MAX(DMA_NAME) as DMA_NAME 
-                    FROM QUORUMDB.SEGMENT_DATA.DBIP_LOOKUP_US 
-                    WHERE DMA_NAME IS NOT NULL AND DMA_NAME != ''
-                    GROUP BY ZIPCODE
-                )
                 SELECT 
-                    d.DMA_NAME as DMA,
-                    COUNT(DISTINCT i.ID) as IMPRESSIONS,
-                    COUNT(DISTINCT sv.DEVICE_ID) as STORE_VISITS,
+                    c.DMA as DMA,
+                    SUM(c.IMPRESSIONS) as IMPRESSIONS,
+                    SUM(c.VISITORS) as STORE_VISITS,
                     0 as WEB_VISITS
-                FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG i
-                LEFT JOIN device_geo dg ON REPLACE(i.DEVICE_UNIQUE_ID, 'SYS-', '') = dg.MAID
-                JOIN zip_dma d ON COALESCE(dg.HOME_ZIP, i.POSTAL_CODE) = d.ZIPCODE
-                LEFT JOIN QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW sv 
-                    ON sv.IMP_ID = i.ID 
-                    AND sv.AGENCY_ID = i.AGENCY_ID
-                WHERE i.AGENCY_ID = %(agency_id)s
-                  AND i.QUORUM_ADVERTISER_ID = %(advertiser_id)s
-                  AND i.TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
+                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS c
+                WHERE c.AGENCY_ID = %(agency_id)s
+                  AND c.ADVERTISER_ID = %(advertiser_id)s
+                  AND c.LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
+                  AND c.DMA IS NOT NULL 
+                  AND c.DMA != ''
                   {filters}
-                GROUP BY d.DMA_NAME
-                HAVING COUNT(DISTINCT i.ID) >= 100
-                ORDER BY COUNT(DISTINCT i.ID) DESC
+                GROUP BY c.DMA
+                HAVING SUM(c.IMPRESSIONS) >= 100
+                ORDER BY SUM(c.IMPRESSIONS) DESC
                 LIMIT 50
             """
             cursor.execute(query, {
                 'agency_id': agency_id,
-                'advertiser_id': str(advertiser_id),
+                'advertiser_id': int(advertiser_id),
                 'start_date': start_date,
                 'end_date': end_date
             })
@@ -790,14 +765,22 @@ def get_summary():
         cursor = conn.cursor()
         
         if agency_id == 1480:
-            # Paramount
+            # Paramount - get metrics and counts from impressions table
             query = """
                 SELECT 
                     SUM(IMPRESSIONS) as IMPRESSIONS,
                     SUM(STORE_VISITS) as STORE_VISITS,
                     SUM(SITE_VISITS) as WEB_VISITS,
                     MIN(DATE) as MIN_DATE,
-                    MAX(DATE) as MAX_DATE
+                    MAX(DATE) as MAX_DATE,
+                    (SELECT COUNT(DISTINCT IO_ID) 
+                     FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS 
+                     WHERE QUORUM_ADVERTISER_ID::INT = %(advertiser_id)s
+                       AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s) as CAMPAIGN_COUNT,
+                    (SELECT COUNT(DISTINCT LINEITEM_ID) 
+                     FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS 
+                     WHERE QUORUM_ADVERTISER_ID::INT = %(advertiser_id)s
+                       AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s) as LINEITEM_COUNT
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_DASHBOARD_SUMMARY_STATS
                 WHERE QUORUM_ADVERTISER_ID::INT = %(advertiser_id)s
                   AND DATE BETWEEN %(start_date)s AND %(end_date)s
@@ -808,27 +791,24 @@ def get_summary():
                 'end_date': end_date
             })
         else:
-            # Other agencies - unified query
+            # Other agencies - use CPRS for accurate data
             query = """
                 SELECT 
-                    COUNT(DISTINCT i.ID) as IMPRESSIONS,
-                    COUNT(DISTINCT sv.DEVICE_ID) as STORE_VISITS,
+                    SUM(c.IMPRESSIONS) as IMPRESSIONS,
+                    SUM(c.VISITORS) as STORE_VISITS,
                     0 as WEB_VISITS,
-                    MIN(i.TIMESTAMP::DATE) as MIN_DATE,
-                    MAX(i.TIMESTAMP::DATE) as MAX_DATE,
-                    COUNT(DISTINCT i.IO_ID) as CAMPAIGN_COUNT,
-                    COUNT(DISTINCT i.LINEITEM_ID) as LINEITEM_COUNT
-                FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG i
-                LEFT JOIN QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW sv 
-                    ON sv.IMP_ID = i.ID 
-                    AND sv.AGENCY_ID = i.AGENCY_ID
-                WHERE i.AGENCY_ID = %(agency_id)s
-                  AND i.QUORUM_ADVERTISER_ID = %(advertiser_id)s
-                  AND i.TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
+                    MIN(c.LOG_DATE) as MIN_DATE,
+                    MAX(c.LOG_DATE) as MAX_DATE,
+                    COUNT(DISTINCT c.IO_ID) as CAMPAIGN_COUNT,
+                    COUNT(DISTINCT c.LI_ID) as LINEITEM_COUNT
+                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS c
+                WHERE c.AGENCY_ID = %(agency_id)s
+                  AND c.ADVERTISER_ID = %(advertiser_id)s
+                  AND c.LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
             """
             cursor.execute(query, {
                 'agency_id': agency_id,
-                'advertiser_id': str(advertiser_id),
+                'advertiser_id': int(advertiser_id),
                 'start_date': start_date,
                 'end_date': end_date
             })
@@ -897,26 +877,23 @@ def get_timeseries():
                 'end_date': end_date
             })
         else:
-            # Other agencies - unified query
+            # Other agencies - use CPRS for timeseries
             query = """
                 SELECT 
-                    i.TIMESTAMP::DATE as LOG_DATE,
-                    COUNT(DISTINCT i.ID) as IMPRESSIONS,
-                    COUNT(DISTINCT sv.DEVICE_ID) as STORE_VISITS,
+                    c.LOG_DATE,
+                    SUM(c.IMPRESSIONS) as IMPRESSIONS,
+                    SUM(c.VISITORS) as STORE_VISITS,
                     0 as WEB_VISITS
-                FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG i
-                LEFT JOIN QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_STORE_VISITS_RAW sv 
-                    ON sv.IMP_ID = i.ID 
-                    AND sv.AGENCY_ID = i.AGENCY_ID
-                WHERE i.AGENCY_ID = %(agency_id)s
-                  AND i.QUORUM_ADVERTISER_ID = %(advertiser_id)s
-                  AND i.TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
-                GROUP BY i.TIMESTAMP::DATE
-                ORDER BY i.TIMESTAMP::DATE
+                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS c
+                WHERE c.AGENCY_ID = %(agency_id)s
+                  AND c.ADVERTISER_ID = %(advertiser_id)s
+                  AND c.LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
+                GROUP BY c.LOG_DATE
+                ORDER BY c.LOG_DATE
             """
             cursor.execute(query, {
                 'agency_id': agency_id,
-                'advertiser_id': str(advertiser_id),
+                'advertiser_id': int(advertiser_id),
                 'start_date': start_date,
                 'end_date': end_date
             })
@@ -981,7 +958,7 @@ def get_lift_analysis():
             if group_by == 'lineitem':
                 group_cols = "IO_ID, LINEITEM_ID"
                 name_cols = """
-                    COALESCE(MAX(LI_NAME), 'LI-' || LINEITEM_ID::VARCHAR) as NAME,
+                    COALESCE(MAX(LINEITEM_NAME), 'LI-' || LINEITEM_ID::VARCHAR) as NAME,
                     COALESCE(MAX(IO_NAME), 'IO-' || IO_ID::VARCHAR) as PARENT_NAME,
                     LINEITEM_ID as ID,
                     IO_ID as PARENT_ID,
