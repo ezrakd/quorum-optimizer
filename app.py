@@ -102,8 +102,8 @@ def clean_advertiser_name(name):
 def health_check():
     return jsonify({
         'status': 'healthy',
-        'version': '5.4-cprs-publisher-fix',
-        'description': 'CPRS migration with publisher platform names'
+        'version': '5.5-lift-auto-detect',
+        'description': 'Lift analysis with auto-detect web/store visits for Paramount'
     })
 
 @app.route('/api/v5/debug/paramount', methods=['GET'])
@@ -1015,7 +1015,9 @@ def get_lift_analysis():
         
         if agency_id == 1480:
             # =================================================================
-            # PARAMOUNT: Web-based lift from PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+            # PARAMOUNT: Auto-detect web vs store visits and use appropriate type
+            # Some advertisers track web visits (IS_SITE_VISIT), others track
+            # store visits (IS_STORE_VISIT). We detect which has data and use that.
             # =================================================================
             if group_by == 'lineitem':
                 group_cols = "IO_ID, LINEITEM_ID"
@@ -1035,13 +1037,27 @@ def get_lift_analysis():
                 """
             
             query = f"""
-                WITH campaign_metrics AS (
+                WITH visit_type_check AS (
+                    -- Determine which visit type has more data for this advertiser
+                    SELECT 
+                        SUM(CASE WHEN IS_SITE_VISIT = 'TRUE' THEN 1 ELSE 0 END) as WEB_COUNT,
+                        SUM(CASE WHEN IS_STORE_VISIT = 'TRUE' THEN 1 ELSE 0 END) as STORE_COUNT
+                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+                    WHERE QUORUM_ADVERTISER_ID::INT = %(advertiser_id)s
+                      AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
+                ),
+                campaign_metrics AS (
                     SELECT 
                         {group_cols},
                         {name_cols}
                         COUNT(*) as IMPRESSIONS,
                         COUNT(DISTINCT IMP_MAID) as REACH,
-                        COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as VISITORS
+                        -- Use web visits if available, otherwise store visits
+                        CASE 
+                            WHEN (SELECT WEB_COUNT FROM visit_type_check) >= (SELECT STORE_COUNT FROM visit_type_check)
+                            THEN COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END)
+                            ELSE COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END)
+                        END as VISITORS
                     FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
                     WHERE QUORUM_ADVERTISER_ID::INT = %(advertiser_id)s
                       AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
@@ -1072,7 +1088,8 @@ def get_lift_analysis():
                         WHEN b.BASELINE_VR > 0 
                         THEN ROUND((c.VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100 - b.BASELINE_VR) / b.BASELINE_VR * 100, 1)
                         ELSE NULL 
-                    END as LIFT_PCT
+                    END as LIFT_PCT,
+                    (SELECT CASE WHEN WEB_COUNT >= STORE_COUNT THEN 'web' ELSE 'store' END FROM visit_type_check) as DETECTED_VISIT_TYPE
                 FROM campaign_metrics c
                 CROSS JOIN baseline b
                 WHERE c.REACH >= 100
@@ -1085,7 +1102,8 @@ def get_lift_analysis():
                 'start_date': start_date,
                 'end_date': end_date
             })
-            visit_type = 'web'
+            # Visit type will be extracted from results
+            visit_type = 'web'  # Default, will be overwritten from query results
             
         else:
             # =================================================================
@@ -1174,6 +1192,10 @@ def get_lift_analysis():
             d = dict(zip(columns, row))
             if baseline is None and d.get('BASELINE_VR') is not None:
                 baseline = round(float(d['BASELINE_VR']), 4) if d['BASELINE_VR'] else None
+            # Extract detected visit type for Paramount (if present in query results)
+            if agency_id == 1480 and d.get('DETECTED_VISIT_TYPE'):
+                visit_type = d['DETECTED_VISIT_TYPE']
+                del d['DETECTED_VISIT_TYPE']  # Remove from result dict
             # Clean up the result
             d['NAME'] = d.get('NAME') or d.get('ID') or 'Unknown'
             results.append(d)
