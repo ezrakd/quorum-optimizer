@@ -1,7 +1,13 @@
 """
-Quorum Optimizer API v5.3 - Unified Platform Architecture with Lift
+Quorum Optimizer API v5.6-real-publishers - Unified Platform Architecture with Lift
 ====================================================================
 All queries now use SEGMENT_DATA.XANDR_IMPRESSION_LOG as the single source of truth.
+
+Key changes in v5.6-real-publishers:
+- Publisher-performance now uses UNION to combine:
+  - PT=6 (Trade Desk): Actual site URLs from domain field
+  - Other PTs: Platform name lookup from PT_TO_PLATFORM
+- Traffic Source endpoint for Paramount web visit analysis
 
 Key changes in v5.3:
 - Unified Lift Analysis for ALL agencies (no more class delineation)
@@ -102,7 +108,7 @@ def clean_advertiser_name(name):
 def health_check():
     return jsonify({
         'status': 'healthy',
-        'version': '5.5-lift-auto-detect',
+        'version': '5.6-real-publishers',
         'description': 'Lift analysis with auto-detect web/store visits for Paramount'
     })
 
@@ -506,7 +512,10 @@ def get_lineitem_performance():
 @app.route('/api/v5/publisher-performance', methods=['GET'])
 def get_publisher_performance():
     """
-    Get publisher level performance. Uses SITE column from AD_IMPRESSION_LOG.
+    Get publisher level performance.
+    - Paramount: Uses SITE column from impression data
+    - MNTN: Uses PUBLISHER_CODE from QUORUM_AD_IMPRESSIONS (real publisher names)
+    - Others: Uses CPRS with PT-to-platform mapping
     """
     try:
         agency_id = request.args.get('agency_id')
@@ -523,7 +532,7 @@ def get_publisher_performance():
         cursor = conn.cursor()
         
         if agency_id == 1480:
-            # Paramount - cast advertiser_id
+            # Paramount - use SITE from impression data
             filters = ""
             if campaign_id:
                 filters += f" AND IO_ID = {int(campaign_id)}"
@@ -550,32 +559,146 @@ def get_publisher_performance():
                 'start_date': start_date,
                 'end_date': end_date
             })
+        elif agency_id == 2514:
+            # MNTN - use QUORUM_AD_IMPRESSIONS for real publisher names
+            filters = ""
+            if campaign_id:
+                filters += f" AND IO_ID = {int(campaign_id)}"
+            if lineitem_id:
+                filters += f" AND LINEITEM_ID = '{lineitem_id}'"
+            
+            query = f"""
+                SELECT 
+                    REPLACE(REPLACE(REPLACE(PUBLISHER_CODE, '%2520', ' '), '%20', ' '), '%252B', '+') as PUBLISHER,
+                    COUNT(*) as IMPRESSIONS,
+                    COUNT(DISTINCT CASE WHEN IS_STORE_VISIT THEN IMP_MAID END) as STORE_VISITS,
+                    0 as WEB_VISITS
+                FROM QUORUMDB.SEGMENT_DATA.QUORUM_IMPRESSIONS_REPORT
+                WHERE AGENCY_ID = %(agency_id)s
+                  AND QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                  AND LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
+                  AND PUBLISHER_CODE IS NOT NULL
+                  AND PUBLISHER_CODE != ''
+                  AND PUBLISHER_CODE != '0'
+                  {filters}
+                GROUP BY PUBLISHER_CODE
+                HAVING COUNT(*) >= 100
+                ORDER BY 2 DESC
+                LIMIT 50
+            """
+            cursor.execute(query, {
+                'agency_id': agency_id,
+                'advertiser_id': int(advertiser_id),
+                'start_date': start_date,
+                'end_date': end_date
+            })
         else:
-            # Other agencies - use CPRS for publisher data with platform name lookup
+            # Check if this advertiser uses TTD (PT=6) - if so, use URL field for PT=6 data
+            check_query = """
+                SELECT COUNT(*) as TTD_COUNT
+                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
+                WHERE AGENCY_ID = %(agency_id)s
+                  AND ADVERTISER_ID = %(advertiser_id)s
+                  AND PUBLISHER = '6'
+                  AND LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
+            """
+            cursor.execute(check_query, {
+                'agency_id': agency_id,
+                'advertiser_id': int(advertiser_id),
+                'start_date': start_date,
+                'end_date': end_date
+            })
+            ttd_count = cursor.fetchone()[0]
+            
             filters = ""
             if campaign_id:
                 filters += f" AND c.IO_ID = '{campaign_id}'"
             if lineitem_id:
                 filters += f" AND c.LI_ID = '{lineitem_id}'"
             
-            query = f"""
-                SELECT 
-                    COALESCE(p.PLATFORM, 'Platform ' || c.PUBLISHER) as PUBLISHER,
-                    SUM(c.IMPRESSIONS) as IMPRESSIONS,
-                    SUM(c.VISITORS) as STORE_VISITS,
-                    0 as WEB_VISITS
-                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS c
-                LEFT JOIN QUORUMDB.SEGMENT_DATA.PT_TO_PLATFORM p 
-                    ON TRY_CAST(c.PUBLISHER AS INT) = p.PT
-                WHERE c.AGENCY_ID = %(agency_id)s
-                  AND c.ADVERTISER_ID = %(advertiser_id)s
-                  AND c.LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
-                  {filters}
-                GROUP BY COALESCE(p.PLATFORM, 'Platform ' || c.PUBLISHER)
-                HAVING SUM(c.IMPRESSIONS) >= 100
-                ORDER BY SUM(c.IMPRESSIONS) DESC
-                LIMIT 50
-            """
+            if ttd_count > 0:
+                # TTD advertisers - use URL field for PT=6 ONLY, combine with platform names for other PTs
+                # This UNION approach ensures we show actual site names for TTD and platform names for others
+                query = f"""
+                    WITH ttd_data AS (
+                        -- PT=6 (Trade Desk): Use actual URL/domain names
+                        SELECT 
+                            c.URL as PUBLISHER,
+                            SUM(c.IMPRESSIONS) as IMPRESSIONS,
+                            SUM(c.VISITORS) as STORE_VISITS,
+                            0 as WEB_VISITS
+                        FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS c
+                        WHERE c.AGENCY_ID = %(agency_id)s
+                          AND c.ADVERTISER_ID = %(advertiser_id)s
+                          AND c.LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
+                          AND c.PUBLISHER = '6'
+                          AND c.URL_TYPE = 'domain'
+                          AND c.URL IS NOT NULL AND c.URL != '' AND c.URL != '-'
+                          AND c.URL NOT IN ('localhost', '127.0.0.1', 'example.com')
+                          AND c.URL NOT LIKE '%google%'
+                          AND c.URL NOT LIKE '%doubleclick%'
+                          AND c.URL NOT LIKE '%inmobi%'
+                          AND c.URL NOT LIKE '%amazon-adsystem%'
+                          AND c.URL NOT LIKE '%pubads%'
+                          AND c.URL NOT LIKE '%imasdk%'
+                          AND c.URL NOT LIKE '%inner-active%'
+                          AND c.URL NOT LIKE '%pubmatic%'
+                          AND c.URL NOT LIKE '%taboola%'
+                          AND c.URL NOT LIKE '%fwmrm.net%'
+                          AND c.URL NOT LIKE '%mobilefuse%'
+                          AND c.URL NOT LIKE '%onetag%'
+                          AND c.URL NOT LIKE '%adnxs%'
+                          AND c.URL NOT LIKE '%aditude%'
+                          AND c.URL NOT LIKE '%nimbus%'
+                          AND c.URL NOT LIKE '%azureedge%'
+                          {filters}
+                        GROUP BY c.URL
+                        HAVING SUM(c.IMPRESSIONS) >= 100
+                    ),
+                    other_data AS (
+                        -- Non-TTD platforms: Use platform name lookup
+                        SELECT 
+                            COALESCE(p.PLATFORM, 'Platform ' || c.PUBLISHER) as PUBLISHER,
+                            SUM(c.IMPRESSIONS) as IMPRESSIONS,
+                            SUM(c.VISITORS) as STORE_VISITS,
+                            0 as WEB_VISITS
+                        FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS c
+                        LEFT JOIN QUORUMDB.SEGMENT_DATA.PT_TO_PLATFORM p 
+                            ON TRY_CAST(c.PUBLISHER AS INT) = p.PT
+                        WHERE c.AGENCY_ID = %(agency_id)s
+                          AND c.ADVERTISER_ID = %(advertiser_id)s
+                          AND c.LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
+                          AND c.PUBLISHER != '6'
+                          {filters}
+                        GROUP BY COALESCE(p.PLATFORM, 'Platform ' || c.PUBLISHER)
+                        HAVING SUM(c.IMPRESSIONS) >= 100
+                    )
+                    SELECT * FROM ttd_data
+                    UNION ALL
+                    SELECT * FROM other_data
+                    ORDER BY IMPRESSIONS DESC
+                    LIMIT 50
+                """
+            else:
+                # Non-TTD agencies - use CPRS for publisher data with platform name lookup
+                query = f"""
+                    SELECT 
+                        COALESCE(p.PLATFORM, 'Platform ' || c.PUBLISHER) as PUBLISHER,
+                        SUM(c.IMPRESSIONS) as IMPRESSIONS,
+                        SUM(c.VISITORS) as STORE_VISITS,
+                        0 as WEB_VISITS
+                    FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS c
+                    LEFT JOIN QUORUMDB.SEGMENT_DATA.PT_TO_PLATFORM p 
+                        ON TRY_CAST(c.PUBLISHER AS INT) = p.PT
+                    WHERE c.AGENCY_ID = %(agency_id)s
+                      AND c.ADVERTISER_ID = %(advertiser_id)s
+                      AND c.LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
+                      {filters}
+                    GROUP BY COALESCE(p.PLATFORM, 'Platform ' || c.PUBLISHER)
+                    HAVING SUM(c.IMPRESSIONS) >= 100
+                    ORDER BY SUM(c.IMPRESSIONS) DESC
+                    LIMIT 50
+                """
             cursor.execute(query, {
                 'agency_id': agency_id,
                 'advertiser_id': int(advertiser_id),
@@ -1210,6 +1333,141 @@ def get_lift_analysis():
             'group_by': group_by,
             'visit_type': visit_type,
             'note': f'Lift calculated vs advertiser average ({visit_type} visits). Index 100 = average performance.'
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# =============================================================================
+# TRAFFIC SOURCES ENDPOINT - PARAMOUNT ONLY
+# =============================================================================
+
+@app.route('/api/v5/traffic-sources', methods=['GET'])
+def get_traffic_sources():
+    """
+    Traffic source analysis for Paramount advertisers.
+    
+    Shows web visit performance by SITE (traffic source).
+    Calculates web visit rate and provides index vs average.
+    
+    Only available for Paramount (agency 1480) - other agencies will receive
+    a message that this feature is not available.
+    
+    Parameters:
+    - agency_id: Required
+    - advertiser_id: Required
+    - campaign_id: Optional filter
+    - lineitem_id: Optional filter
+    """
+    try:
+        agency_id = request.args.get('agency_id')
+        advertiser_id = request.args.get('advertiser_id')
+        campaign_id = request.args.get('campaign_id')
+        lineitem_id = request.args.get('lineitem_id')
+        
+        if not agency_id or not advertiser_id:
+            return jsonify({'success': False, 'error': 'agency_id and advertiser_id required'}), 400
+        
+        agency_id = int(agency_id)
+        
+        # Traffic sources only available for Paramount
+        if agency_id != 1480:
+            return jsonify({
+                'success': True,
+                'data': [],
+                'available': False,
+                'message': 'Traffic source analysis is currently only available for Paramount advertisers with web pixel integration.'
+            })
+        
+        start_date, end_date = get_date_range()
+        conn = get_snowflake_connection()
+        cursor = conn.cursor()
+        
+        # Build filters
+        filters = ""
+        if campaign_id:
+            filters += f" AND IO_ID = {int(campaign_id)}"
+        if lineitem_id:
+            filters += f" AND LINEITEM_ID = {int(lineitem_id)}"
+        
+        query = f"""
+            WITH site_metrics AS (
+                SELECT 
+                    SITE,
+                    COUNT(DISTINCT CACHE_BUSTER) as IMPRESSIONS,
+                    COUNT(DISTINCT IMP_MAID) as REACH,
+                    COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITORS,
+                    COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITORS
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+                WHERE QUORUM_ADVERTISER_ID::INT = %(advertiser_id)s
+                  AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
+                  AND SITE IS NOT NULL AND SITE != ''
+                  {filters}
+                GROUP BY SITE
+                HAVING COUNT(DISTINCT CACHE_BUSTER) >= 1000
+            ),
+            baseline AS (
+                SELECT 
+                    SUM(WEB_VISITORS)::FLOAT / NULLIF(SUM(REACH), 0) * 100 as BASELINE_WEB_VR,
+                    SUM(STORE_VISITORS)::FLOAT / NULLIF(SUM(REACH), 0) * 100 as BASELINE_STORE_VR
+                FROM site_metrics
+            )
+            SELECT 
+                s.SITE as TRAFFIC_SOURCE,
+                s.IMPRESSIONS,
+                s.REACH,
+                s.WEB_VISITORS,
+                s.STORE_VISITORS,
+                ROUND(s.WEB_VISITORS::FLOAT / NULLIF(s.REACH, 0) * 100, 4) as WEB_VISIT_RATE,
+                ROUND(s.STORE_VISITORS::FLOAT / NULLIF(s.REACH, 0) * 100, 4) as STORE_VISIT_RATE,
+                ROUND(b.BASELINE_WEB_VR, 4) as BASELINE_WEB_VR,
+                ROUND(b.BASELINE_STORE_VR, 4) as BASELINE_STORE_VR,
+                CASE 
+                    WHEN b.BASELINE_WEB_VR > 0 
+                    THEN ROUND(s.WEB_VISITORS::FLOAT / NULLIF(s.REACH, 0) * 100 / b.BASELINE_WEB_VR * 100, 1)
+                    ELSE NULL 
+                END as WEB_INDEX,
+                CASE 
+                    WHEN b.BASELINE_STORE_VR > 0 
+                    THEN ROUND(s.STORE_VISITORS::FLOAT / NULLIF(s.REACH, 0) * 100 / b.BASELINE_STORE_VR * 100, 1)
+                    ELSE NULL 
+                END as STORE_INDEX
+            FROM site_metrics s
+            CROSS JOIN baseline b
+            WHERE s.REACH >= 100
+            ORDER BY s.WEB_VISITORS DESC
+            LIMIT 50
+        """
+        
+        cursor.execute(query, {
+            'advertiser_id': int(advertiser_id),
+            'start_date': start_date,
+            'end_date': end_date
+        })
+        
+        columns = [desc[0] for desc in cursor.description]
+        results = []
+        baseline_web = None
+        baseline_store = None
+        
+        for row in cursor.fetchall():
+            d = dict(zip(columns, row))
+            if baseline_web is None and d.get('BASELINE_WEB_VR') is not None:
+                baseline_web = round(float(d['BASELINE_WEB_VR']), 4) if d['BASELINE_WEB_VR'] else None
+            if baseline_store is None and d.get('BASELINE_STORE_VR') is not None:
+                baseline_store = round(float(d['BASELINE_STORE_VR']), 4) if d['BASELINE_STORE_VR'] else None
+            results.append(d)
+        
+        cursor.close()
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'data': results,
+            'available': True,
+            'baseline_web': baseline_web,
+            'baseline_store': baseline_store,
+            'message': 'Traffic source analysis showing web visit performance by site/placement.'
         })
         
     except Exception as e:
