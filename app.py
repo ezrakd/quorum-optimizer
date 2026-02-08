@@ -1044,8 +1044,8 @@ def get_lift_analysis():
                         SUM(PANEL_REACH) as PANEL_REACH,
                         SUM(VISITORS) as VISITORS
                     FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
-                    WHERE QUORUM_ADVERTISER_ID::INT = %(advertiser_id)s
-                      AND WEEK_START BETWEEN %(start_date)s AND %(end_date)s
+                    WHERE ADVERTISER_ID = %(advertiser_id)s
+                      AND LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
                     GROUP BY {group_cols}
                     HAVING SUM(IMPRESSIONS) >= 1000
                 ),
