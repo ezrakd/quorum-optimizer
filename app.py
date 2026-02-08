@@ -941,8 +941,35 @@ def get_lift_analysis():
         
         if agency_id == 1480:
             # =================================================================
-            # PARAMOUNT: Web-based lift from PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+            # PARAMOUNT: Auto-detect store vs web visits, use whichever dominates
             # =================================================================
+            
+            # First, determine which visit type dominates for this advertiser
+            detect_query = """
+                SELECT 
+                    COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as store_visitors,
+                    COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as web_visitors
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+                WHERE QUORUM_ADVERTISER_ID::INT = %(advertiser_id)s
+                  AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
+            """
+            cursor.execute(detect_query, {
+                'advertiser_id': int(advertiser_id),
+                'start_date': start_date,
+                'end_date': end_date
+            })
+            detect_row = cursor.fetchone()
+            store_visitors = detect_row[0] or 0
+            web_visitors = detect_row[1] or 0
+            
+            # Use store visits if they dominate, otherwise web
+            if store_visitors > web_visitors:
+                visit_type = 'store'
+                visit_condition = "IS_STORE_VISIT = 'TRUE'"
+            else:
+                visit_type = 'web'
+                visit_condition = "IS_SITE_VISIT = 'TRUE'"
+            
             if group_by == 'lineitem':
                 group_cols = "IO_ID, LINEITEM_ID"
                 name_cols = """
@@ -967,7 +994,7 @@ def get_lift_analysis():
                         {name_cols}
                         COUNT(*) as IMPRESSIONS,
                         COUNT(DISTINCT IMP_MAID) as REACH,
-                        COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as VISITORS
+                        COUNT(DISTINCT CASE WHEN {visit_condition} THEN IMP_MAID END) as VISITORS
                     FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
                     WHERE QUORUM_ADVERTISER_ID::INT = %(advertiser_id)s
                       AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
@@ -1157,7 +1184,7 @@ def get_traffic_sources():
         conn = get_snowflake_connection()
         cursor = conn.cursor()
         
-        # Use string formatting for the query since ILIKE wildcards conflict with %(param)s style
+        # Simplified query - removed expensive page views join for performance
         query = f"""
             WITH 
             -- Get CTV-attributed web visits with their referrer sources
@@ -1194,16 +1221,9 @@ def get_traffic_sources():
                 WHERE QUORUM_ADVERTISER_ID = {int(advertiser_id)}
             ),
             
-            -- Count page views per visit (events per UUID)
-            visit_page_views AS (
-                SELECT 
-                    c.WEB_IMPRESSION_ID,
-                    c.traffic_source,
-                    COUNT(e.UUID) as page_views
-                FROM ctv_visits_with_source c
-                LEFT JOIN QUORUMDB.SEGMENT_DATA.PARAMOUNT_WEB_IMPRESSION_DATA e
-                    ON c.WEB_IMPRESSION_ID = e.UUID AND e.KEY = 'event'
-                GROUP BY c.WEB_IMPRESSION_ID, c.traffic_source
+            -- Total visits for percentage
+            total_ctv_visits AS (
+                SELECT COUNT(*) as total FROM ctv_visits_with_source
             ),
             
             -- Aggregate by traffic source
@@ -1211,16 +1231,12 @@ def get_traffic_sources():
                 SELECT 
                     traffic_source as source,
                     COUNT(*) as visits,
-                    ROUND(AVG(page_views), 2) as avg_page_views_per_visit
-                FROM visit_page_views
+                    0.0 as avg_page_views_per_visit
+                FROM ctv_visits_with_source
                 WHERE traffic_source NOT IN ('Other')
                 GROUP BY traffic_source
                 HAVING COUNT(*) >= {min_visits}
-            ),
-            
-            -- Total CTV visits for percentage calculation
-            total_ctv_visits AS (
-                SELECT COUNT(*) as total FROM ctv_visits_with_source
+            )
             )
             
             -- Final output with CTV overlap (all are 100% since these are CTV-attributed)
@@ -1239,7 +1255,7 @@ def get_traffic_sources():
                 'CTV View Through' as source,
                 (SELECT imp_count FROM ctv_impressions) as impressions,
                 (SELECT total FROM total_ctv_visits) as visits,
-                ROUND((SELECT AVG(page_views) FROM visit_page_views), 2) as avg_page_views_per_visit,
+                0.0 as avg_page_views_per_visit,
                 100.0 as pct_of_ctv_traffic
 
             ORDER BY 
