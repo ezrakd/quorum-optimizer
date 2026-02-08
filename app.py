@@ -1184,11 +1184,9 @@ def get_traffic_sources():
         conn = get_snowflake_connection()
         cursor = conn.cursor()
         
-        # Simplified query - removed expensive page views join for performance
+        # Simplified query for performance
         query = f"""
-            WITH 
-            -- Get CTV-attributed web visits with their referrer sources
-            ctv_visits_with_source AS (
+            WITH ctv_visits_with_source AS (
                 SELECT 
                     p.WEB_IMPRESSION_ID,
                     CASE 
@@ -1213,51 +1211,37 @@ def get_traffic_sources():
                   AND p.IS_SITE_VISIT = 'TRUE'
                   AND p.WEB_IMPRESSION_ID IS NOT NULL
             ),
-            
-            -- Total CTV impressions for this advertiser
             ctv_impressions AS (
                 SELECT COUNT(*) as imp_count
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
                 WHERE QUORUM_ADVERTISER_ID = {int(advertiser_id)}
             ),
-            
-            -- Total visits for percentage
             total_ctv_visits AS (
                 SELECT COUNT(*) as total FROM ctv_visits_with_source
             ),
-            
-            -- Aggregate by traffic source
             source_metrics AS (
                 SELECT 
                     traffic_source as source,
-                    COUNT(*) as visits,
-                    0.0 as avg_page_views_per_visit
+                    COUNT(*) as visits
                 FROM ctv_visits_with_source
-                WHERE traffic_source NOT IN ('Other')
+                WHERE traffic_source != 'Other'
                 GROUP BY traffic_source
                 HAVING COUNT(*) >= {min_visits}
             )
-            )
-            
-            -- Final output with CTV overlap (all are 100% since these are CTV-attributed)
             SELECT 
                 source,
                 0 as impressions,
                 visits,
-                avg_page_views_per_visit,
+                0.0 as avg_page_views_per_visit,
                 ROUND(visits::FLOAT / NULLIF((SELECT total FROM total_ctv_visits), 0) * 100, 2) as pct_of_ctv_traffic
             FROM source_metrics
-
             UNION ALL
-
-            -- CTV View Through summary row
             SELECT 
                 'CTV View Through' as source,
                 (SELECT imp_count FROM ctv_impressions) as impressions,
                 (SELECT total FROM total_ctv_visits) as visits,
                 0.0 as avg_page_views_per_visit,
                 100.0 as pct_of_ctv_traffic
-
             ORDER BY 
                 CASE WHEN source = 'CTV View Through' THEN 0 ELSE 1 END,
                 visits DESC
