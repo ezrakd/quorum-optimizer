@@ -941,34 +941,8 @@ def get_lift_analysis():
         
         if agency_id == 1480:
             # =================================================================
-            # PARAMOUNT: Auto-detect store vs web visits, use whichever dominates
+            # PARAMOUNT: Return BOTH web and store lift data
             # =================================================================
-            
-            # First, determine which visit type dominates for this advertiser
-            detect_query = """
-                SELECT 
-                    COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as store_visitors,
-                    COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as web_visitors
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE QUORUM_ADVERTISER_ID::INT = %(advertiser_id)s
-                  AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
-            """
-            cursor.execute(detect_query, {
-                'advertiser_id': int(advertiser_id),
-                'start_date': start_date,
-                'end_date': end_date
-            })
-            detect_row = cursor.fetchone()
-            store_visitors = detect_row[0] or 0
-            web_visitors = detect_row[1] or 0
-            
-            # Use store visits if they dominate, otherwise web
-            if store_visitors > web_visitors:
-                visit_type = 'store'
-                visit_condition = "IS_STORE_VISIT = 'TRUE'"
-            else:
-                visit_type = 'web'
-                visit_condition = "IS_SITE_VISIT = 'TRUE'"
             
             if group_by == 'lineitem':
                 group_cols = "IO_ID, LINEITEM_ID"
@@ -987,6 +961,7 @@ def get_lift_analysis():
                     NULL as PARENT_ID,
                 """
             
+            # Query that returns both web and store metrics in one pass
             query = f"""
                 WITH campaign_metrics AS (
                     SELECT 
@@ -994,15 +969,20 @@ def get_lift_analysis():
                         {name_cols}
                         COUNT(*) as IMPRESSIONS,
                         COUNT(DISTINCT IMP_MAID) as REACH,
-                        COUNT(DISTINCT CASE WHEN {visit_condition} THEN IMP_MAID END) as VISITORS
+                        COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITORS,
+                        COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITORS
                     FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
                     WHERE QUORUM_ADVERTISER_ID::INT = %(advertiser_id)s
                       AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
                     GROUP BY {group_cols}
                     HAVING COUNT(*) >= 1000
                 ),
-                baseline AS (
-                    SELECT SUM(VISITORS)::FLOAT / NULLIF(SUM(REACH), 0) * 100 as BASELINE_VR
+                baselines AS (
+                    SELECT 
+                        SUM(WEB_VISITORS)::FLOAT / NULLIF(SUM(REACH), 0) * 100 as WEB_BASELINE,
+                        SUM(STORE_VISITORS)::FLOAT / NULLIF(SUM(REACH), 0) * 100 as STORE_BASELINE,
+                        SUM(WEB_VISITORS) as TOTAL_WEB,
+                        SUM(STORE_VISITORS) as TOTAL_STORE
                     FROM campaign_metrics
                 )
                 SELECT 
@@ -1011,23 +991,21 @@ def get_lift_analysis():
                     c.ID,
                     c.PARENT_ID,
                     c.IMPRESSIONS,
-                    c.REACH,
                     c.REACH as PANEL_REACH,
-                    c.VISITORS,
-                    ROUND(c.VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100, 4) as VISIT_RATE,
-                    ROUND(b.BASELINE_VR, 4) as BASELINE_VR,
-                    CASE 
-                        WHEN b.BASELINE_VR > 0 
-                        THEN ROUND(c.VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100 / b.BASELINE_VR * 100, 1)
-                        ELSE NULL 
-                    END as INDEX_VS_AVG,
-                    CASE 
-                        WHEN b.BASELINE_VR > 0 
-                        THEN ROUND((c.VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100 - b.BASELINE_VR) / b.BASELINE_VR * 100, 1)
-                        ELSE NULL 
-                    END as LIFT_PCT
+                    c.WEB_VISITORS,
+                    ROUND(c.WEB_VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100, 4) as WEB_VISIT_RATE,
+                    ROUND(b.WEB_BASELINE, 4) as WEB_BASELINE,
+                    CASE WHEN b.WEB_BASELINE > 0 THEN ROUND(c.WEB_VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100 / b.WEB_BASELINE * 100, 1) END as WEB_INDEX,
+                    CASE WHEN b.WEB_BASELINE > 0 THEN ROUND((c.WEB_VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100 - b.WEB_BASELINE) / b.WEB_BASELINE * 100, 1) END as WEB_LIFT,
+                    c.STORE_VISITORS,
+                    ROUND(c.STORE_VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100, 4) as STORE_VISIT_RATE,
+                    ROUND(b.STORE_BASELINE, 4) as STORE_BASELINE,
+                    CASE WHEN b.STORE_BASELINE > 0 THEN ROUND(c.STORE_VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100 / b.STORE_BASELINE * 100, 1) END as STORE_INDEX,
+                    CASE WHEN b.STORE_BASELINE > 0 THEN ROUND((c.STORE_VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100 - b.STORE_BASELINE) / b.STORE_BASELINE * 100, 1) END as STORE_LIFT,
+                    b.TOTAL_WEB,
+                    b.TOTAL_STORE
                 FROM campaign_metrics c
-                CROSS JOIN baseline b
+                CROSS JOIN baselines b
                 WHERE c.REACH >= 100
                 ORDER BY c.IMPRESSIONS DESC
                 LIMIT 100
@@ -1038,7 +1016,84 @@ def get_lift_analysis():
                 'start_date': start_date,
                 'end_date': end_date
             })
-            visit_type = 'web'
+            
+            columns = [desc[0] for desc in cursor.description]
+            rows = cursor.fetchall()
+            
+            cursor.close()
+            conn.close()
+            
+            if not rows:
+                return jsonify({
+                    'success': True,
+                    'web_data': [],
+                    'store_data': [],
+                    'web_baseline': None,
+                    'store_baseline': None,
+                    'total_web_visitors': 0,
+                    'total_store_visitors': 0,
+                    'message': 'No lift data available - requires minimum 1,000 impressions per campaign'
+                })
+            
+            # Parse results and split into web/store data
+            web_data = []
+            store_data = []
+            web_baseline = None
+            store_baseline = None
+            total_web = 0
+            total_store = 0
+            
+            for row in rows:
+                d = dict(zip(columns, row))
+                
+                # Extract totals from first row
+                if total_web == 0:
+                    total_web = int(d.get('TOTAL_WEB') or 0)
+                    total_store = int(d.get('TOTAL_STORE') or 0)
+                    web_baseline = float(d.get('WEB_BASELINE') or 0)
+                    store_baseline = float(d.get('STORE_BASELINE') or 0)
+                
+                # Build web row
+                web_row = {
+                    'NAME': d['NAME'],
+                    'PARENT_NAME': d.get('PARENT_NAME'),
+                    'ID': d.get('ID'),
+                    'PARENT_ID': d.get('PARENT_ID'),
+                    'IMPRESSIONS': int(d['IMPRESSIONS']) if d['IMPRESSIONS'] else 0,
+                    'PANEL_REACH': int(d['PANEL_REACH']) if d['PANEL_REACH'] else 0,
+                    'VISITORS': int(d['WEB_VISITORS']) if d['WEB_VISITORS'] else 0,
+                    'VISIT_RATE': float(d['WEB_VISIT_RATE']) if d['WEB_VISIT_RATE'] else 0,
+                    'BASELINE_VR': float(d['WEB_BASELINE']) if d['WEB_BASELINE'] else 0,
+                    'INDEX_VS_AVG': float(d['WEB_INDEX']) if d['WEB_INDEX'] else None,
+                    'LIFT_PCT': float(d['WEB_LIFT']) if d['WEB_LIFT'] else None,
+                }
+                web_data.append(web_row)
+                
+                # Build store row
+                store_row = {
+                    'NAME': d['NAME'],
+                    'PARENT_NAME': d.get('PARENT_NAME'),
+                    'ID': d.get('ID'),
+                    'PARENT_ID': d.get('PARENT_ID'),
+                    'IMPRESSIONS': int(d['IMPRESSIONS']) if d['IMPRESSIONS'] else 0,
+                    'PANEL_REACH': int(d['PANEL_REACH']) if d['PANEL_REACH'] else 0,
+                    'VISITORS': int(d['STORE_VISITORS']) if d['STORE_VISITORS'] else 0,
+                    'VISIT_RATE': float(d['STORE_VISIT_RATE']) if d['STORE_VISIT_RATE'] else 0,
+                    'BASELINE_VR': float(d['STORE_BASELINE']) if d['STORE_BASELINE'] else 0,
+                    'INDEX_VS_AVG': float(d['STORE_INDEX']) if d['STORE_INDEX'] else None,
+                    'LIFT_PCT': float(d['STORE_LIFT']) if d['STORE_LIFT'] else None,
+                }
+                store_data.append(store_row)
+            
+            return jsonify({
+                'success': True,
+                'web_data': web_data,
+                'store_data': store_data,
+                'web_baseline': web_baseline,
+                'store_baseline': store_baseline,
+                'total_web_visitors': total_web,
+                'total_store_visitors': total_store
+            })
             
         else:
             # =================================================================
