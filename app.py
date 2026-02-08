@@ -80,8 +80,8 @@ def get_date_range():
 def health_check():
     return jsonify({
         'status': 'healthy',
-        'version': '5.4.1-lift-debug',
-        'description': 'Dual INDEX + LIFT metrics with web and store network control (debug)',
+        'version': '5.4.2-lift-fix',
+        'description': 'Dual INDEX + LIFT metrics - fixed table permissions',
         'endpoints': [
             '/api/v5/agencies',
             '/api/v5/advertisers',
@@ -991,7 +991,7 @@ def get_lift_analysis():
                     SELECT 
                         LOWER(REPLACE(MAID,'-','')) AS device_id,
                         DATE(SITE_VISIT_TIMESTAMP) AS event_date
-                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_SITEVISITS
+                    FROM QUORUMDB.SEGMENT_DATA.WEB_VISITORS_TO_LOG
                     WHERE QUORUM_ADVERTISER_ID = %(advertiser_id_str)s
                       AND MAID IS NOT NULL
                     GROUP BY 1, 2
@@ -1277,7 +1277,7 @@ def get_lift_analysis():
                     'index': 'Campaign visit rate vs advertiser average (100 = average)',
                     'lift_vs_network': 'Campaign visit rate vs network control (other Paramount advertisers)',
                     'confidence': 'Statistical significance based on two-proportion z-test',
-                    'web_source': 'PARAMOUNT_SITEVISITS',
+                    'web_source': 'WEB_VISITORS_TO_LOG',
                     'store_source': 'PARAMOUNT_STORE_VISIT_RAW_90_DAYS'
                 },
                 'debug': {
