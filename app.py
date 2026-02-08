@@ -80,8 +80,8 @@ def get_date_range():
 def health_check():
     return jsonify({
         'status': 'healthy',
-        'version': '5.1-hybrid',
-        'description': 'Pre-aggregated tables for speed, web visits where available',
+        'version': '5.2-lift',
+        'description': 'Pre-aggregated tables with unified lift analysis',
         'endpoints': [
             '/api/v5/agencies',
             '/api/v5/advertisers',
@@ -92,6 +92,7 @@ def health_check():
             '/api/v5/dma-performance',
             '/api/v5/summary',
             '/api/v5/timeseries',
+            '/api/v5/lift-analysis',
             '/api/v5/traffic-sources (Paramount only)'
         ]
     })
@@ -902,18 +903,241 @@ def get_timeseries():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # =============================================================================
+# LIFT ANALYSIS
+# =============================================================================
+
+@app.route('/api/v5/lift-analysis', methods=['GET'])
+def get_lift_analysis():
+    """
+    Unified lift analysis with auto-detection of visit type.
+    
+    Lift methodology:
+    - Visit Rate = VISITORS / REACH × 100
+    - Baseline = Overall average visit rate for the advertiser
+    - Lift % = (Visit Rate - Baseline) / Baseline × 100
+    - Index = Visit Rate / Baseline × 100 (100 = average performance)
+    
+    Data Sources:
+    - Paramount (1480): PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS (web visits via IS_SITE_VISIT)
+    - All Others: CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS (store visits)
+    
+    Parameters:
+    - agency_id: Required
+    - advertiser_id: Required
+    - group_by: 'campaign' (default) or 'lineitem'
+    """
+    try:
+        agency_id = request.args.get('agency_id')
+        advertiser_id = request.args.get('advertiser_id')
+        group_by = request.args.get('group_by', 'campaign')
+        
+        if not agency_id or not advertiser_id:
+            return jsonify({'success': False, 'error': 'agency_id and advertiser_id required'}), 400
+        
+        agency_id = int(agency_id)
+        start_date, end_date = get_date_range()
+        conn = get_snowflake_connection()
+        cursor = conn.cursor()
+        
+        if agency_id == 1480:
+            # =================================================================
+            # PARAMOUNT: Web-based lift from PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+            # =================================================================
+            if group_by == 'lineitem':
+                group_cols = "IO_ID, LINEITEM_ID"
+                name_cols = """
+                    COALESCE(MAX(LINEITEM_NAME), 'LI-' || LINEITEM_ID::VARCHAR) as NAME,
+                    COALESCE(MAX(IO_NAME), 'IO-' || IO_ID::VARCHAR) as PARENT_NAME,
+                    LINEITEM_ID as ID,
+                    IO_ID as PARENT_ID,
+                """
+            else:  # campaign
+                group_cols = "IO_ID"
+                name_cols = """
+                    COALESCE(MAX(IO_NAME), 'IO-' || IO_ID::VARCHAR) as NAME,
+                    NULL as PARENT_NAME,
+                    IO_ID as ID,
+                    NULL as PARENT_ID,
+                """
+            
+            query = f"""
+                WITH campaign_metrics AS (
+                    SELECT 
+                        {group_cols},
+                        {name_cols}
+                        COUNT(*) as IMPRESSIONS,
+                        COUNT(DISTINCT IMP_MAID) as REACH,
+                        COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as VISITORS
+                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+                    WHERE QUORUM_ADVERTISER_ID::INT = %(advertiser_id)s
+                      AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
+                    GROUP BY {group_cols}
+                    HAVING COUNT(*) >= 1000
+                ),
+                baseline AS (
+                    SELECT SUM(VISITORS)::FLOAT / NULLIF(SUM(REACH), 0) * 100 as BASELINE_VR
+                    FROM campaign_metrics
+                )
+                SELECT 
+                    c.NAME,
+                    c.PARENT_NAME,
+                    c.ID,
+                    c.PARENT_ID,
+                    c.IMPRESSIONS,
+                    c.REACH,
+                    c.REACH as PANEL_REACH,
+                    c.VISITORS,
+                    ROUND(c.VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100, 4) as VISIT_RATE,
+                    ROUND(b.BASELINE_VR, 4) as BASELINE_VR,
+                    CASE 
+                        WHEN b.BASELINE_VR > 0 
+                        THEN ROUND(c.VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100 / b.BASELINE_VR * 100, 1)
+                        ELSE NULL 
+                    END as INDEX_VS_AVG,
+                    CASE 
+                        WHEN b.BASELINE_VR > 0 
+                        THEN ROUND((c.VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100 - b.BASELINE_VR) / b.BASELINE_VR * 100, 1)
+                        ELSE NULL 
+                    END as LIFT_PCT
+                FROM campaign_metrics c
+                CROSS JOIN baseline b
+                WHERE c.REACH >= 100
+                ORDER BY c.IMPRESSIONS DESC
+                LIMIT 100
+            """
+            
+            cursor.execute(query, {
+                'advertiser_id': int(advertiser_id),
+                'start_date': start_date,
+                'end_date': end_date
+            })
+            visit_type = 'web'
+            
+        else:
+            # =================================================================
+            # ALL OTHER AGENCIES: Use pre-aggregated CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
+            # =================================================================
+            if group_by == 'lineitem':
+                group_cols = "IO_ID, IO_NAME, LI_ID, LI_NAME"
+                name_cols = """
+                    LI_NAME as NAME,
+                    IO_NAME as PARENT_NAME,
+                    LI_ID as ID,
+                    IO_ID as PARENT_ID,
+                """
+            else:  # campaign
+                group_cols = "IO_ID, IO_NAME"
+                name_cols = """
+                    IO_NAME as NAME,
+                    NULL as PARENT_NAME,
+                    IO_ID as ID,
+                    NULL as PARENT_ID,
+                """
+            
+            query = f"""
+                WITH campaign_metrics AS (
+                    SELECT 
+                        {group_cols},
+                        {name_cols}
+                        SUM(IMPRESSIONS) as IMPRESSIONS,
+                        SUM(REACH) as REACH,
+                        SUM(PANEL_REACH) as PANEL_REACH,
+                        SUM(VISITORS) as VISITORS
+                    FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
+                    WHERE QUORUM_ADVERTISER_ID::INT = %(advertiser_id)s
+                      AND WEEK_START BETWEEN %(start_date)s AND %(end_date)s
+                    GROUP BY {group_cols}
+                    HAVING SUM(IMPRESSIONS) >= 1000
+                ),
+                baseline AS (
+                    SELECT SUM(VISITORS)::FLOAT / NULLIF(SUM(PANEL_REACH), 0) * 100 as BASELINE_VR
+                    FROM campaign_metrics
+                )
+                SELECT 
+                    c.NAME,
+                    c.PARENT_NAME,
+                    c.ID,
+                    c.PARENT_ID,
+                    c.IMPRESSIONS,
+                    c.REACH,
+                    c.PANEL_REACH,
+                    c.VISITORS,
+                    ROUND(c.VISITORS::FLOAT / NULLIF(c.PANEL_REACH, 0) * 100, 4) as VISIT_RATE,
+                    ROUND(b.BASELINE_VR, 4) as BASELINE_VR,
+                    CASE 
+                        WHEN b.BASELINE_VR > 0 
+                        THEN ROUND(c.VISITORS::FLOAT / NULLIF(c.PANEL_REACH, 0) * 100 / b.BASELINE_VR * 100, 1)
+                        ELSE NULL 
+                    END as INDEX_VS_AVG,
+                    CASE 
+                        WHEN b.BASELINE_VR > 0 
+                        THEN ROUND((c.VISITORS::FLOAT / NULLIF(c.PANEL_REACH, 0) * 100 - b.BASELINE_VR) / b.BASELINE_VR * 100, 1)
+                        ELSE NULL 
+                    END as LIFT_PCT
+                FROM campaign_metrics c
+                CROSS JOIN baseline b
+                WHERE c.PANEL_REACH >= 1000
+                ORDER BY c.IMPRESSIONS DESC
+                LIMIT 100
+            """
+            
+            cursor.execute(query, {
+                'advertiser_id': int(advertiser_id),
+                'start_date': start_date,
+                'end_date': end_date
+            })
+            visit_type = 'store'
+        
+        columns = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
+        
+        if not rows:
+            cursor.close()
+            conn.close()
+            return jsonify({
+                'success': True,
+                'data': [],
+                'baseline': None,
+                'visit_type': visit_type,
+                'message': 'No lift data available - requires minimum 1,000 panel reach per campaign'
+            })
+        
+        # Extract baseline from first row
+        baseline = None
+        results = []
+        for row in rows:
+            d = dict(zip(columns, row))
+            if baseline is None and d.get('BASELINE_VR'):
+                baseline = float(d['BASELINE_VR'])
+            # Convert Decimal types for JSON
+            for k, v in d.items():
+                if hasattr(v, 'is_integer'):
+                    d[k] = float(v) if v else 0
+            results.append(d)
+        
+        cursor.close()
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'data': results,
+            'baseline': baseline,
+            'visit_type': visit_type
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# =============================================================================
 # TRAFFIC SOURCES (Paramount only)
 # =============================================================================
 
 @app.route('/api/v5/traffic-sources', methods=['GET'])
 def get_traffic_sources():
     """
-    Get traffic source performance with CTV overlap analysis.
+    Get traffic source analysis for CTV-attributed web visits.
     
-    Compares engagement (page views per visit) between:
-    - Click-based sources (Google, Facebook, YouTube, etc.)
-    - CTV View Through (users who saw CTV ads and later visited)
-    
+    Shows which traffic sources drove visitors who ALSO saw CTV ads.
     Only works for Paramount advertisers with web pixel.
     
     Query Parameters:
@@ -935,29 +1159,10 @@ def get_traffic_sources():
         
         query = """
             WITH 
-            -- Get CTV-attributed web visits (users exposed to CTV who later visited site)
-            ctv_attributed_visits AS (
-                SELECT DISTINCT
-                    WEB_IMPRESSION_ID,
-                    SITE_VISIT_TIMESTAMP
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
-                  AND IS_SITE_VISIT = 'TRUE'
-                  AND WEB_IMPRESSION_ID IS NOT NULL
-            ),
-
-            -- Total CTV impressions
-            ctv_impressions AS (
-                SELECT COUNT(*) as imp_count
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
-            ),
-
-            -- All web visits with traffic source classification
-            all_web_visits AS (
+            -- Get CTV-attributed web visits with their referrer sources
+            ctv_visits_with_source AS (
                 SELECT 
-                    p.UUID as web_impression_id,
-                    p.TIMESTAMP as visit_timestamp,
+                    p.WEB_IMPRESSION_ID,
                     CASE 
                         WHEN r.VALUE ILIKE '%%doubleclick%%' OR r.VALUE ILIKE '%%googleadservices%%' THEN 'Google Ads'
                         WHEN r.VALUE ILIKE '%%google%%' THEN 'Google Organic'
@@ -973,81 +1178,68 @@ def get_traffic_sources():
                         WHEN r.VALUE IS NULL OR r.VALUE = '-' OR r.VALUE = '' THEN 'Direct'
                         ELSE 'Other'
                     END as traffic_source
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_WEB_IMPRESSION_DATA p
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS p
                 LEFT JOIN QUORUMDB.SEGMENT_DATA.PARAMOUNT_WEB_IMPRESSION_DATA r
-                    ON p.UUID = r.UUID AND r.KEY = 'referrer'
-                WHERE p.KEY = 'event' AND p.VALUE = 'site_visit'
-                  AND p.TIMESTAMP >= DATEADD(day, -90, CURRENT_DATE())
+                    ON p.WEB_IMPRESSION_ID = r.UUID AND r.KEY = 'referrer'
+                WHERE p.QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                  AND p.IS_SITE_VISIT = 'TRUE'
+                  AND p.WEB_IMPRESSION_ID IS NOT NULL
             ),
-
-            -- Page views by traffic source (count ALL events per source)
-            page_views AS (
+            
+            -- Total CTV impressions for this advertiser
+            ctv_impressions AS (
+                SELECT COUNT(*) as imp_count
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+                WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+            ),
+            
+            -- Count page views per visit (events per UUID)
+            visit_page_views AS (
                 SELECT 
-                    traffic_source,
-                    COUNT(*) as total_page_views
-                FROM (
-                    SELECT p.UUID,
-                        CASE 
-                            WHEN r.VALUE ILIKE '%%doubleclick%%' OR r.VALUE ILIKE '%%googleadservices%%' THEN 'Google Ads'
-                            WHEN r.VALUE ILIKE '%%google%%' THEN 'Google Organic'
-                            WHEN r.VALUE ILIKE '%%fbapp%%' OR r.VALUE ILIKE '%%facebook%%' OR r.VALUE ILIKE '%%fb.com%%' THEN 'Meta/Facebook'
-                            WHEN r.VALUE ILIKE '%%instagram%%' THEN 'Instagram'
-                            WHEN r.VALUE ILIKE '%%youtube%%' THEN 'YouTube'
-                            WHEN r.VALUE ILIKE '%%tiktok%%' THEN 'TikTok'
-                            WHEN r.VALUE ILIKE '%%taboola%%' THEN 'Taboola'
-                            WHEN r.VALUE ILIKE '%%outbrain%%' THEN 'Outbrain'
-                            WHEN r.VALUE ILIKE '%%bing%%' THEN 'Bing'
-                            WHEN r.VALUE ILIKE '%%yahoo%%' THEN 'Yahoo'
-                            WHEN r.VALUE ILIKE '%%t.co%%' OR r.VALUE ILIKE '%%twitter%%' THEN 'Twitter/X'
-                            WHEN r.VALUE IS NULL OR r.VALUE = '-' OR r.VALUE = '' THEN 'Direct'
-                            ELSE 'Other'
-                        END as traffic_source
-                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_WEB_IMPRESSION_DATA p
-                    LEFT JOIN QUORUMDB.SEGMENT_DATA.PARAMOUNT_WEB_IMPRESSION_DATA r
-                        ON p.UUID = r.UUID AND r.KEY = 'referrer'
-                    WHERE p.KEY = 'event' AND p.TIMESTAMP >= DATEADD(day, -90, CURRENT_DATE())
-                )
-                GROUP BY traffic_source
+                    c.WEB_IMPRESSION_ID,
+                    c.traffic_source,
+                    COUNT(e.UUID) as page_views
+                FROM ctv_visits_with_source c
+                LEFT JOIN QUORUMDB.SEGMENT_DATA.PARAMOUNT_WEB_IMPRESSION_DATA e
+                    ON c.WEB_IMPRESSION_ID = e.UUID AND e.KEY = 'event'
+                GROUP BY c.WEB_IMPRESSION_ID, c.traffic_source
             ),
-
-            -- CTV View Through page views
-            ctv_page_views AS (
-                SELECT COUNT(*) as total_pv
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_WEB_IMPRESSION_DATA p
-                WHERE p.KEY = 'event'
-                  AND p.UUID IN (SELECT WEB_IMPRESSION_ID FROM ctv_attributed_visits)
-            ),
-
-            -- Click-based sources aggregation
-            click_sources AS (
+            
+            -- Aggregate by traffic source
+            source_metrics AS (
                 SELECT 
-                    wv.traffic_source as source,
-                    0 as impressions,
+                    traffic_source as source,
                     COUNT(*) as visits,
-                    COUNT(ctv.WEB_IMPRESSION_ID) as ctv_attributed,
-                    ROUND(pv.total_page_views::FLOAT / NULLIF(COUNT(*), 0), 2) as avg_page_views_per_visit,
-                    ROUND(COUNT(ctv.WEB_IMPRESSION_ID)::FLOAT / NULLIF(COUNT(*), 0) * 100, 2) as ctv_overlap_pct
-                FROM all_web_visits wv
-                LEFT JOIN ctv_attributed_visits ctv ON wv.web_impression_id = ctv.WEB_IMPRESSION_ID
-                LEFT JOIN page_views pv ON wv.traffic_source = pv.traffic_source
-                WHERE wv.traffic_source NOT IN ('Other')
-                GROUP BY wv.traffic_source, pv.total_page_views
+                    ROUND(AVG(page_views), 2) as avg_page_views_per_visit
+                FROM visit_page_views
+                WHERE traffic_source NOT IN ('Other')
+                GROUP BY traffic_source
                 HAVING COUNT(*) >= %(min_visits)s
+            ),
+            
+            -- Total CTV visits for percentage calculation
+            total_ctv_visits AS (
+                SELECT COUNT(*) as total FROM ctv_visits_with_source
             )
-
-            -- Combine click sources with CTV View Through row
-            SELECT source, impressions, visits, avg_page_views_per_visit, ctv_overlap_pct 
-            FROM click_sources
+            
+            -- Final output with CTV overlap (all are 100% since these are CTV-attributed)
+            SELECT 
+                source,
+                0 as impressions,
+                visits,
+                avg_page_views_per_visit,
+                ROUND(visits::FLOAT / NULLIF((SELECT total FROM total_ctv_visits), 0) * 100, 2) as pct_of_ctv_traffic
+            FROM source_metrics
 
             UNION ALL
 
+            -- CTV View Through summary row
             SELECT 
                 'CTV View Through' as source,
                 (SELECT imp_count FROM ctv_impressions) as impressions,
-                (SELECT COUNT(*) FROM ctv_attributed_visits) as visits,
-                ROUND((SELECT total_pv FROM ctv_page_views)::FLOAT / 
-                      NULLIF((SELECT COUNT(*) FROM ctv_attributed_visits), 0), 2) as avg_page_views_per_visit,
-                100.0 as ctv_overlap_pct
+                (SELECT total FROM total_ctv_visits) as visits,
+                ROUND((SELECT AVG(page_views) FROM visit_page_views), 2) as avg_page_views_per_visit,
+                100.0 as pct_of_ctv_traffic
 
             ORDER BY 
                 CASE WHEN source = 'CTV View Through' THEN 0 ELSE 1 END,
@@ -1067,6 +1259,9 @@ def get_traffic_sources():
             for k, v in d.items():
                 if hasattr(v, 'is_integer'):  # Decimal type
                     d[k] = float(v) if v else 0
+            # Rename pct_of_ctv_traffic to ctv_overlap_pct for frontend compatibility
+            if 'pct_of_ctv_traffic' in d:
+                d['ctv_overlap_pct'] = d.pop('pct_of_ctv_traffic')
             results.append(d)
         
         cursor.close()
