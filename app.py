@@ -80,8 +80,8 @@ def get_date_range():
 def health_check():
     return jsonify({
         'status': 'healthy',
-        'version': '5.3-lift-v2',
-        'description': 'Pre-aggregated tables with dual INDEX + LIFT metrics',
+        'version': '5.4-lift-v2',
+        'description': 'Dual INDEX + LIFT metrics with web and store network control',
         'endpoints': [
             '/api/v5/agencies',
             '/api/v5/advertisers',
@@ -964,6 +964,7 @@ def get_lift_analysis():
             
             # Query with both INDEX (vs advertiser avg) and LIFT (vs network control)
             # Network control = devices that saw OTHER Paramount advertisers but NOT this one
+            # Now includes BOTH web and store network control
             query = f"""
                 WITH 
                 -- Exposed devices for this advertiser
@@ -986,7 +987,7 @@ def get_lift_analysis():
                 ),
                 
                 -- Web visits for this advertiser (1 per device per day)
-                adv_visit_days AS (
+                adv_web_visit_days AS (
                     SELECT 
                         LOWER(REPLACE(MAID,'-','')) AS device_id,
                         DATE(SITE_VISIT_TIMESTAMP) AS event_date
@@ -996,15 +997,45 @@ def get_lift_analysis():
                     GROUP BY 1, 2
                 ),
                 
-                -- Network control baseline (visit rate for control group)
-                network_control AS (
+                -- Store visits for this advertiser (1 per device per day)
+                adv_store_visit_days AS (
+                    SELECT 
+                        LOWER(REPLACE(MAID,'-','')) AS device_id,
+                        DATE(DRIVE_BY_TIME) AS event_date
+                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_STORE_VISIT_RAW_90_DAYS
+                    WHERE ADVERTISER_ID = %(advertiser_id)s
+                      AND MAID IS NOT NULL
+                    GROUP BY 1, 2
+                ),
+                
+                -- Web network control baseline
+                web_network_control AS (
                     SELECT 
                         COUNT(DISTINCT c.device_id) AS control_n,
                         COUNT(DISTINCT CASE WHEN v.device_id IS NOT NULL THEN c.device_id END) AS control_visitors,
                         COUNT(DISTINCT CASE WHEN v.device_id IS NOT NULL THEN c.device_id END)::FLOAT 
                             / NULLIF(COUNT(DISTINCT c.device_id), 0) * 100 AS control_rate
                     FROM control_devices c
-                    LEFT JOIN adv_visit_days v ON v.device_id = c.device_id
+                    LEFT JOIN adv_web_visit_days v ON v.device_id = c.device_id
+                ),
+                
+                -- Store network control baseline
+                store_network_control AS (
+                    SELECT 
+                        COUNT(DISTINCT c.device_id) AS control_n,
+                        COUNT(DISTINCT CASE WHEN v.device_id IS NOT NULL THEN c.device_id END) AS control_visitors,
+                        COUNT(DISTINCT CASE WHEN v.device_id IS NOT NULL THEN c.device_id END)::FLOAT 
+                            / NULLIF(COUNT(DISTINCT c.device_id), 0) * 100 AS control_rate
+                    FROM control_devices c
+                    LEFT JOIN adv_store_visit_days v ON v.device_id = c.device_id
+                ),
+                
+                -- Exposed store visitors (need to calculate from raw visits, not IS_STORE_VISIT flag)
+                exposed_store_visitors AS (
+                    SELECT 
+                        COUNT(DISTINCT CASE WHEN sv.device_id IS NOT NULL THEN e.device_id END) AS store_visitors
+                    FROM exposed_devices e
+                    LEFT JOIN adv_store_visit_days sv ON sv.device_id = e.device_id
                 ),
                 
                 -- Campaign-level metrics
@@ -1014,8 +1045,7 @@ def get_lift_analysis():
                         {name_cols}
                         COUNT(*) as IMPRESSIONS,
                         COUNT(DISTINCT IMP_MAID) as REACH,
-                        COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITORS,
-                        COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITORS
+                        COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITORS
                     FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
                     WHERE QUORUM_ADVERTISER_ID::INT = %(advertiser_id)s
                       AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
@@ -1027,9 +1057,7 @@ def get_lift_analysis():
                 adv_baselines AS (
                     SELECT 
                         SUM(WEB_VISITORS)::FLOAT / NULLIF(SUM(REACH), 0) * 100 as WEB_BASELINE,
-                        SUM(STORE_VISITORS)::FLOAT / NULLIF(SUM(REACH), 0) * 100 as STORE_BASELINE,
-                        SUM(WEB_VISITORS) as TOTAL_WEB,
-                        SUM(STORE_VISITORS) as TOTAL_STORE
+                        SUM(WEB_VISITORS) as TOTAL_WEB
                     FROM campaign_metrics
                 )
                 
@@ -1045,46 +1073,63 @@ def get_lift_analysis():
                     c.WEB_VISITORS,
                     ROUND(c.WEB_VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100, 4) as WEB_VISIT_RATE,
                     
-                    -- INDEX: vs advertiser average (for comparing campaigns)
+                    -- Web INDEX: vs advertiser average
                     ROUND(b.WEB_BASELINE, 4) as WEB_ADV_BASELINE,
                     CASE WHEN b.WEB_BASELINE > 0 
                          THEN ROUND(c.WEB_VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100 / b.WEB_BASELINE * 100, 1) 
                     END as WEB_INDEX,
                     
-                    -- LIFT: vs network control (true incrementality)
-                    ROUND(nc.control_rate, 4) as WEB_NETWORK_BASELINE,
-                    nc.control_n as NETWORK_CONTROL_N,
-                    nc.control_visitors as NETWORK_CONTROL_VISITORS,
-                    CASE WHEN nc.control_rate > 0 
-                         THEN ROUND((c.WEB_VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100 - nc.control_rate) / nc.control_rate * 100, 1) 
+                    -- Web LIFT: vs network control
+                    ROUND(wnc.control_rate, 4) as WEB_NETWORK_BASELINE,
+                    wnc.control_n as WEB_CONTROL_N,
+                    wnc.control_visitors as WEB_CONTROL_VISITORS,
+                    CASE WHEN wnc.control_rate > 0 
+                         THEN ROUND((c.WEB_VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100 - wnc.control_rate) / wnc.control_rate * 100, 1) 
                     END as WEB_LIFT_VS_NETWORK,
                     
-                    -- Z-score for statistical significance
-                    CASE WHEN nc.control_rate > 0 AND c.REACH > 0 AND nc.control_n > 0
+                    -- Web Z-score
+                    CASE WHEN wnc.control_rate > 0 AND c.REACH > 0 AND wnc.control_n > 0
                          THEN ROUND(
-                             (c.WEB_VISITORS::FLOAT / c.REACH - nc.control_visitors::FLOAT / nc.control_n) /
+                             (c.WEB_VISITORS::FLOAT / c.REACH - wnc.control_visitors::FLOAT / wnc.control_n) /
                              NULLIF(SQRT(
-                                 ((c.WEB_VISITORS + nc.control_visitors)::FLOAT / (c.REACH + nc.control_n)) *
-                                 (1 - (c.WEB_VISITORS + nc.control_visitors)::FLOAT / (c.REACH + nc.control_n)) *
-                                 (1.0/c.REACH + 1.0/nc.control_n)
+                                 ((c.WEB_VISITORS + wnc.control_visitors)::FLOAT / (c.REACH + wnc.control_n)) *
+                                 (1 - (c.WEB_VISITORS + wnc.control_visitors)::FLOAT / (c.REACH + wnc.control_n)) *
+                                 (1.0/c.REACH + 1.0/wnc.control_n)
                              ), 0), 2)
                     END as WEB_Z_SCORE,
                     
-                    -- Store metrics
-                    c.STORE_VISITORS,
-                    ROUND(c.STORE_VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100, 4) as STORE_VISIT_RATE,
-                    ROUND(b.STORE_BASELINE, 4) as STORE_ADV_BASELINE,
-                    CASE WHEN b.STORE_BASELINE > 0 
-                         THEN ROUND(c.STORE_VISITORS::FLOAT / NULLIF(c.REACH, 0) * 100 / b.STORE_BASELINE * 100, 1) 
-                    END as STORE_INDEX,
+                    -- Store metrics from raw visits table
+                    esv.store_visitors as STORE_VISITORS,
+                    ROUND(esv.store_visitors::FLOAT / NULLIF(c.REACH, 0) * 100, 4) as STORE_VISIT_RATE,
+                    
+                    -- Store LIFT: vs network control
+                    ROUND(snc.control_rate, 4) as STORE_NETWORK_BASELINE,
+                    snc.control_n as STORE_CONTROL_N,
+                    snc.control_visitors as STORE_CONTROL_VISITORS,
+                    CASE WHEN snc.control_rate > 0 
+                         THEN ROUND((esv.store_visitors::FLOAT / NULLIF(c.REACH, 0) * 100 - snc.control_rate) / snc.control_rate * 100, 1) 
+                    END as STORE_LIFT_VS_NETWORK,
+                    
+                    -- Store Z-score
+                    CASE WHEN snc.control_rate > 0 AND c.REACH > 0 AND snc.control_n > 0
+                         THEN ROUND(
+                             (esv.store_visitors::FLOAT / c.REACH - snc.control_visitors::FLOAT / snc.control_n) /
+                             NULLIF(SQRT(
+                                 ((esv.store_visitors + snc.control_visitors)::FLOAT / (c.REACH + snc.control_n)) *
+                                 (1 - (esv.store_visitors + snc.control_visitors)::FLOAT / (c.REACH + snc.control_n)) *
+                                 (1.0/c.REACH + 1.0/snc.control_n)
+                             ), 0), 2)
+                    END as STORE_Z_SCORE,
                     
                     -- Totals
                     b.TOTAL_WEB,
-                    b.TOTAL_STORE
+                    esv.store_visitors as TOTAL_STORE
                     
                 FROM campaign_metrics c
                 CROSS JOIN adv_baselines b
-                CROSS JOIN network_control nc
+                CROSS JOIN web_network_control wnc
+                CROSS JOIN store_network_control snc
+                CROSS JOIN exposed_store_visitors esv
                 WHERE c.REACH >= 100
                 ORDER BY c.IMPRESSIONS DESC
                 LIMIT 100
@@ -1110,8 +1155,9 @@ def get_lift_analysis():
                     'store_data': [],
                     'web_adv_baseline': None,
                     'web_network_baseline': None,
-                    'store_baseline': None,
-                    'network_control_n': 0,
+                    'store_network_baseline': None,
+                    'web_control_n': 0,
+                    'store_control_n': 0,
                     'total_web_visitors': 0,
                     'total_store_visitors': 0,
                     'message': 'No lift data available - requires minimum 1,000 impressions per campaign'
@@ -1122,8 +1168,9 @@ def get_lift_analysis():
             store_data = []
             web_adv_baseline = None
             web_network_baseline = None
-            store_baseline = None
-            network_control_n = 0
+            store_network_baseline = None
+            web_control_n = 0
+            store_control_n = 0
             total_web = 0
             total_store = 0
             
@@ -1136,23 +1183,39 @@ def get_lift_analysis():
                     total_store = int(d.get('TOTAL_STORE') or 0)
                     web_adv_baseline = float(d.get('WEB_ADV_BASELINE') or 0)
                     web_network_baseline = float(d.get('WEB_NETWORK_BASELINE') or 0)
-                    store_baseline = float(d.get('STORE_ADV_BASELINE') or 0)
-                    network_control_n = int(d.get('NETWORK_CONTROL_N') or 0)
+                    store_network_baseline = float(d.get('STORE_NETWORK_BASELINE') or 0)
+                    web_control_n = int(d.get('WEB_CONTROL_N') or 0)
+                    store_control_n = int(d.get('STORE_CONTROL_N') or 0)
                 
-                # Determine confidence level from z-score
-                z = d.get('WEB_Z_SCORE')
-                if z is not None:
-                    z = abs(float(z))
-                    if z >= 2.576:
-                        confidence = '99%'
-                    elif z >= 1.96:
-                        confidence = '95%'
-                    elif z >= 1.645:
-                        confidence = '90%'
+                # Determine web confidence level from z-score
+                web_z = d.get('WEB_Z_SCORE')
+                if web_z is not None:
+                    web_z = abs(float(web_z))
+                    if web_z >= 2.576:
+                        web_confidence = '99%'
+                    elif web_z >= 1.96:
+                        web_confidence = '95%'
+                    elif web_z >= 1.645:
+                        web_confidence = '90%'
                     else:
-                        confidence = 'NS'
+                        web_confidence = 'NS'
                 else:
-                    confidence = None
+                    web_confidence = None
+                
+                # Determine store confidence level from z-score
+                store_z = d.get('STORE_Z_SCORE')
+                if store_z is not None:
+                    store_z = abs(float(store_z))
+                    if store_z >= 2.576:
+                        store_confidence = '99%'
+                    elif store_z >= 1.96:
+                        store_confidence = '95%'
+                    elif store_z >= 1.645:
+                        store_confidence = '90%'
+                    else:
+                        store_confidence = 'NS'
+                else:
+                    store_confidence = None
                 
                 # Build web row with both INDEX and LIFT
                 web_row = {
@@ -1171,11 +1234,11 @@ def get_lift_analysis():
                     'NETWORK_BASELINE_VR': float(d['WEB_NETWORK_BASELINE']) if d['WEB_NETWORK_BASELINE'] else 0,
                     'LIFT_VS_NETWORK': float(d['WEB_LIFT_VS_NETWORK']) if d['WEB_LIFT_VS_NETWORK'] else None,
                     'Z_SCORE': float(d['WEB_Z_SCORE']) if d['WEB_Z_SCORE'] else None,
-                    'CONFIDENCE': confidence,
+                    'CONFIDENCE': web_confidence,
                 }
                 web_data.append(web_row)
                 
-                # Build store row (INDEX only - no network control for store yet)
+                # Build store row with both INDEX and LIFT (now using network control)
                 store_row = {
                     'NAME': d['NAME'],
                     'PARENT_NAME': d.get('PARENT_NAME'),
@@ -1185,11 +1248,11 @@ def get_lift_analysis():
                     'PANEL_REACH': int(d['PANEL_REACH']) if d['PANEL_REACH'] else 0,
                     'VISITORS': int(d['STORE_VISITORS']) if d['STORE_VISITORS'] else 0,
                     'VISIT_RATE': float(d['STORE_VISIT_RATE']) if d['STORE_VISIT_RATE'] else 0,
-                    'ADV_BASELINE_VR': float(d['STORE_ADV_BASELINE']) if d['STORE_ADV_BASELINE'] else 0,
-                    'INDEX_VS_AVG': float(d['STORE_INDEX']) if d['STORE_INDEX'] else None,
-                    'LIFT_VS_NETWORK': None,  # TODO: Add store network control
-                    'Z_SCORE': None,
-                    'CONFIDENCE': None,
+                    # LIFT: vs network control
+                    'NETWORK_BASELINE_VR': float(d['STORE_NETWORK_BASELINE']) if d['STORE_NETWORK_BASELINE'] else 0,
+                    'LIFT_VS_NETWORK': float(d['STORE_LIFT_VS_NETWORK']) if d['STORE_LIFT_VS_NETWORK'] else None,
+                    'Z_SCORE': float(d['STORE_Z_SCORE']) if d['STORE_Z_SCORE'] else None,
+                    'CONFIDENCE': store_confidence,
                 }
                 store_data.append(store_row)
             
@@ -1199,14 +1262,17 @@ def get_lift_analysis():
                 'store_data': store_data,
                 'web_adv_baseline': web_adv_baseline,
                 'web_network_baseline': web_network_baseline,
-                'store_baseline': store_baseline,
-                'network_control_n': network_control_n,
+                'store_network_baseline': store_network_baseline,
+                'web_control_n': web_control_n,
+                'store_control_n': store_control_n,
                 'total_web_visitors': total_web,
                 'total_store_visitors': total_store,
                 'methodology': {
                     'index': 'Campaign visit rate vs advertiser average (100 = average)',
                     'lift_vs_network': 'Campaign visit rate vs network control (other Paramount advertisers)',
-                    'confidence': 'Statistical significance based on two-proportion z-test'
+                    'confidence': 'Statistical significance based on two-proportion z-test',
+                    'web_source': 'PARAMOUNT_SITEVISITS',
+                    'store_source': 'PARAMOUNT_STORE_VISIT_RAW_90_DAYS'
                 }
             })
             
