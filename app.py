@@ -80,8 +80,8 @@ def get_date_range():
 def health_check():
     return jsonify({
         'status': 'healthy',
-        'version': '5.4-lift-v2',
-        'description': 'Dual INDEX + LIFT metrics with web and store network control',
+        'version': '5.4.1-lift-debug',
+        'description': 'Dual INDEX + LIFT metrics with web and store network control (debug)',
         'endpoints': [
             '/api/v5/agencies',
             '/api/v5/advertisers',
@@ -1160,7 +1160,13 @@ def get_lift_analysis():
                     'store_control_n': 0,
                     'total_web_visitors': 0,
                     'total_store_visitors': 0,
-                    'message': 'No lift data available - requires minimum 1,000 impressions per campaign'
+                    'message': 'No lift data available - requires minimum 1,000 impressions per campaign',
+                    'debug': {
+                        'start_date': start_date,
+                        'end_date': end_date,
+                        'advertiser_id': advertiser_id,
+                        'rows_returned': 0
+                    }
                 })
             
             # Parse results and split into web/store data
@@ -1273,6 +1279,11 @@ def get_lift_analysis():
                     'confidence': 'Statistical significance based on two-proportion z-test',
                     'web_source': 'PARAMOUNT_SITEVISITS',
                     'store_source': 'PARAMOUNT_STORE_VISIT_RAW_90_DAYS'
+                },
+                'debug': {
+                    'start_date': start_date,
+                    'end_date': end_date,
+                    'rows_returned': len(rows) if rows else 0
                 }
             })
             
