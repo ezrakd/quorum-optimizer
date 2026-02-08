@@ -1145,7 +1145,7 @@ def get_traffic_sources():
     - min_visits (optional): Minimum visits to include source (default: 100)
     """
     advertiser_id = request.args.get('advertiser_id')
-    min_visits = request.args.get('min_visits', '100')
+    min_visits = int(request.args.get('min_visits', '100'))
     
     if not advertiser_id:
         return jsonify({
@@ -1157,31 +1157,32 @@ def get_traffic_sources():
         conn = get_snowflake_connection()
         cursor = conn.cursor()
         
-        query = """
+        # Use string formatting for the query since ILIKE wildcards conflict with %(param)s style
+        query = f"""
             WITH 
             -- Get CTV-attributed web visits with their referrer sources
             ctv_visits_with_source AS (
                 SELECT 
                     p.WEB_IMPRESSION_ID,
                     CASE 
-                        WHEN r.VALUE ILIKE '%%doubleclick%%' OR r.VALUE ILIKE '%%googleadservices%%' THEN 'Google Ads'
-                        WHEN r.VALUE ILIKE '%%google%%' THEN 'Google Organic'
-                        WHEN r.VALUE ILIKE '%%fbapp%%' OR r.VALUE ILIKE '%%facebook%%' OR r.VALUE ILIKE '%%fb.com%%' THEN 'Meta/Facebook'
-                        WHEN r.VALUE ILIKE '%%instagram%%' THEN 'Instagram'
-                        WHEN r.VALUE ILIKE '%%youtube%%' THEN 'YouTube'
-                        WHEN r.VALUE ILIKE '%%tiktok%%' THEN 'TikTok'
-                        WHEN r.VALUE ILIKE '%%taboola%%' THEN 'Taboola'
-                        WHEN r.VALUE ILIKE '%%outbrain%%' THEN 'Outbrain'
-                        WHEN r.VALUE ILIKE '%%bing%%' THEN 'Bing'
-                        WHEN r.VALUE ILIKE '%%yahoo%%' THEN 'Yahoo'
-                        WHEN r.VALUE ILIKE '%%t.co%%' OR r.VALUE ILIKE '%%twitter%%' THEN 'Twitter/X'
+                        WHEN r.VALUE ILIKE '%doubleclick%' OR r.VALUE ILIKE '%googleadservices%' THEN 'Google Ads'
+                        WHEN r.VALUE ILIKE '%google%' THEN 'Google Organic'
+                        WHEN r.VALUE ILIKE '%fbapp%' OR r.VALUE ILIKE '%facebook%' OR r.VALUE ILIKE '%fb.com%' THEN 'Meta/Facebook'
+                        WHEN r.VALUE ILIKE '%instagram%' THEN 'Instagram'
+                        WHEN r.VALUE ILIKE '%youtube%' THEN 'YouTube'
+                        WHEN r.VALUE ILIKE '%tiktok%' THEN 'TikTok'
+                        WHEN r.VALUE ILIKE '%taboola%' THEN 'Taboola'
+                        WHEN r.VALUE ILIKE '%outbrain%' THEN 'Outbrain'
+                        WHEN r.VALUE ILIKE '%bing%' THEN 'Bing'
+                        WHEN r.VALUE ILIKE '%yahoo%' THEN 'Yahoo'
+                        WHEN r.VALUE ILIKE '%t.co%' OR r.VALUE ILIKE '%twitter%' THEN 'Twitter/X'
                         WHEN r.VALUE IS NULL OR r.VALUE = '-' OR r.VALUE = '' THEN 'Direct'
                         ELSE 'Other'
                     END as traffic_source
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS p
                 LEFT JOIN QUORUMDB.SEGMENT_DATA.PARAMOUNT_WEB_IMPRESSION_DATA r
                     ON p.WEB_IMPRESSION_ID = r.UUID AND r.KEY = 'referrer'
-                WHERE p.QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                WHERE p.QUORUM_ADVERTISER_ID = {int(advertiser_id)}
                   AND p.IS_SITE_VISIT = 'TRUE'
                   AND p.WEB_IMPRESSION_ID IS NOT NULL
             ),
@@ -1190,7 +1191,7 @@ def get_traffic_sources():
             ctv_impressions AS (
                 SELECT COUNT(*) as imp_count
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                WHERE QUORUM_ADVERTISER_ID = {int(advertiser_id)}
             ),
             
             -- Count page views per visit (events per UUID)
@@ -1214,7 +1215,7 @@ def get_traffic_sources():
                 FROM visit_page_views
                 WHERE traffic_source NOT IN ('Other')
                 GROUP BY traffic_source
-                HAVING COUNT(*) >= %(min_visits)s
+                HAVING COUNT(*) >= {min_visits}
             ),
             
             -- Total CTV visits for percentage calculation
@@ -1246,10 +1247,7 @@ def get_traffic_sources():
                 visits DESC
         """
         
-        cursor.execute(query, {
-            'advertiser_id': advertiser_id,
-            'min_visits': min_visits
-        })
+        cursor.execute(query)
         
         columns = [desc[0].lower() for desc in cursor.description]
         results = []
