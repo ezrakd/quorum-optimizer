@@ -1184,26 +1184,12 @@ def get_traffic_sources():
         conn = get_snowflake_connection()
         cursor = conn.cursor()
         
-        # Simplified query for performance
+        # Query with page views per visitor by traffic source
         query = f"""
-            WITH ctv_visits_with_source AS (
+            WITH visitor_first_referrer AS (
                 SELECT 
-                    p.WEB_IMPRESSION_ID,
-                    CASE 
-                        WHEN r.VALUE ILIKE '%doubleclick%' OR r.VALUE ILIKE '%googleadservices%' THEN 'Google Ads'
-                        WHEN r.VALUE ILIKE '%google%' THEN 'Google Organic'
-                        WHEN r.VALUE ILIKE '%fbapp%' OR r.VALUE ILIKE '%facebook%' OR r.VALUE ILIKE '%fb.com%' THEN 'Meta/Facebook'
-                        WHEN r.VALUE ILIKE '%instagram%' THEN 'Instagram'
-                        WHEN r.VALUE ILIKE '%youtube%' THEN 'YouTube'
-                        WHEN r.VALUE ILIKE '%tiktok%' THEN 'TikTok'
-                        WHEN r.VALUE ILIKE '%taboola%' THEN 'Taboola'
-                        WHEN r.VALUE ILIKE '%outbrain%' THEN 'Outbrain'
-                        WHEN r.VALUE ILIKE '%bing%' THEN 'Bing'
-                        WHEN r.VALUE ILIKE '%yahoo%' THEN 'Yahoo'
-                        WHEN r.VALUE ILIKE '%t.co%' OR r.VALUE ILIKE '%twitter%' THEN 'Twitter/X'
-                        WHEN r.VALUE IS NULL OR r.VALUE = '-' OR r.VALUE = '' THEN 'Direct'
-                        ELSE 'Other'
-                    END as traffic_source
+                    p.IMP_MAID,
+                    FIRST_VALUE(r.VALUE) OVER (PARTITION BY p.IMP_MAID ORDER BY p.IMP_DATE, p.WEB_IMPRESSION_ID) as first_referrer
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS p
                 LEFT JOIN QUORUMDB.SEGMENT_DATA.PARAMOUNT_WEB_IMPRESSION_DATA r
                     ON p.WEB_IMPRESSION_ID = r.UUID AND r.KEY = 'referrer'
@@ -1211,40 +1197,73 @@ def get_traffic_sources():
                   AND p.IS_SITE_VISIT = 'TRUE'
                   AND p.WEB_IMPRESSION_ID IS NOT NULL
             ),
+            visitor_source AS (
+                SELECT DISTINCT
+                    IMP_MAID,
+                    CASE 
+                        WHEN first_referrer ILIKE '%doubleclick%' OR first_referrer ILIKE '%googleadservices%' THEN 'Google Ads'
+                        WHEN first_referrer ILIKE '%google%' THEN 'Google Organic'
+                        WHEN first_referrer ILIKE '%fbapp%' OR first_referrer ILIKE '%facebook%' OR first_referrer ILIKE '%fb.com%' THEN 'Meta/Facebook'
+                        WHEN first_referrer ILIKE '%instagram%' THEN 'Instagram'
+                        WHEN first_referrer ILIKE '%youtube%' THEN 'YouTube'
+                        WHEN first_referrer ILIKE '%tiktok%' THEN 'TikTok'
+                        WHEN first_referrer ILIKE '%taboola%' THEN 'Taboola'
+                        WHEN first_referrer ILIKE '%outbrain%' THEN 'Outbrain'
+                        WHEN first_referrer ILIKE '%bing%' THEN 'Bing'
+                        WHEN first_referrer ILIKE '%yahoo%' THEN 'Yahoo'
+                        WHEN first_referrer ILIKE '%t.co%' OR first_referrer ILIKE '%twitter%' THEN 'Twitter/X'
+                        WHEN first_referrer IS NULL OR first_referrer = '-' OR first_referrer = '' THEN 'Direct'
+                        ELSE 'Other'
+                    END as traffic_source
+                FROM visitor_first_referrer
+            ),
+            visitor_page_views AS (
+                SELECT 
+                    IMP_MAID,
+                    COUNT(DISTINCT WEB_IMPRESSION_ID) as page_views
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+                WHERE QUORUM_ADVERTISER_ID = {int(advertiser_id)}
+                  AND IS_SITE_VISIT = 'TRUE'
+                  AND WEB_IMPRESSION_ID IS NOT NULL
+                GROUP BY IMP_MAID
+            ),
             ctv_impressions AS (
                 SELECT COUNT(*) as imp_count
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
                 WHERE QUORUM_ADVERTISER_ID = {int(advertiser_id)}
             ),
-            total_ctv_visits AS (
-                SELECT COUNT(*) as total FROM ctv_visits_with_source
-            ),
             source_metrics AS (
                 SELECT 
-                    traffic_source as source,
-                    COUNT(*) as visits
-                FROM ctv_visits_with_source
-                WHERE traffic_source != 'Other'
-                GROUP BY traffic_source
-                HAVING COUNT(*) >= {min_visits}
+                    vs.traffic_source as source,
+                    COUNT(DISTINCT vs.IMP_MAID) as visitors,
+                    SUM(vp.page_views) as total_page_views,
+                    ROUND(SUM(vp.page_views)::FLOAT / NULLIF(COUNT(DISTINCT vs.IMP_MAID), 0), 2) as avg_page_views
+                FROM visitor_source vs
+                JOIN visitor_page_views vp ON vs.IMP_MAID = vp.IMP_MAID
+                WHERE vs.traffic_source != 'Other'
+                GROUP BY vs.traffic_source
+                HAVING COUNT(DISTINCT vs.IMP_MAID) >= {min_visits}
+            ),
+            total_visitors AS (
+                SELECT SUM(visitors) as total FROM source_metrics
             )
             SELECT 
                 source,
                 0 as impressions,
-                visits,
-                0.0 as avg_page_views_per_visit,
-                ROUND(visits::FLOAT / NULLIF((SELECT total FROM total_ctv_visits), 0) * 100, 2) as pct_of_ctv_traffic
+                visitors,
+                avg_page_views,
+                ROUND(visitors::FLOAT / NULLIF((SELECT total FROM total_visitors), 0) * 100, 2) as pct_of_ctv_traffic
             FROM source_metrics
             UNION ALL
             SELECT 
                 'CTV View Through' as source,
                 (SELECT imp_count FROM ctv_impressions) as impressions,
-                (SELECT total FROM total_ctv_visits) as visits,
-                0.0 as avg_page_views_per_visit,
+                (SELECT total FROM total_visitors) as visitors,
+                (SELECT ROUND(SUM(total_page_views)::FLOAT / NULLIF(SUM(visitors), 0), 2) FROM source_metrics) as avg_page_views,
                 100.0 as pct_of_ctv_traffic
             ORDER BY 
                 CASE WHEN source = 'CTV View Through' THEN 0 ELSE 1 END,
-                visits DESC
+                visitors DESC
         """
         
         cursor.execute(query)
@@ -1257,9 +1276,6 @@ def get_traffic_sources():
             for k, v in d.items():
                 if hasattr(v, 'is_integer'):  # Decimal type
                     d[k] = float(v) if v else 0
-            # Rename pct_of_ctv_traffic to ctv_overlap_pct for frontend compatibility
-            if 'pct_of_ctv_traffic' in d:
-                d['ctv_overlap_pct'] = d.pop('pct_of_ctv_traffic')
             results.append(d)
         
         cursor.close()
