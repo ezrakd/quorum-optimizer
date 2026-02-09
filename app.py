@@ -1340,7 +1340,7 @@ def get_optimize():
             UNION ALL
             SELECT 'site', SITE, NULL, COUNT(*), {web_expr}, {store_expr}, {web_vr}, {store_vr}
             FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-            WHERE {adv_filter} AND {date_filter} GROUP BY SITE HAVING COUNT(*) >= 50
+            WHERE {adv_filter} AND {date_filter} GROUP BY SITE HAVING COUNT(*) >= 2000
 
             ORDER BY 1, 4 DESC
         """
