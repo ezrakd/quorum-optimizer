@@ -92,8 +92,8 @@ def get_date_range():
 def health_check():
     return jsonify({
         'status': 'healthy',
-        'version': '5.5-charts-v3',
-        'description': 'Retry logic for SSL errors + sidebar refresh on date change',
+        'version': '5.5-charts-v4',
+        'description': 'Top-15 advertiser chart optimization + retry + sidebar refresh',
         'endpoints': [
             '/api/v5/agencies',
             '/api/v5/advertisers',
@@ -1234,11 +1234,28 @@ def get_advertiser_timeseries():
         
         if agency_id == 1480:
             cursor.execute("""
-                SELECT DATE::DATE as DT, QUORUM_ADVERTISER_ID as ADVERTISER_ID,
-                       MAX(ADVERTISER_NAME) as ADVERTISER_NAME, SUM(IMPRESSIONS) as IMPRESSIONS
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_DASHBOARD_SUMMARY_STATS
-                WHERE DATE BETWEEN %(start_date)s AND %(end_date)s
-                GROUP BY DATE::DATE, QUORUM_ADVERTISER_ID HAVING SUM(IMPRESSIONS) > 0
+                WITH daily AS (
+                    SELECT DATE::DATE as DT, QUORUM_ADVERTISER_ID as AID,
+                           MAX(ADVERTISER_NAME) as ANAME, SUM(IMPRESSIONS) as IMPS
+                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_DASHBOARD_SUMMARY_STATS
+                    WHERE DATE BETWEEN %(start_date)s AND %(end_date)s
+                    GROUP BY DATE::DATE, QUORUM_ADVERTISER_ID HAVING SUM(IMPRESSIONS) > 0
+                ),
+                ranked AS (
+                    SELECT AID, SUM(IMPS) as TOTAL_IMPS
+                    FROM daily GROUP BY AID
+                    ORDER BY TOTAL_IMPS DESC
+                    LIMIT 15
+                )
+                SELECT d.DT, 
+                       CASE WHEN r.AID IS NOT NULL THEN d.AID ELSE -1 END as ADVERTISER_ID,
+                       CASE WHEN r.AID IS NOT NULL THEN d.ANAME ELSE 'Other' END as ADVERTISER_NAME,
+                       SUM(d.IMPS) as IMPRESSIONS
+                FROM daily d
+                LEFT JOIN ranked r ON d.AID = r.AID
+                GROUP BY d.DT, 
+                         CASE WHEN r.AID IS NOT NULL THEN d.AID ELSE -1 END,
+                         CASE WHEN r.AID IS NOT NULL THEN d.ANAME ELSE 'Other' END
             """, {'start_date': start_date, 'end_date': end_date})
         else:
             cursor.execute("""
