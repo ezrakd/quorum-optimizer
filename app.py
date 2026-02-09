@@ -81,8 +81,8 @@ def get_date_range():
 def health_check():
     return jsonify({
         'status': 'healthy',
-        'version': '5.5-charts',
-        'description': 'Added agency/advertiser timeseries charts + lift fix',
+        'version': '5.5-charts-v2',
+        'description': 'Weekly agency chart + optimized advertiser-timeseries + traffic sources',
         'endpoints': [
             '/api/v5/agencies',
             '/api/v5/advertisers',
