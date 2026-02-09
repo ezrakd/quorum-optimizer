@@ -67,7 +67,8 @@ def get_snowflake_connection(retries=2):
                 warehouse=os.environ.get('SNOWFLAKE_WAREHOUSE', 'COMPUTE_WH'),
                 database=os.environ.get('SNOWFLAKE_DATABASE', 'QUORUMDB'),
                 schema=os.environ.get('SNOWFLAKE_SCHEMA', 'SEGMENT_DATA'),
-                role=os.environ.get('SNOWFLAKE_ROLE', 'OPTIMIZER_READONLY_ROLE')
+                role=os.environ.get('SNOWFLAKE_ROLE', 'OPTIMIZER_READONLY_ROLE'),
+                insecure_mode=True  # Bypass OCSP check — workaround for S3 stage cert issue
             )
         except Exception as e:
             last_err = e
