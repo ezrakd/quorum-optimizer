@@ -1388,14 +1388,14 @@ def get_optimize_geo():
             FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS i
             JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING z ON i.ZIP_CODE = z.ZIP_CODE
             WHERE i.{adv_filter} AND i.{date_filter}
-            GROUP BY z.DMA_CODE HAVING COUNT(*) >= 10000
+            GROUP BY z.DMA_CODE HAVING COUNT(*) >= 2000
 
             UNION ALL
             SELECT 'zip', i.ZIP_CODE, MAX(z.DMA_NAME), COUNT(*), {web_expr}, {store_expr}, {web_vr}, {store_vr}
             FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS i
             JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING z ON i.ZIP_CODE = z.ZIP_CODE
             WHERE i.{adv_filter} AND i.{date_filter}
-            GROUP BY i.ZIP_CODE HAVING COUNT(*) >= 1000
+            GROUP BY i.ZIP_CODE HAVING COUNT(*) >= 200
 
             ORDER BY 1, 4 DESC
         """
