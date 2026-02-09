@@ -16,6 +16,7 @@ from flask_cors import CORS
 import snowflake.connector
 import os
 from datetime import datetime, timedelta
+import re
 
 app = Flask(__name__)
 CORS(app)
@@ -236,7 +237,6 @@ def get_advertisers():
         results = [dict(zip(columns, row)) for row in cursor.fetchall()]
         
         if agency_id == 1480:
-            import re
             for r in results:
                 if r.get('ADVERTISER_NAME'):
                     r['ADVERTISER_NAME'] = re.sub(r'^[0-9A-Za-z]+ - ', '', r['ADVERTISER_NAME'])
@@ -965,84 +965,144 @@ def get_lift_analysis():
 
 @app.route('/api/v5/traffic-sources', methods=['GET'])
 def get_traffic_sources():
+    """Compare engagement (pageviews/visit) between click-based traffic sources
+    and CTV view-through visitors. Shows overlap % and CTV-exposed vs non-exposed engagement."""
     advertiser_id = request.args.get('advertiser_id')
-    min_visits = int(request.args.get('min_visits', '100'))
     
     if not advertiser_id:
         return jsonify({'success': False, 'error': 'advertiser_id parameter required'}), 400
     
     try:
+        start_date, end_date = get_date_range()
         conn = get_snowflake_connection()
         cursor = conn.cursor()
         
-        query = f"""
-            WITH visitor_first_referrer AS (
-                SELECT p.IMP_MAID,
-                    FIRST_VALUE(r.VALUE) OVER (PARTITION BY p.IMP_MAID ORDER BY p.IMP_DATE, p.WEB_IMPRESSION_ID) as first_referrer
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS p
-                LEFT JOIN QUORUMDB.SEGMENT_DATA.PARAMOUNT_WEB_IMPRESSION_DATA r
-                    ON p.WEB_IMPRESSION_ID = r.UUID AND r.KEY = 'referrer'
-                WHERE p.QUORUM_ADVERTISER_ID = {int(advertiser_id)}
-                  AND p.IS_SITE_VISIT = 'TRUE' AND p.WEB_IMPRESSION_ID IS NOT NULL
+        query = """
+            WITH 
+            -- All web visitor UUIDs for this advertiser in date range
+            visitor_uuids AS (
+                SELECT WEB_IMPRESSION_ID AS UUID,
+                       LOWER(REPLACE(MAID, '-', '')) AS clean_maid,
+                       SITE_VISIT_TIMESTAMP::DATE AS visit_date
+                FROM QUORUMDB.SEGMENT_DATA.WEB_VISITORS_TO_LOG
+                WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                  AND IS_SITE_VISIT = 'TRUE'
+                  AND SITE_VISIT_TIMESTAMP BETWEEN %(start_date)s AND %(end_date)s
+                  AND MAID IS NOT NULL AND MAID != ''
             ),
-            visitor_source AS (
-                SELECT DISTINCT IMP_MAID,
+            
+            -- Get referrer per UUID
+            uuid_referrer AS (
+                SELECT p.UUID,
+                       MAX(CASE WHEN p.KEY = 'referrer' THEN p.VALUE END) AS referrer
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_WEB_IMPRESSION_DATA p
+                WHERE p.UUID IN (SELECT UUID FROM visitor_uuids)
+                  AND p.KEY = 'referrer'
+                GROUP BY p.UUID
+            ),
+            
+            -- Classify each UUID's traffic source
+            uuid_classified AS (
+                SELECT vu.UUID, vu.clean_maid, vu.visit_date,
                     CASE 
-                        WHEN first_referrer ILIKE '%doubleclick%' OR first_referrer ILIKE '%googleadservices%' THEN 'Google Ads'
-                        WHEN first_referrer ILIKE '%google%' THEN 'Google Organic'
-                        WHEN first_referrer ILIKE '%fbapp%' OR first_referrer ILIKE '%facebook%' OR first_referrer ILIKE '%fb.com%' THEN 'Meta/Facebook'
-                        WHEN first_referrer ILIKE '%instagram%' THEN 'Instagram'
-                        WHEN first_referrer ILIKE '%youtube%' THEN 'YouTube'
-                        WHEN first_referrer ILIKE '%tiktok%' THEN 'TikTok'
-                        WHEN first_referrer ILIKE '%taboola%' THEN 'Taboola'
-                        WHEN first_referrer ILIKE '%outbrain%' THEN 'Outbrain'
-                        WHEN first_referrer ILIKE '%bing%' THEN 'Bing'
-                        WHEN first_referrer ILIKE '%yahoo%' THEN 'Yahoo'
-                        WHEN first_referrer ILIKE '%t.co%' OR first_referrer ILIKE '%twitter%' THEN 'Twitter/X'
-                        WHEN first_referrer IS NULL OR first_referrer = '-' OR first_referrer = '' THEN 'Direct'
-                        ELSE 'Other'
-                    END as traffic_source
-                FROM visitor_first_referrer
+                        WHEN r.referrer ILIKE '%%doubleclick%%' OR r.referrer ILIKE '%%syndicatedsearch%%' OR r.referrer ILIKE '%%gclid%%' OR r.referrer ILIKE '%%googleadservices%%' THEN 'Google Ads'
+                        WHEN r.referrer ILIKE '%%google%%' THEN 'Google Organic'
+                        WHEN r.referrer ILIKE '%%facebook%%' OR r.referrer ILIKE '%%fbapp%%' OR r.referrer ILIKE '%%fb.com%%' OR r.referrer ILIKE '%%fbclid%%' THEN 'Meta/Facebook'
+                        WHEN r.referrer ILIKE '%%youtube%%' THEN 'YouTube'
+                        WHEN r.referrer ILIKE '%%instagram%%' THEN 'Instagram'
+                        WHEN r.referrer ILIKE '%%taboola%%' THEN 'Taboola'
+                        WHEN r.referrer ILIKE '%%outbrain%%' THEN 'Outbrain'
+                        WHEN r.referrer ILIKE '%%tiktok%%' THEN 'TikTok'
+                        WHEN r.referrer ILIKE '%%bing%%' THEN 'Bing'
+                        WHEN r.referrer ILIKE '%%yahoo%%' THEN 'Yahoo'
+                        WHEN r.referrer ILIKE '%%t.co%%' OR r.referrer ILIKE '%%twitter%%' THEN 'Twitter/X'
+                        WHEN r.referrer ILIKE '%%linkedin%%' THEN 'LinkedIn'
+                        WHEN r.referrer ILIKE '%%pinterest%%' THEN 'Pinterest'
+                        WHEN r.referrer ILIKE '%%snapchat%%' THEN 'Snapchat'
+                        WHEN r.referrer ILIKE '%%reddit%%' THEN 'Reddit'
+                        WHEN r.referrer ILIKE '%%_ef_transaction%%' THEN 'Affiliate'
+                        WHEN r.referrer IS NULL OR r.referrer = '-' OR r.referrer = '' THEN 'Direct'
+                        WHEN r.referrer ILIKE '%%localhost%%' OR r.referrer ILIKE '%%127.0.0.1%%' THEN 'SKIP'
+                        ELSE 'Other Referral'
+                    END AS traffic_source
+                FROM visitor_uuids vu
+                LEFT JOIN uuid_referrer r ON vu.UUID = r.UUID
             ),
-            visitor_page_views AS (
-                SELECT IMP_MAID, COUNT(DISTINCT WEB_IMPRESSION_ID) as page_views
+            
+            -- Aggregate at MAID-day level (pageviews = distinct UUIDs per MAID per day)
+            maid_day AS (
+                SELECT clean_maid, visit_date,
+                       COUNT(*) AS pageviews,
+                       MODE(traffic_source) AS dominant_source
+                FROM uuid_classified
+                WHERE traffic_source != 'SKIP'
+                GROUP BY 1, 2
+            ),
+            
+            -- CTV-exposed MAIDs for this advertiser
+            ctv_maids AS (
+                SELECT DISTINCT LOWER(REPLACE(IMP_MAID, '-', '')) AS clean_maid
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE QUORUM_ADVERTISER_ID = {int(advertiser_id)}
-                  AND IS_SITE_VISIT = 'TRUE' AND WEB_IMPRESSION_ID IS NOT NULL
-                GROUP BY IMP_MAID
+                WHERE QUORUM_ADVERTISER_ID = %(advertiser_id_int)s
             ),
-            ctv_impressions AS (
-                SELECT COUNT(*) as imp_count
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE QUORUM_ADVERTISER_ID = {int(advertiser_id)}
-            ),
-            source_metrics AS (
-                SELECT vs.traffic_source as source, COUNT(DISTINCT vs.IMP_MAID) as visitors,
-                    SUM(vp.page_views) as total_page_views,
-                    ROUND(SUM(vp.page_views)::FLOAT / NULLIF(COUNT(DISTINCT vs.IMP_MAID), 0), 2) as avg_page_views
-                FROM visitor_source vs JOIN visitor_page_views vp ON vs.IMP_MAID = vp.IMP_MAID
-                WHERE vs.traffic_source != 'Other'
-                GROUP BY vs.traffic_source HAVING COUNT(DISTINCT vs.IMP_MAID) >= {min_visits}
-            ),
-            total_visitors AS (SELECT SUM(visitors) as total FROM source_metrics)
-            SELECT source, 0 as impressions, visitors, avg_page_views,
-                ROUND(visitors::FLOAT / NULLIF((SELECT total FROM total_visitors), 0) * 100, 2) as pct_of_ctv_traffic
-            FROM source_metrics
+            
+            -- Join CTV flag
+            classified AS (
+                SELECT md.dominant_source AS traffic_source,
+                       md.pageviews,
+                       md.clean_maid,
+                       CASE WHEN cm.clean_maid IS NOT NULL THEN 1 ELSE 0 END AS is_ctv
+                FROM maid_day md
+                LEFT JOIN ctv_maids cm ON md.clean_maid = cm.clean_maid
+            )
+            
+            -- Click-based sources with CTV split engagement
+            SELECT traffic_source, 'click' AS SOURCE_TYPE,
+                COUNT(*) AS VISITOR_DAYS,
+                COUNT(DISTINCT clean_maid) AS UNIQUE_VISITORS,
+                ROUND(AVG(pageviews), 2) AS AVG_PAGEVIEWS,
+                APPROX_PERCENTILE(pageviews, 0.50) AS P50_PAGES,
+                APPROX_PERCENTILE(pageviews, 0.90) AS P90_PAGES,
+                SUM(is_ctv) AS CTV_OVERLAP,
+                ROUND(SUM(is_ctv)::FLOAT / NULLIF(COUNT(*), 0) * 100, 1) AS CTV_OVERLAP_PCT,
+                ROUND(AVG(CASE WHEN is_ctv = 1 THEN pageviews END), 2) AS AVG_PAGES_CTV,
+                ROUND(AVG(CASE WHEN is_ctv = 0 THEN pageviews END), 2) AS AVG_PAGES_NON_CTV
+            FROM classified
+            GROUP BY 1 HAVING COUNT(*) >= 10
+            
             UNION ALL
-            SELECT 'CTV View Through' as source, (SELECT imp_count FROM ctv_impressions) as impressions,
-                (SELECT total FROM total_visitors) as visitors,
-                (SELECT ROUND(SUM(total_page_views)::FLOAT / NULLIF(SUM(visitors), 0), 2) FROM source_metrics) as avg_page_views,
-                100.0 as pct_of_ctv_traffic
-            ORDER BY CASE WHEN source = 'CTV View Through' THEN 0 ELSE 1 END, visitors DESC
+            
+            -- CTV View-Through row
+            SELECT 'Paramount CTV' AS traffic_source, 'ctv' AS SOURCE_TYPE,
+                COUNT(*) AS VISITOR_DAYS,
+                COUNT(DISTINCT clean_maid) AS UNIQUE_VISITORS,
+                ROUND(AVG(pageviews), 2) AS AVG_PAGEVIEWS,
+                APPROX_PERCENTILE(pageviews, 0.50) AS P50_PAGES,
+                APPROX_PERCENTILE(pageviews, 0.90) AS P90_PAGES,
+                0 AS CTV_OVERLAP, 0 AS CTV_OVERLAP_PCT,
+                NULL AS AVG_PAGES_CTV, NULL AS AVG_PAGES_NON_CTV
+            FROM classified WHERE is_ctv = 1
+            
+            ORDER BY VISITOR_DAYS DESC
         """
         
-        cursor.execute(query)
-        columns = [desc[0].lower() for desc in cursor.description]
+        cursor.execute(query, {
+            'advertiser_id': str(advertiser_id),
+            'advertiser_id_int': int(advertiser_id),
+            'start_date': start_date,
+            'end_date': end_date
+        })
+        
+        columns = [desc[0] for desc in cursor.description]
         results = []
         for row in cursor.fetchall():
             d = dict(zip(columns, row))
+            # Convert Decimal types to float/int for JSON serialization
             for k, v in d.items():
-                if hasattr(v, 'is_integer'): d[k] = float(v) if v else 0
+                if hasattr(v, 'is_integer'):
+                    d[k] = int(v) if v == int(v) else float(v)
+                elif v is None:
+                    d[k] = None
             results.append(d)
         
         cursor.close()
@@ -1145,7 +1205,6 @@ def get_advertiser_timeseries():
         cursor.close()
         conn.close()
         
-        import re
         data = {}
         advertisers = {}
         for dt, adv_id, adv_name, imps in rows:
