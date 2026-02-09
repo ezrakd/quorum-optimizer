@@ -1292,7 +1292,8 @@ def get_advertiser_timeseries():
 @app.route('/api/v5/optimize', methods=['GET'])
 def get_optimize():
     """Pull performance data across all dimensions for optimization recommendations.
-    Baseline window: 10 days starting 15 days back (to account for location visit lag)."""
+    Baseline window: 30 days ending 5 days back (attribution lag offset).
+    Split into 2 queries for speed: non-geo (no JOIN) + geo (with ZIP_DMA JOIN)."""
     advertiser_id = request.args.get('advertiser_id')
     
     if not advertiser_id:
@@ -1302,76 +1303,83 @@ def get_optimize():
         conn = get_snowflake_connection()
         cursor = conn.cursor()
         
-        query = """
-            WITH base AS (
-                SELECT i.*, z.DMA_NAME, z.DMA_CODE,
-                       DAYOFWEEK(i.IMP_DATE) as DOW,
-                       CASE WHEN i.IS_SITE_VISIT = 'TRUE' THEN 1 ELSE 0 END as is_web,
-                       CASE WHEN i.IS_STORE_VISIT = 'TRUE' THEN 1 ELSE 0 END as is_store
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS i
-                LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING z ON i.ZIP_CODE = z.ZIP_CODE
-                WHERE i.QUORUM_ADVERTISER_ID = %(adv_id)s
-                  AND i.IMP_DATE BETWEEN DATEADD(day, -15, CURRENT_DATE) AND DATEADD(day, -5, CURRENT_DATE)
-            )
-            -- Overall baseline
+        date_filter = "IMP_DATE BETWEEN DATEADD(day, -35, CURRENT_DATE) AND DATEADD(day, -5, CURRENT_DATE)"
+        adv_filter = "QUORUM_ADVERTISER_ID = %(adv_id)s"
+        web_expr = "SUM(CASE WHEN IS_SITE_VISIT = 'TRUE' THEN 1 ELSE 0 END)"
+        store_expr = "SUM(CASE WHEN IS_STORE_VISIT = 'TRUE' THEN 1 ELSE 0 END)"
+        web_vr = f"ROUND({web_expr}*100.0/NULLIF(COUNT(*),0), 4)"
+        store_vr = f"ROUND({store_expr}*100.0/NULLIF(COUNT(*),0), 4)"
+        
+        # Query 1: Non-geo dimensions (no JOIN needed — fast)
+        q1 = f"""
             SELECT 'baseline' as DIM_TYPE, 'overall' as DIM_KEY, NULL as DIM_NAME,
-                COUNT(*) as IMPS, SUM(is_web) as WEB_VISITS, SUM(is_store) as STORE_VISITS,
-                ROUND(SUM(is_web)*100.0/NULLIF(COUNT(*),0), 4) as WEB_VR,
-                ROUND(SUM(is_store)*100.0/NULLIF(COUNT(*),0), 4) as STORE_VR
-            FROM base
+                COUNT(*) as IMPS, {web_expr} as WEB_VISITS, {store_expr} as STORE_VISITS,
+                {web_vr} as WEB_VR, {store_vr} as STORE_VR
+            FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+            WHERE {adv_filter} AND {date_filter}
 
             UNION ALL
-            SELECT 'lineitem', LINEITEM_ID, MAX(LINEITEM_NAME),
-                COUNT(*), SUM(is_web), SUM(is_store),
-                ROUND(SUM(is_web)*100.0/NULLIF(COUNT(*),0), 4),
-                ROUND(SUM(is_store)*100.0/NULLIF(COUNT(*),0), 4)
-            FROM base GROUP BY LINEITEM_ID
+            SELECT 'campaign', IO_ID, MAX(IO_NAME), COUNT(*), {web_expr}, {store_expr}, {web_vr}, {store_vr}
+            FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+            WHERE {adv_filter} AND {date_filter} GROUP BY IO_ID
 
             UNION ALL
-            SELECT 'creative', CREATIVE_NAME, NULL,
-                COUNT(*), SUM(is_web), SUM(is_store),
-                ROUND(SUM(is_web)*100.0/NULLIF(COUNT(*),0), 4),
-                ROUND(SUM(is_store)*100.0/NULLIF(COUNT(*),0), 4)
-            FROM base GROUP BY CREATIVE_NAME
+            SELECT 'lineitem', LINEITEM_ID, MAX(LINEITEM_NAME), COUNT(*), {web_expr}, {store_expr}, {web_vr}, {store_vr}
+            FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+            WHERE {adv_filter} AND {date_filter} GROUP BY LINEITEM_ID
 
             UNION ALL
-            SELECT 'dow', DOW::VARCHAR, NULL,
-                COUNT(*), SUM(is_web), SUM(is_store),
-                ROUND(SUM(is_web)*100.0/NULLIF(COUNT(*),0), 4),
-                ROUND(SUM(is_store)*100.0/NULLIF(COUNT(*),0), 4)
-            FROM base GROUP BY DOW
+            SELECT 'creative', CREATIVE_NAME, NULL, COUNT(*), {web_expr}, {store_expr}, {web_vr}, {store_vr}
+            FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+            WHERE {adv_filter} AND {date_filter} GROUP BY CREATIVE_NAME
 
             UNION ALL
-            SELECT 'dma', DMA_CODE, MAX(DMA_NAME),
-                COUNT(*), SUM(is_web), SUM(is_store),
-                ROUND(SUM(is_web)*100.0/NULLIF(COUNT(*),0), 4),
-                ROUND(SUM(is_store)*100.0/NULLIF(COUNT(*),0), 4)
-            FROM base WHERE DMA_NAME IS NOT NULL GROUP BY DMA_CODE HAVING COUNT(*) >= 50
+            SELECT 'dow', DAYOFWEEK(IMP_DATE)::VARCHAR, NULL, COUNT(*), {web_expr}, {store_expr}, {web_vr}, {store_vr}
+            FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+            WHERE {adv_filter} AND {date_filter} GROUP BY DAYOFWEEK(IMP_DATE)
 
             UNION ALL
-            SELECT 'site', SITE, NULL,
-                COUNT(*), SUM(is_web), SUM(is_store),
-                ROUND(SUM(is_web)*100.0/NULLIF(COUNT(*),0), 4),
-                ROUND(SUM(is_store)*100.0/NULLIF(COUNT(*),0), 4)
-            FROM base GROUP BY SITE HAVING COUNT(*) >= 50
-
-            UNION ALL
-            -- Top 5 ZIPs per active DMA (for geo drill-down)
-            SELECT 'zip_dma', ZIP_CODE, MAX(DMA_NAME),
-                COUNT(*), SUM(is_web), SUM(is_store),
-                ROUND(SUM(is_web)*100.0/NULLIF(COUNT(*),0), 4),
-                ROUND(SUM(is_store)*100.0/NULLIF(COUNT(*),0), 4)
-            FROM base WHERE DMA_NAME IS NOT NULL GROUP BY ZIP_CODE HAVING COUNT(*) >= 20
+            SELECT 'site', SITE, NULL, COUNT(*), {web_expr}, {store_expr}, {web_vr}, {store_vr}
+            FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+            WHERE {adv_filter} AND {date_filter} GROUP BY SITE HAVING COUNT(*) >= 50
 
             ORDER BY 1, 4 DESC
         """
         
-        cursor.execute(query, {'adv_id': int(advertiser_id)})
-        
+        cursor.execute(q1, {'adv_id': int(advertiser_id)})
         columns = [desc[0] for desc in cursor.description]
         results = []
         for row in cursor.fetchall():
             d = dict(zip(columns, row))
+            for k, v in d.items():
+                if hasattr(v, 'is_integer'):
+                    d[k] = float(v) if v else 0
+            results.append(d)
+        
+        # Query 2: Geo dimensions (needs ZIP_DMA_MAPPING JOIN)
+        q2 = f"""
+            SELECT 'dma' as DIM_TYPE, z.DMA_CODE as DIM_KEY, MAX(z.DMA_NAME) as DIM_NAME,
+                COUNT(*) as IMPS, {web_expr} as WEB_VISITS, {store_expr} as STORE_VISITS,
+                {web_vr} as WEB_VR, {store_vr} as STORE_VR
+            FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS i
+            JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING z ON i.ZIP_CODE = z.ZIP_CODE
+            WHERE i.{adv_filter} AND i.{date_filter}
+            GROUP BY z.DMA_CODE HAVING COUNT(*) >= 50
+
+            UNION ALL
+            SELECT 'zip', i.ZIP_CODE, MAX(z.DMA_NAME), COUNT(*), {web_expr}, {store_expr}, {web_vr}, {store_vr}
+            FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS i
+            JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING z ON i.ZIP_CODE = z.ZIP_CODE
+            WHERE i.{adv_filter} AND i.{date_filter}
+            GROUP BY i.ZIP_CODE HAVING COUNT(*) >= 20
+
+            ORDER BY 1, 4 DESC
+        """
+        
+        cursor.execute(q2, {'adv_id': int(advertiser_id)})
+        columns2 = [desc[0] for desc in cursor.description]
+        for row in cursor.fetchall():
+            d = dict(zip(columns2, row))
             for k, v in d.items():
                 if hasattr(v, 'is_integer'):
                     d[k] = float(v) if v else 0
