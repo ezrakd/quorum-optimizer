@@ -92,8 +92,8 @@ def get_date_range():
 def health_check():
     return jsonify({
         'status': 'healthy',
-        'version': '5.5-charts-v5',
-        'description': 'Traffic sources JOIN optimization + top-15 advertiser chart',
+        'version': '5.5-charts-v6',
+        'description': 'Traffic sources 50K sample for Railway timeout compat',
         'endpoints': [
             '/api/v5/agencies',
             '/api/v5/advertisers',
@@ -1000,7 +1000,7 @@ def get_traffic_sources():
                   AND IS_SITE_VISIT = 'TRUE'
                   AND SITE_VISIT_TIMESTAMP BETWEEN %(start_date)s AND %(end_date)s
                   AND MAID IS NOT NULL AND MAID != ''
-                LIMIT 250000
+                LIMIT 50000
             ),
             
             -- Classify each UUID's traffic source via direct JOIN (faster than IN subquery)
