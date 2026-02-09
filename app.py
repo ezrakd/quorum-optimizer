@@ -55,16 +55,27 @@ def get_agency_class(agency_id):
     config = AGENCY_CONFIG.get(int(agency_id))
     return config['class'] if config else 'B'
 
-def get_snowflake_connection():
-    return snowflake.connector.connect(
-        user=os.environ.get('SNOWFLAKE_USER'),
-        password=os.environ.get('SNOWFLAKE_PASSWORD'),
-        account=os.environ.get('SNOWFLAKE_ACCOUNT'),
-        warehouse=os.environ.get('SNOWFLAKE_WAREHOUSE', 'COMPUTE_WH'),
-        database=os.environ.get('SNOWFLAKE_DATABASE', 'QUORUMDB'),
-        schema=os.environ.get('SNOWFLAKE_SCHEMA', 'SEGMENT_DATA'),
-        role=os.environ.get('SNOWFLAKE_ROLE', 'OPTIMIZER_READONLY_ROLE')
-    )
+def get_snowflake_connection(retries=2):
+    """Get Snowflake connection with retry for transient SSL/cert errors."""
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            return snowflake.connector.connect(
+                user=os.environ.get('SNOWFLAKE_USER'),
+                password=os.environ.get('SNOWFLAKE_PASSWORD'),
+                account=os.environ.get('SNOWFLAKE_ACCOUNT'),
+                warehouse=os.environ.get('SNOWFLAKE_WAREHOUSE', 'COMPUTE_WH'),
+                database=os.environ.get('SNOWFLAKE_DATABASE', 'QUORUMDB'),
+                schema=os.environ.get('SNOWFLAKE_SCHEMA', 'SEGMENT_DATA'),
+                role=os.environ.get('SNOWFLAKE_ROLE', 'OPTIMIZER_READONLY_ROLE')
+            )
+        except Exception as e:
+            last_err = e
+            if attempt < retries and ('certificate' in str(e).lower() or '254007' in str(e)):
+                import time
+                time.sleep(1)
+                continue
+            raise
 
 def get_date_range():
     """Get date range from request params with defaults"""
@@ -81,8 +92,8 @@ def get_date_range():
 def health_check():
     return jsonify({
         'status': 'healthy',
-        'version': '5.5-charts-v2',
-        'description': 'Weekly agency chart + optimized advertiser-timeseries + traffic sources',
+        'version': '5.5-charts-v3',
+        'description': 'Retry logic for SSL errors + sidebar refresh on date change',
         'endpoints': [
             '/api/v5/agencies',
             '/api/v5/advertisers',
