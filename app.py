@@ -1292,9 +1292,8 @@ def get_advertiser_timeseries():
 
 @app.route('/api/v5/optimize', methods=['GET'])
 def get_optimize():
-    """Pull performance data across all dimensions for optimization recommendations.
-    Baseline window: 30 days ending 5 days back (attribution lag offset).
-    Split into 2 queries for speed: non-geo (no JOIN) + geo (with ZIP_DMA JOIN)."""
+    """Pull non-geo performance data for optimization (no JOIN - fast).
+    Baseline window: 30 days ending 5 days back."""
     advertiser_id = request.args.get('advertiser_id')
     
     if not advertiser_id:
@@ -1311,7 +1310,6 @@ def get_optimize():
         web_vr = f"ROUND({web_expr}*100.0/NULLIF(COUNT(*),0), 4)"
         store_vr = f"ROUND({store_expr}*100.0/NULLIF(COUNT(*),0), 4)"
         
-        # Query 1: Non-geo dimensions (no JOIN needed — fast)
         q1 = f"""
             SELECT 'baseline' as DIM_TYPE, 'overall' as DIM_KEY, NULL as DIM_NAME,
                 COUNT(*) as IMPS, {web_expr} as WEB_VISITS, {store_expr} as STORE_VISITS,
@@ -1357,7 +1355,32 @@ def get_optimize():
                     d[k] = float(v) if v else 0
             results.append(d)
         
-        # Query 2: Geo dimensions (needs ZIP_DMA_MAPPING JOIN)
+        cursor.close()
+        conn.close()
+        return jsonify({'success': True, 'data': results})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/v5/optimize-geo', methods=['GET'])
+def get_optimize_geo():
+    """Pull geo dimensions (DMA + ZIP) separately — requires JOIN so slower."""
+    advertiser_id = request.args.get('advertiser_id')
+    
+    if not advertiser_id:
+        return jsonify({'success': False, 'error': 'advertiser_id parameter required'}), 400
+    
+    try:
+        conn = get_snowflake_connection()
+        cursor = conn.cursor()
+        
+        date_filter = "IMP_DATE BETWEEN DATEADD(day, -35, CURRENT_DATE) AND DATEADD(day, -5, CURRENT_DATE)"
+        adv_filter = "QUORUM_ADVERTISER_ID = %(adv_id)s"
+        web_expr = "SUM(CASE WHEN i.IS_SITE_VISIT = 'TRUE' THEN 1 ELSE 0 END)"
+        store_expr = "SUM(CASE WHEN i.IS_STORE_VISIT = 'TRUE' THEN 1 ELSE 0 END)"
+        web_vr = f"ROUND({web_expr}*100.0/NULLIF(COUNT(*),0), 4)"
+        store_vr = f"ROUND({store_expr}*100.0/NULLIF(COUNT(*),0), 4)"
+        
         q2 = f"""
             SELECT 'dma' as DIM_TYPE, z.DMA_CODE as DIM_KEY, MAX(z.DMA_NAME) as DIM_NAME,
                 COUNT(*) as IMPS, {web_expr} as WEB_VISITS, {store_expr} as STORE_VISITS,
@@ -1365,22 +1388,23 @@ def get_optimize():
             FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS i
             JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING z ON i.ZIP_CODE = z.ZIP_CODE
             WHERE i.{adv_filter} AND i.{date_filter}
-            GROUP BY z.DMA_CODE HAVING COUNT(*) >= 100
+            GROUP BY z.DMA_CODE HAVING COUNT(*) >= 10000
 
             UNION ALL
             SELECT 'zip', i.ZIP_CODE, MAX(z.DMA_NAME), COUNT(*), {web_expr}, {store_expr}, {web_vr}, {store_vr}
             FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS i
             JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING z ON i.ZIP_CODE = z.ZIP_CODE
             WHERE i.{adv_filter} AND i.{date_filter}
-            GROUP BY i.ZIP_CODE HAVING COUNT(*) >= 500
+            GROUP BY i.ZIP_CODE HAVING COUNT(*) >= 1000
 
             ORDER BY 1, 4 DESC
         """
         
         cursor.execute(q2, {'adv_id': int(advertiser_id)})
-        columns2 = [desc[0] for desc in cursor.description]
+        columns = [desc[0] for desc in cursor.description]
+        results = []
         for row in cursor.fetchall():
-            d = dict(zip(columns2, row))
+            d = dict(zip(columns, row))
             for k, v in d.items():
                 if hasattr(v, 'is_integer'):
                     d[k] = float(v) if v else 0
