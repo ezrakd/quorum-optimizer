@@ -92,8 +92,8 @@ def get_date_range():
 def health_check():
     return jsonify({
         'status': 'healthy',
-        'version': '5.5-charts-v4',
-        'description': 'Top-15 advertiser chart optimization + retry + sidebar refresh',
+        'version': '5.5-charts-v5',
+        'description': 'Traffic sources JOIN optimization + top-15 advertiser chart',
         'endpoints': [
             '/api/v5/agencies',
             '/api/v5/advertisers',
@@ -1000,45 +1000,36 @@ def get_traffic_sources():
                   AND IS_SITE_VISIT = 'TRUE'
                   AND SITE_VISIT_TIMESTAMP BETWEEN %(start_date)s AND %(end_date)s
                   AND MAID IS NOT NULL AND MAID != ''
-                LIMIT 500000
+                LIMIT 250000
             ),
             
-            -- Get referrer per UUID
-            uuid_referrer AS (
-                SELECT p.UUID,
-                       MAX(CASE WHEN p.KEY = 'referrer' THEN p.VALUE END) AS referrer
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_WEB_IMPRESSION_DATA p
-                WHERE p.UUID IN (SELECT UUID FROM visitor_uuids)
-                  AND p.KEY = 'referrer'
-                GROUP BY p.UUID
-            ),
-            
-            -- Classify each UUID's traffic source
+            -- Classify each UUID's traffic source via direct JOIN (faster than IN subquery)
             uuid_classified AS (
                 SELECT vu.UUID, vu.clean_maid, vu.visit_date,
                     CASE 
-                        WHEN r.referrer ILIKE '%%doubleclick%%' OR r.referrer ILIKE '%%syndicatedsearch%%' OR r.referrer ILIKE '%%gclid%%' OR r.referrer ILIKE '%%googleadservices%%' THEN 'Google Ads'
-                        WHEN r.referrer ILIKE '%%google%%' THEN 'Google Organic'
-                        WHEN r.referrer ILIKE '%%facebook%%' OR r.referrer ILIKE '%%fbapp%%' OR r.referrer ILIKE '%%fb.com%%' OR r.referrer ILIKE '%%fbclid%%' THEN 'Meta/Facebook'
-                        WHEN r.referrer ILIKE '%%youtube%%' THEN 'YouTube'
-                        WHEN r.referrer ILIKE '%%instagram%%' THEN 'Instagram'
-                        WHEN r.referrer ILIKE '%%taboola%%' THEN 'Taboola'
-                        WHEN r.referrer ILIKE '%%outbrain%%' THEN 'Outbrain'
-                        WHEN r.referrer ILIKE '%%tiktok%%' THEN 'TikTok'
-                        WHEN r.referrer ILIKE '%%bing%%' THEN 'Bing'
-                        WHEN r.referrer ILIKE '%%yahoo%%' THEN 'Yahoo'
-                        WHEN r.referrer ILIKE '%%t.co%%' OR r.referrer ILIKE '%%twitter%%' THEN 'Twitter/X'
-                        WHEN r.referrer ILIKE '%%linkedin%%' THEN 'LinkedIn'
-                        WHEN r.referrer ILIKE '%%pinterest%%' THEN 'Pinterest'
-                        WHEN r.referrer ILIKE '%%snapchat%%' THEN 'Snapchat'
-                        WHEN r.referrer ILIKE '%%reddit%%' THEN 'Reddit'
-                        WHEN r.referrer ILIKE '%%_ef_transaction%%' THEN 'Affiliate'
-                        WHEN r.referrer IS NULL OR r.referrer = '-' OR r.referrer = '' THEN 'Direct'
-                        WHEN r.referrer ILIKE '%%localhost%%' OR r.referrer ILIKE '%%127.0.0.1%%' THEN 'SKIP'
+                        WHEN p.VALUE ILIKE '%%doubleclick%%' OR p.VALUE ILIKE '%%syndicatedsearch%%' OR p.VALUE ILIKE '%%gclid%%' OR p.VALUE ILIKE '%%googleadservices%%' THEN 'Google Ads'
+                        WHEN p.VALUE ILIKE '%%google%%' THEN 'Google Organic'
+                        WHEN p.VALUE ILIKE '%%facebook%%' OR p.VALUE ILIKE '%%fbapp%%' OR p.VALUE ILIKE '%%fb.com%%' OR p.VALUE ILIKE '%%fbclid%%' THEN 'Meta/Facebook'
+                        WHEN p.VALUE ILIKE '%%youtube%%' THEN 'YouTube'
+                        WHEN p.VALUE ILIKE '%%instagram%%' THEN 'Instagram'
+                        WHEN p.VALUE ILIKE '%%taboola%%' THEN 'Taboola'
+                        WHEN p.VALUE ILIKE '%%outbrain%%' THEN 'Outbrain'
+                        WHEN p.VALUE ILIKE '%%tiktok%%' THEN 'TikTok'
+                        WHEN p.VALUE ILIKE '%%bing%%' THEN 'Bing'
+                        WHEN p.VALUE ILIKE '%%yahoo%%' THEN 'Yahoo'
+                        WHEN p.VALUE ILIKE '%%t.co%%' OR p.VALUE ILIKE '%%twitter%%' THEN 'Twitter/X'
+                        WHEN p.VALUE ILIKE '%%linkedin%%' THEN 'LinkedIn'
+                        WHEN p.VALUE ILIKE '%%pinterest%%' THEN 'Pinterest'
+                        WHEN p.VALUE ILIKE '%%snapchat%%' THEN 'Snapchat'
+                        WHEN p.VALUE ILIKE '%%reddit%%' THEN 'Reddit'
+                        WHEN p.VALUE ILIKE '%%_ef_transaction%%' THEN 'Affiliate'
+                        WHEN p.VALUE IS NULL OR p.VALUE = '-' OR p.VALUE = '' THEN 'Direct'
+                        WHEN p.VALUE ILIKE '%%localhost%%' OR p.VALUE ILIKE '%%127.0.0.1%%' THEN 'SKIP'
                         ELSE 'Other Referral'
                     END AS traffic_source
                 FROM visitor_uuids vu
-                LEFT JOIN uuid_referrer r ON vu.UUID = r.UUID
+                LEFT JOIN QUORUMDB.SEGMENT_DATA.PARAMOUNT_WEB_IMPRESSION_DATA p 
+                    ON vu.UUID = p.UUID AND p.KEY = 'referrer'
             ),
             
             -- Aggregate at MAID-day level (pageviews = distinct UUIDs per MAID per day)
