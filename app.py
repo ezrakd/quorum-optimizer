@@ -1319,12 +1319,12 @@ def get_optimize():
             WHERE {adv_filter} AND {date_filter}
 
             UNION ALL
-            SELECT 'campaign', IO_ID, MAX(IO_NAME), COUNT(*), {web_expr}, {store_expr}, {web_vr}, {store_vr}
+            SELECT 'campaign', IO_ID::VARCHAR, MAX(IO_NAME), COUNT(*), {web_expr}, {store_expr}, {web_vr}, {store_vr}
             FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
             WHERE {adv_filter} AND {date_filter} GROUP BY IO_ID
 
             UNION ALL
-            SELECT 'lineitem', LINEITEM_ID, MAX(LINEITEM_NAME), COUNT(*), {web_expr}, {store_expr}, {web_vr}, {store_vr}
+            SELECT 'lineitem', LINEITEM_ID::VARCHAR, MAX(LINEITEM_NAME), COUNT(*), {web_expr}, {store_expr}, {web_vr}, {store_vr}
             FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
             WHERE {adv_filter} AND {date_filter} GROUP BY LINEITEM_ID
 
