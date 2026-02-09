@@ -106,6 +106,7 @@ def health_check():
             '/api/v5/timeseries',
             '/api/v5/lift-analysis',
             '/api/v5/traffic-sources',
+            '/api/v5/optimize',
             '/api/v5/agency-timeseries',
             '/api/v5/advertiser-timeseries'
         ]
@@ -1283,6 +1284,105 @@ def get_advertiser_timeseries():
 # =============================================================================
 # MAIN
 # =============================================================================
+
+# =============================================================================
+# OPTIMIZE RECOMMENDATIONS (Paramount only)
+# =============================================================================
+
+@app.route('/api/v5/optimize', methods=['GET'])
+def get_optimize():
+    """Pull performance data across all dimensions for optimization recommendations.
+    Baseline window: 10 days starting 15 days back (to account for location visit lag)."""
+    advertiser_id = request.args.get('advertiser_id')
+    
+    if not advertiser_id:
+        return jsonify({'success': False, 'error': 'advertiser_id parameter required'}), 400
+    
+    try:
+        conn = get_snowflake_connection()
+        cursor = conn.cursor()
+        
+        query = """
+            WITH base AS (
+                SELECT i.*, z.DMA_NAME, z.DMA_CODE,
+                       DAYOFWEEK(i.IMP_DATE) as DOW,
+                       CASE WHEN i.IS_SITE_VISIT = 'TRUE' THEN 1 ELSE 0 END as is_web,
+                       CASE WHEN i.IS_STORE_VISIT = 'TRUE' THEN 1 ELSE 0 END as is_store
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS i
+                LEFT JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING z ON i.ZIP_CODE = z.ZIP_CODE
+                WHERE i.QUORUM_ADVERTISER_ID = %(adv_id)s
+                  AND i.IMP_DATE BETWEEN DATEADD(day, -15, CURRENT_DATE) AND DATEADD(day, -5, CURRENT_DATE)
+            )
+            -- Overall baseline
+            SELECT 'baseline' as DIM_TYPE, 'overall' as DIM_KEY, NULL as DIM_NAME,
+                COUNT(*) as IMPS, SUM(is_web) as WEB_VISITS, SUM(is_store) as STORE_VISITS,
+                ROUND(SUM(is_web)*100.0/NULLIF(COUNT(*),0), 4) as WEB_VR,
+                ROUND(SUM(is_store)*100.0/NULLIF(COUNT(*),0), 4) as STORE_VR
+            FROM base
+
+            UNION ALL
+            SELECT 'lineitem', LINEITEM_ID, MAX(LINEITEM_NAME),
+                COUNT(*), SUM(is_web), SUM(is_store),
+                ROUND(SUM(is_web)*100.0/NULLIF(COUNT(*),0), 4),
+                ROUND(SUM(is_store)*100.0/NULLIF(COUNT(*),0), 4)
+            FROM base GROUP BY LINEITEM_ID
+
+            UNION ALL
+            SELECT 'creative', CREATIVE_NAME, NULL,
+                COUNT(*), SUM(is_web), SUM(is_store),
+                ROUND(SUM(is_web)*100.0/NULLIF(COUNT(*),0), 4),
+                ROUND(SUM(is_store)*100.0/NULLIF(COUNT(*),0), 4)
+            FROM base GROUP BY CREATIVE_NAME
+
+            UNION ALL
+            SELECT 'dow', DOW::VARCHAR, NULL,
+                COUNT(*), SUM(is_web), SUM(is_store),
+                ROUND(SUM(is_web)*100.0/NULLIF(COUNT(*),0), 4),
+                ROUND(SUM(is_store)*100.0/NULLIF(COUNT(*),0), 4)
+            FROM base GROUP BY DOW
+
+            UNION ALL
+            SELECT 'dma', DMA_CODE, MAX(DMA_NAME),
+                COUNT(*), SUM(is_web), SUM(is_store),
+                ROUND(SUM(is_web)*100.0/NULLIF(COUNT(*),0), 4),
+                ROUND(SUM(is_store)*100.0/NULLIF(COUNT(*),0), 4)
+            FROM base WHERE DMA_NAME IS NOT NULL GROUP BY DMA_CODE HAVING COUNT(*) >= 50
+
+            UNION ALL
+            SELECT 'site', SITE, NULL,
+                COUNT(*), SUM(is_web), SUM(is_store),
+                ROUND(SUM(is_web)*100.0/NULLIF(COUNT(*),0), 4),
+                ROUND(SUM(is_store)*100.0/NULLIF(COUNT(*),0), 4)
+            FROM base GROUP BY SITE HAVING COUNT(*) >= 50
+
+            UNION ALL
+            -- Top 5 ZIPs per active DMA (for geo drill-down)
+            SELECT 'zip_dma', ZIP_CODE, MAX(DMA_NAME),
+                COUNT(*), SUM(is_web), SUM(is_store),
+                ROUND(SUM(is_web)*100.0/NULLIF(COUNT(*),0), 4),
+                ROUND(SUM(is_store)*100.0/NULLIF(COUNT(*),0), 4)
+            FROM base WHERE DMA_NAME IS NOT NULL GROUP BY ZIP_CODE HAVING COUNT(*) >= 20
+
+            ORDER BY 1, 4 DESC
+        """
+        
+        cursor.execute(query, {'adv_id': int(advertiser_id)})
+        
+        columns = [desc[0] for desc in cursor.description]
+        results = []
+        for row in cursor.fetchall():
+            d = dict(zip(columns, row))
+            for k, v in d.items():
+                if hasattr(v, 'is_integer'):
+                    d[k] = float(v) if v else 0
+            results.append(d)
+        
+        cursor.close()
+        conn.close()
+        return jsonify({'success': True, 'data': results})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
