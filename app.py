@@ -501,16 +501,23 @@ def get_zip_performance():
             if lineitem_id: filters += f" AND LINEITEM_ID = '{lineitem_id}'"
             
             query = f"""
-                SELECT ZIP_CODE, COUNT(*) as IMPRESSIONS,
-                    COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
-                    COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITS
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
-                  AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
-                  AND ZIP_CODE IS NOT NULL AND ZIP_CODE != '' AND ZIP_CODE != 'null' AND ZIP_CODE != 'UNKNOWN'
+                WITH zip_dma AS (
+                    SELECT ZIPCODE, MAX(DMA_NAME) as DMA_NAME 
+                    FROM QUORUMDB.SEGMENT_DATA.DBIP_LOOKUP_US 
+                    WHERE DMA_NAME IS NOT NULL AND DMA_NAME != ''
+                    GROUP BY ZIPCODE
+                )
+                SELECT p.ZIP_CODE, COALESCE(d.DMA_NAME, 'Unknown') as DMA_NAME, COUNT(*) as IMPRESSIONS,
+                    COUNT(DISTINCT CASE WHEN p.IS_STORE_VISIT = 'TRUE' THEN p.IMP_MAID END) as STORE_VISITS,
+                    COUNT(DISTINCT CASE WHEN p.IS_SITE_VISIT = 'TRUE' THEN p.IMP_MAID END) as WEB_VISITS
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS p
+                LEFT JOIN zip_dma d ON p.ZIP_CODE = d.ZIPCODE
+                WHERE p.QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                  AND p.IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
+                  AND p.ZIP_CODE IS NOT NULL AND p.ZIP_CODE != '' AND p.ZIP_CODE != 'null' AND p.ZIP_CODE != 'UNKNOWN'
                   {filters}
-                GROUP BY ZIP_CODE HAVING COUNT(*) >= 100
-                ORDER BY 3 DESC, 2 DESC LIMIT 100
+                GROUP BY p.ZIP_CODE, d.DMA_NAME HAVING COUNT(*) >= 100
+                ORDER BY 4 DESC, 3 DESC LIMIT 200
             """
             cursor.execute(query, {'advertiser_id': advertiser_id, 'start_date': start_date, 'end_date': end_date})
             note = 'Date filtered (matches date selector)'
@@ -520,16 +527,24 @@ def get_zip_performance():
             if lineitem_id: filters += f" AND LINEITEM_ID = '{lineitem_id}'"
             
             query = f"""
-                SELECT USER_HOME_POSTAL_CODE as ZIP_CODE, SUM(IMPRESSIONS) as IMPRESSIONS,
-                    SUM(STORE_VISITS) as STORE_VISITS, 0 as WEB_VISITS
-                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING
-                WHERE AGENCY_ID = %(agency_id)s AND ADVERTISER_ID = %(advertiser_id)s
-                  AND USER_HOME_POSTAL_CODE IS NOT NULL AND USER_HOME_POSTAL_CODE != ''
-                  AND USER_HOME_POSTAL_CODE != 'null' AND USER_HOME_POSTAL_CODE != 'UNKNOWN'
+                WITH zip_dma AS (
+                    SELECT ZIPCODE, MAX(DMA_NAME) as DMA_NAME 
+                    FROM QUORUMDB.SEGMENT_DATA.DBIP_LOOKUP_US 
+                    WHERE DMA_NAME IS NOT NULL AND DMA_NAME != ''
+                    GROUP BY ZIPCODE
+                )
+                SELECT cp.USER_HOME_POSTAL_CODE as ZIP_CODE, COALESCE(d.DMA_NAME, 'Unknown') as DMA_NAME,
+                    SUM(cp.IMPRESSIONS) as IMPRESSIONS,
+                    SUM(cp.STORE_VISITS) as STORE_VISITS, 0 as WEB_VISITS
+                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING cp
+                LEFT JOIN zip_dma d ON cp.USER_HOME_POSTAL_CODE = d.ZIPCODE
+                WHERE cp.AGENCY_ID = %(agency_id)s AND cp.ADVERTISER_ID = %(advertiser_id)s
+                  AND cp.USER_HOME_POSTAL_CODE IS NOT NULL AND cp.USER_HOME_POSTAL_CODE != ''
+                  AND cp.USER_HOME_POSTAL_CODE != 'null' AND cp.USER_HOME_POSTAL_CODE != 'UNKNOWN'
                   {filters}
-                GROUP BY USER_HOME_POSTAL_CODE
-                HAVING SUM(IMPRESSIONS) >= 100 OR SUM(STORE_VISITS) >= 1
-                ORDER BY 3 DESC, 2 DESC LIMIT 100
+                GROUP BY cp.USER_HOME_POSTAL_CODE, d.DMA_NAME
+                HAVING SUM(cp.IMPRESSIONS) >= 100 OR SUM(cp.STORE_VISITS) >= 1
+                ORDER BY 4 DESC, 3 DESC LIMIT 200
             """
             cursor.execute(query, {'agency_id': agency_id, 'advertiser_id': advertiser_id})
             note = 'Full history (all-time data)'
