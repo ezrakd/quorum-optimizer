@@ -979,7 +979,7 @@ def get_traffic_sources():
         
         query = """
             WITH 
-            -- All web visitor UUIDs for this advertiser in date range
+            -- All web visitor UUIDs for this advertiser in date range (sampled for performance)
             visitor_uuids AS (
                 SELECT WEB_IMPRESSION_ID AS UUID,
                        LOWER(REPLACE(MAID, '-', '')) AS clean_maid,
@@ -989,6 +989,7 @@ def get_traffic_sources():
                   AND IS_SITE_VISIT = 'TRUE'
                   AND SITE_VISIT_TIMESTAMP BETWEEN %(start_date)s AND %(end_date)s
                   AND MAID IS NOT NULL AND MAID != ''
+                LIMIT 500000
             ),
             
             -- Get referrer per UUID
@@ -1117,12 +1118,13 @@ def get_traffic_sources():
 
 @app.route('/api/v5/agency-timeseries', methods=['GET'])
 def get_agency_timeseries():
-    """Daily impression timeseries broken out by agency for stacked bar chart."""
+    """Weekly impression timeseries broken out by agency for stacked bar chart."""
     try:
         start_date, end_date = get_date_range()
         conn = get_snowflake_connection()
         cursor = conn.cursor()
         
+        # Class B: already weekly, use LOG_DATE as week anchor
         cursor.execute("""
             SELECT LOG_DATE::DATE as DT, AGENCY_ID, SUM(IMPRESSIONS) as IMPRESSIONS
             FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
@@ -1131,19 +1133,59 @@ def get_agency_timeseries():
         """, {'start_date': start_date, 'end_date': end_date})
         rows_b = cursor.fetchall()
         
+        # Paramount: daily data, bucket into same weekly anchors as Class B
+        # Find the Class B week dates to align
+        week_dates = sorted(set(str(r[0]) for r in rows_b))
+        
         cursor.execute("""
-            WITH deduped AS (
-                SELECT DISTINCT DATE, QUORUM_ADVERTISER_ID, IMPRESSIONS
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_DASHBOARD_SUMMARY_STATS
-                WHERE DATE BETWEEN %(start_date)s AND %(end_date)s
-            )
             SELECT DATE::DATE as DT, 1480 as AGENCY_ID, SUM(IMPRESSIONS) as IMPRESSIONS
-            FROM deduped GROUP BY DATE::DATE HAVING SUM(IMPRESSIONS) > 0
+            FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_DASHBOARD_SUMMARY_STATS
+            WHERE DATE BETWEEN %(start_date)s AND %(end_date)s
+            GROUP BY DATE::DATE HAVING SUM(IMPRESSIONS) > 0
         """, {'start_date': start_date, 'end_date': end_date})
-        rows_p = cursor.fetchall()
+        rows_p_daily = cursor.fetchall()
         
         cursor.close()
         conn.close()
+        
+        # Bucket Paramount daily data into the same weeks as Class B
+        # Each week bucket = the Class B LOG_DATE that covers that period
+        from datetime import datetime, timedelta
+        
+        def find_week_bucket(dt_str, anchors):
+            """Assign a daily date to its nearest weekly anchor (closest future anchor)."""
+            if not anchors:
+                return dt_str
+            dt = datetime.strptime(dt_str, '%Y-%m-%d').date() if isinstance(dt_str, str) else dt_str
+            anchor_dates = sorted([datetime.strptime(a, '%Y-%m-%d').date() if isinstance(a, str) else a for a in anchors])
+            # Find the anchor that this date falls before (or the last one)
+            for anchor in anchor_dates:
+                if dt <= anchor:
+                    return str(anchor)
+            return str(anchor_dates[-1])
+        
+        # Build Paramount weekly rows
+        rows_p = []
+        if week_dates:
+            para_weekly = {}
+            for dt, aid, imps in rows_p_daily:
+                bucket = find_week_bucket(str(dt), week_dates)
+                key = (bucket, int(aid))
+                para_weekly[key] = para_weekly.get(key, 0) + int(imps)
+            for (bucket, aid), imps in para_weekly.items():
+                rows_p.append((bucket, aid, imps))
+        else:
+            # No Class B data, just use Paramount weekly buckets
+            para_weekly = {}
+            for dt, aid, imps in rows_p_daily:
+                from datetime import date as date_type
+                d = dt if isinstance(dt, date_type) else datetime.strptime(str(dt), '%Y-%m-%d').date()
+                # Use Monday as week start
+                monday = d - timedelta(days=d.weekday())
+                key = (str(monday), int(aid))
+                para_weekly[key] = para_weekly.get(key, 0) + int(imps)
+            for (bucket, aid), imps in para_weekly.items():
+                rows_p.append((bucket, aid, imps))
         
         data = {}
         for dt, agency_id, imps in rows_b + rows_p:
@@ -1181,14 +1223,11 @@ def get_advertiser_timeseries():
         
         if agency_id == 1480:
             cursor.execute("""
-                WITH deduped AS (
-                    SELECT DISTINCT DATE, QUORUM_ADVERTISER_ID, ADVERTISER_NAME, IMPRESSIONS
-                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_DASHBOARD_SUMMARY_STATS
-                    WHERE DATE BETWEEN %(start_date)s AND %(end_date)s
-                )
                 SELECT DATE::DATE as DT, QUORUM_ADVERTISER_ID as ADVERTISER_ID,
                        MAX(ADVERTISER_NAME) as ADVERTISER_NAME, SUM(IMPRESSIONS) as IMPRESSIONS
-                FROM deduped GROUP BY DATE::DATE, QUORUM_ADVERTISER_ID HAVING SUM(IMPRESSIONS) > 0
+                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_DASHBOARD_SUMMARY_STATS
+                WHERE DATE BETWEEN %(start_date)s AND %(end_date)s
+                GROUP BY DATE::DATE, QUORUM_ADVERTISER_ID HAVING SUM(IMPRESSIONS) > 0
             """, {'start_date': start_date, 'end_date': end_date})
         else:
             cursor.execute("""
