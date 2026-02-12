@@ -34,6 +34,8 @@ import snowflake.connector
 import os
 from datetime import datetime, timedelta
 import re
+import time
+import threading
 
 app = Flask(__name__)
 CORS(app)
@@ -56,6 +58,32 @@ AGENCY_CONFIG = {
 }
 
 CLASS_B_AGENCIES = [k for k, v in AGENCY_CONFIG.items() if v['class'] == 'B']
+
+# =============================================================================
+# IN-MEMORY CACHE for slow endpoints (traffic-sources scans 310M row table)
+# =============================================================================
+_cache = {}
+_cache_lock = threading.Lock()
+CACHE_TTL = 600  # 10 minutes
+
+def cache_get(key):
+    with _cache_lock:
+        entry = _cache.get(key)
+        if entry and time.time() - entry['ts'] < CACHE_TTL:
+            return entry['data']
+        elif entry:
+            del _cache[key]
+    return None
+
+def cache_set(key, data):
+    with _cache_lock:
+        _cache[key] = {'data': data, 'ts': time.time()}
+        # Evict old entries if cache gets too large
+        if len(_cache) > 200:
+            cutoff = time.time() - CACHE_TTL
+            expired = [k for k, v in _cache.items() if v['ts'] < cutoff]
+            for k in expired:
+                del _cache[k]
 
 def get_agency_name(agency_id):
     config = AGENCY_CONFIG.get(int(agency_id))
@@ -1119,6 +1147,12 @@ def get_traffic_sources():
 
     try:
         start_date, end_date = get_date_range()
+
+        # Check cache first (this query scans 310M unclustered rows — ~15s cold)
+        cache_key = f"traffic-sources:{advertiser_id}:{start_date}:{end_date}"
+        cached = cache_get(cache_key)
+        if cached is not None:
+            return jsonify({'success': True, 'data': cached, 'cached': True})
         conn = get_snowflake_connection()
         cursor = conn.cursor()
 
@@ -1238,6 +1272,10 @@ def get_traffic_sources():
 
         cursor.close()
         conn.close()
+
+        # Cache results for 10 min (310M row scan is expensive)
+        cache_set(cache_key, results)
+
         return jsonify({'success': True, 'data': results})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
