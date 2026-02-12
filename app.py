@@ -1233,6 +1233,7 @@ def get_traffic_sources():
                 ROUND(AVG(pageviews), 2) AS AVG_PAGEVIEWS,
                 APPROX_PERCENTILE(pageviews, 0.50) AS P50_PAGES,
                 APPROX_PERCENTILE(pageviews, 0.90) AS P90_PAGES,
+                ROUND(SUM(CASE WHEN pageviews = 1 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 1) AS BOUNCE_RATE,
                 SUM(is_ctv) AS CTV_OVERLAP,
                 ROUND(SUM(is_ctv)::FLOAT / NULLIF(COUNT(*), 0) * 100, 1) AS CTV_OVERLAP_PCT,
                 ROUND(AVG(CASE WHEN is_ctv = 1 THEN pageviews END), 2) AS AVG_PAGES_CTV,
@@ -1246,6 +1247,7 @@ def get_traffic_sources():
                 ROUND(AVG(pageviews), 2) AS AVG_PAGEVIEWS,
                 APPROX_PERCENTILE(pageviews, 0.50) AS P50_PAGES,
                 APPROX_PERCENTILE(pageviews, 0.90) AS P90_PAGES,
+                ROUND(SUM(CASE WHEN pageviews = 1 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 1) AS BOUNCE_RATE,
                 0 AS CTV_OVERLAP, 0 AS CTV_OVERLAP_PCT,
                 NULL AS AVG_PAGES_CTV, NULL AS AVG_PAGES_NON_CTV
             FROM classified WHERE is_ctv = 1
