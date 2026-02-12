@@ -100,8 +100,8 @@ def get_date_range():
 def health_check():
     return jsonify({
         'status': 'healthy',
-        'version': '5.10-ip-dedup',
-        'description': 'IP-level dedup for web visits + COUNT(DISTINCT CACHE_BUSTER) for impressions',
+        'version': '5.11-traffic-sources-opt',
+        'description': 'Optimized traffic sources query: removed string ops, flipped CTV lookup',
         'endpoints': [
             '/api/v5/agencies', '/api/v5/advertisers', '/api/v5/campaigns',
             '/api/v5/lineitems', '/api/v5/creative-performance', '/api/v5/publishers',
@@ -1122,11 +1122,13 @@ def get_traffic_sources():
         conn = get_snowflake_connection()
         cursor = conn.cursor()
 
+        # Optimized: removed LOWER(REPLACE()) string ops (MAIDs already match format),
+        # flipped CTV lookup to use EXISTS from small web visitor set instead of scanning all impression MAIDs
         query = """
             WITH
             visitor_uuids AS (
                 SELECT WEB_IMPRESSION_ID AS UUID,
-                       LOWER(REPLACE(MAID, '-', '')) AS clean_maid,
+                       MAID,
                        SITE_VISIT_TIMESTAMP::DATE AS visit_date
                 FROM QUORUMDB.SEGMENT_DATA.WEB_VISITORS_TO_LOG
                 WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
@@ -1136,7 +1138,7 @@ def get_traffic_sources():
                 LIMIT 50000
             ),
             uuid_classified AS (
-                SELECT vu.UUID, vu.clean_maid, vu.visit_date,
+                SELECT vu.UUID, vu.MAID, vu.visit_date,
                     CASE
                         WHEN p.VALUE ILIKE '%%doubleclick%%' OR p.VALUE ILIKE '%%syndicatedsearch%%' OR p.VALUE ILIKE '%%gclid%%' OR p.VALUE ILIKE '%%googleadservices%%' THEN 'Google Ads'
                         WHEN p.VALUE ILIKE '%%google%%' THEN 'Google Organic'
@@ -1163,31 +1165,37 @@ def get_traffic_sources():
                     ON vu.UUID = p.UUID AND p.KEY = 'referrer'
             ),
             maid_day AS (
-                SELECT clean_maid, visit_date,
+                SELECT MAID, visit_date,
                        COUNT(*) AS pageviews,
                        MODE(traffic_source) AS dominant_source
                 FROM uuid_classified
                 WHERE traffic_source != 'SKIP'
                 GROUP BY 1, 2
             ),
-            ctv_maids AS (
-                SELECT DISTINCT LOWER(REPLACE(IMP_MAID, '-', '')) AS clean_maid
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE QUORUM_ADVERTISER_ID = %(advertiser_id_int)s
-                  AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
-                  AND IMP_MAID IS NOT NULL AND IMP_MAID != ''
+            web_visitor_maids AS (
+                SELECT DISTINCT MAID FROM maid_day
+            ),
+            ctv_overlap AS (
+                SELECT wvm.MAID
+                FROM web_visitor_maids wvm
+                WHERE EXISTS (
+                    SELECT 1 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS r
+                    WHERE r.IMP_MAID = wvm.MAID
+                      AND r.QUORUM_ADVERTISER_ID = %(advertiser_id_int)s
+                      AND r.IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
+                )
             ),
             classified AS (
                 SELECT md.dominant_source AS traffic_source,
                        md.pageviews,
-                       md.clean_maid,
-                       CASE WHEN cm.clean_maid IS NOT NULL THEN 1 ELSE 0 END AS is_ctv
+                       md.MAID,
+                       CASE WHEN co.MAID IS NOT NULL THEN 1 ELSE 0 END AS is_ctv
                 FROM maid_day md
-                LEFT JOIN ctv_maids cm ON md.clean_maid = cm.clean_maid
+                LEFT JOIN ctv_overlap co ON md.MAID = co.MAID
             )
             SELECT traffic_source, 'click' AS SOURCE_TYPE,
                 COUNT(*) AS VISITOR_DAYS,
-                COUNT(DISTINCT clean_maid) AS UNIQUE_VISITORS,
+                COUNT(DISTINCT MAID) AS UNIQUE_VISITORS,
                 ROUND(AVG(pageviews), 2) AS AVG_PAGEVIEWS,
                 APPROX_PERCENTILE(pageviews, 0.50) AS P50_PAGES,
                 APPROX_PERCENTILE(pageviews, 0.90) AS P90_PAGES,
@@ -1200,7 +1208,7 @@ def get_traffic_sources():
             UNION ALL
             SELECT 'Paramount CTV' AS traffic_source, 'ctv' AS SOURCE_TYPE,
                 COUNT(*) AS VISITOR_DAYS,
-                COUNT(DISTINCT clean_maid) AS UNIQUE_VISITORS,
+                COUNT(DISTINCT MAID) AS UNIQUE_VISITORS,
                 ROUND(AVG(pageviews), 2) AS AVG_PAGEVIEWS,
                 APPROX_PERCENTILE(pageviews, 0.50) AS P50_PAGES,
                 APPROX_PERCENTILE(pageviews, 0.90) AS P90_PAGES,
