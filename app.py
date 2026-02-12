@@ -15,6 +15,9 @@ Changed endpoints (APPROX_COUNT_DISTINCT on impression report):
   - /api/v5/summary (Paramount branch) — single-advertiser, uses exact COUNT
   - /api/v5/timeseries (Paramount branch) — single-advertiser, uses exact COUNT
 
+New endpoints:
+  - /api/v5/creative-performance — creative breakdown with bounce rate + avg pages
+
 Unchanged endpoints (already used impression report correctly):
   - /api/v5/campaign-performance
   - /api/v5/lineitem-performance
@@ -97,13 +100,13 @@ def get_date_range():
 def health_check():
     return jsonify({
         'status': 'healthy',
-        'version': '5.7-webvisit-fix-v3',
-        'description': 'Fixed Paramount web visits: APPROX_COUNT_DISTINCT on impression report (fast + correct)',
+        'version': '5.8-creative-tab',
+        'description': 'Added creative-performance endpoint with bounce rate + avg pages per visitor',
         'endpoints': [
             '/api/v5/agencies', '/api/v5/advertisers', '/api/v5/campaigns',
-            '/api/v5/lineitems', '/api/v5/publishers', '/api/v5/zip-performance',
-            '/api/v5/dma-performance', '/api/v5/summary', '/api/v5/timeseries',
-            '/api/v5/lift-analysis', '/api/v5/traffic-sources',
+            '/api/v5/lineitems', '/api/v5/creative-performance', '/api/v5/publishers',
+            '/api/v5/zip-performance', '/api/v5/dma-performance', '/api/v5/summary',
+            '/api/v5/timeseries', '/api/v5/lift-analysis', '/api/v5/traffic-sources',
             '/api/v5/optimize', '/api/v5/agency-timeseries', '/api/v5/advertiser-timeseries'
         ]
     })
@@ -398,6 +401,121 @@ def get_lineitem_performance():
                 LEFT JOIN lineitem_pt lp ON ls.LI_ID = lp.LINEITEM_ID AND lp.rn = 1
                 LEFT JOIN QUORUMDB.SEGMENT_DATA.PT_TO_PLATFORM p ON lp.PT = p.PT
                 ORDER BY ls.IMPRESSIONS DESC LIMIT 100
+            """
+
+        cursor.execute(query, {
+            'agency_id': agency_id, 'advertiser_id': advertiser_id,
+            'start_date': start_date, 'end_date': end_date
+        })
+
+        columns = [desc[0] for desc in cursor.description]
+        results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        cursor.close()
+        conn.close()
+        return jsonify({'success': True, 'data': results})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# =============================================================================
+# CREATIVE PERFORMANCE (NEW — between Line Items and Publishers)
+# =============================================================================
+@app.route('/api/v5/creative-performance', methods=['GET'])
+def get_creative_performance():
+    try:
+        agency_id = request.args.get('agency_id')
+        advertiser_id = request.args.get('advertiser_id')
+        campaign_id = request.args.get('campaign_id')
+        lineitem_id = request.args.get('lineitem_id')
+
+        if not agency_id or not advertiser_id:
+            return jsonify({'success': False, 'error': 'agency_id and advertiser_id required'}), 400
+
+        agency_id = int(agency_id)
+        start_date, end_date = get_date_range()
+        conn = get_snowflake_connection()
+        cursor = conn.cursor()
+
+        if agency_id == 1480:
+            paramount_filters = ""
+            if campaign_id: paramount_filters += f" AND IO_ID = '{campaign_id}'"
+            if lineitem_id: paramount_filters += f" AND LINEITEM_ID = '{lineitem_id}'"
+
+            query = f"""
+                WITH creative_base AS (
+                    SELECT
+                        CREATIVE_ID,
+                        MAX(CREATIVE_NAME) as CREATIVE_NAME,
+                        COUNT(*) as IMPRESSIONS,
+                        COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
+                        COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITS
+                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+                    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                      AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
+                      {paramount_filters}
+                    GROUP BY CREATIVE_ID
+                    HAVING COUNT(*) >= 100
+                ),
+                bounce_data AS (
+                    SELECT
+                        CREATIVE_ID,
+                        IMP_MAID,
+                        COUNT(DISTINCT WEB_IMPRESSION_ID) as page_views
+                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+                    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                      AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
+                      AND IS_SITE_VISIT = 'TRUE'
+                      AND WEB_IMPRESSION_ID IS NOT NULL AND WEB_IMPRESSION_ID != ''
+                      {paramount_filters}
+                    GROUP BY CREATIVE_ID, IMP_MAID
+                ),
+                bounce_agg AS (
+                    SELECT
+                        CREATIVE_ID,
+                        COUNT(*) as TOTAL_WEB_VISITORS,
+                        SUM(CASE WHEN page_views = 1 THEN 1 ELSE 0 END) as BOUNCED_VISITORS,
+                        ROUND(AVG(page_views), 2) as AVG_PAGES_PER_VISITOR
+                    FROM bounce_data
+                    GROUP BY CREATIVE_ID
+                )
+                SELECT
+                    cb.CREATIVE_ID,
+                    cb.CREATIVE_NAME,
+                    cb.IMPRESSIONS,
+                    cb.STORE_VISITS,
+                    cb.WEB_VISITS,
+                    COALESCE(ba.BOUNCED_VISITORS, 0) as BOUNCED_VISITORS,
+                    COALESCE(ba.AVG_PAGES_PER_VISITOR, 0) as AVG_PAGES_PER_VISITOR,
+                    ROUND(COALESCE(ba.BOUNCED_VISITORS, 0) * 100.0 / NULLIF(COALESCE(ba.TOTAL_WEB_VISITORS, 0), 0), 1) as BOUNCE_RATE
+                FROM creative_base cb
+                LEFT JOIN bounce_agg ba ON cb.CREATIVE_ID = ba.CREATIVE_ID
+                ORDER BY cb.IMPRESSIONS DESC
+                LIMIT 100
+            """
+        else:
+            # Class B: creative data from Xandr impression log (impressions only)
+            classb_filters = ""
+            if campaign_id: classb_filters += f" AND IO_ID = {campaign_id}"
+            if lineitem_id: classb_filters += f" AND LINEITEM_ID = '{lineitem_id}'"
+
+            query = f"""
+                SELECT
+                    CREATIVE_ID,
+                    MAX(CREATIVE_NAME) as CREATIVE_NAME,
+                    COUNT(*) as IMPRESSIONS,
+                    0 as STORE_VISITS,
+                    0 as WEB_VISITS,
+                    0 as BOUNCED_VISITORS,
+                    0 as AVG_PAGES_PER_VISITOR,
+                    NULL as BOUNCE_RATE
+                FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG
+                WHERE AGENCY_ID = %(agency_id)s
+                  AND TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
+                  {classb_filters}
+                GROUP BY CREATIVE_ID
+                HAVING COUNT(*) >= 100
+                ORDER BY IMPRESSIONS DESC
+                LIMIT 100
             """
 
         cursor.execute(query, {
