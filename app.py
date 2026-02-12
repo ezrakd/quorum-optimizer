@@ -100,8 +100,8 @@ def get_date_range():
 def health_check():
     return jsonify({
         'status': 'healthy',
-        'version': '5.8-creative-tab',
-        'description': 'Added creative-performance endpoint with bounce rate + avg pages per visitor',
+        'version': '5.9-impression-fix',
+        'description': 'Fixed impression inflation: COUNT(DISTINCT CACHE_BUSTER) across all Paramount endpoints',
         'endpoints': [
             '/api/v5/agencies', '/api/v5/advertisers', '/api/v5/campaigns',
             '/api/v5/lineitems', '/api/v5/creative-performance', '/api/v5/publishers',
@@ -148,11 +148,11 @@ def get_agencies():
                 'ADVERTISER_COUNT': row[4] or 0
             })
 
-        # FIXED v3: APPROX_COUNT_DISTINCT on impression report (fast on 100M rows)
+        # FIXED v4: APPROX_COUNT_DISTINCT(CACHE_BUSTER) for correct impression count
         query_paramount = """
             SELECT
                 1480 as AGENCY_ID,
-                COUNT(*) as IMPRESSIONS,
+                APPROX_COUNT_DISTINCT(CACHE_BUSTER) as IMPRESSIONS,
                 APPROX_COUNT_DISTINCT(CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
                 APPROX_COUNT_DISTINCT(CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITS,
                 APPROX_COUNT_DISTINCT(QUORUM_ADVERTISER_ID) as ADVERTISER_COUNT
@@ -197,13 +197,12 @@ def get_advertisers():
         cursor = conn.cursor()
 
         if agency_id == 1480:
-            # FIXED v3: APPROX_COUNT_DISTINCT on impression report (fast on 100M rows)
-            # Join with original summary table for clean display names
+            # FIXED v4: APPROX_COUNT_DISTINCT(CACHE_BUSTER) for correct impression count
             query = """
                 WITH imp AS (
                     SELECT
                         CAST(QUORUM_ADVERTISER_ID AS INTEGER) as ADVERTISER_ID,
-                        COUNT(*) as IMPRESSIONS,
+                        APPROX_COUNT_DISTINCT(CACHE_BUSTER) as IMPRESSIONS,
                         APPROX_COUNT_DISTINCT(CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
                         APPROX_COUNT_DISTINCT(CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITS
                     FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
@@ -289,14 +288,14 @@ def get_campaign_performance():
                 SELECT
                     IO_ID,
                     MAX(IO_NAME) as IO_NAME,
-                    COUNT(*) as IMPRESSIONS,
+                    COUNT(DISTINCT CACHE_BUSTER) as IMPRESSIONS,
                     COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
                     COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITS
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
                 WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
                   AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
                 GROUP BY IO_ID
-                HAVING COUNT(*) >= 100
+                HAVING COUNT(DISTINCT CACHE_BUSTER) >= 100
                 ORDER BY 3 DESC
             """
         else:
@@ -363,7 +362,7 @@ def get_lineitem_performance():
                     MAX(LINEITEM_NAME) as LI_NAME,
                     MAX(IO_ID) as IO_ID,
                     MAX(IO_NAME) as IO_NAME,
-                    COUNT(*) as IMPRESSIONS,
+                    COUNT(DISTINCT CACHE_BUSTER) as IMPRESSIONS,
                     COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
                     COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITS,
                     'Paramount' as PLATFORM
@@ -372,8 +371,8 @@ def get_lineitem_performance():
                   AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
                   {campaign_filter}
                 GROUP BY LINEITEM_ID
-                HAVING COUNT(*) >= 100
-                ORDER BY COUNT(*) DESC
+                HAVING COUNT(DISTINCT CACHE_BUSTER) >= 100
+                ORDER BY COUNT(DISTINCT CACHE_BUSTER) DESC
                 LIMIT 100
             """
         else:
@@ -446,7 +445,7 @@ def get_creative_performance():
                     SELECT
                         CREATIVE_ID,
                         MAX(CREATIVE_NAME) as CREATIVE_NAME,
-                        COUNT(*) as IMPRESSIONS,
+                        COUNT(DISTINCT CACHE_BUSTER) as IMPRESSIONS,
                         COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
                         COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITS
                     FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
@@ -454,7 +453,7 @@ def get_creative_performance():
                       AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
                       {paramount_filters}
                     GROUP BY CREATIVE_ID
-                    HAVING COUNT(*) >= 100
+                    HAVING COUNT(DISTINCT CACHE_BUSTER) >= 100
                 ),
                 bounce_data AS (
                     SELECT
@@ -561,13 +560,13 @@ def get_publisher_performance():
 
         if agency_id == 1480:
             query = f"""
-                SELECT SITE as PUBLISHER, COUNT(*) as IMPRESSIONS,
+                SELECT SITE as PUBLISHER, COUNT(DISTINCT CACHE_BUSTER) as IMPRESSIONS,
                     COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
                     COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITS
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
                 WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
                   AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s {paramount_filters}
-                GROUP BY SITE HAVING COUNT(*) >= 100 ORDER BY 2 DESC LIMIT 50
+                GROUP BY SITE HAVING COUNT(DISTINCT CACHE_BUSTER) >= 100 ORDER BY 2 DESC LIMIT 50
             """
         else:
             query = f"""
@@ -623,7 +622,7 @@ def get_zip_performance():
                     WHERE DMA_NAME IS NOT NULL AND DMA_NAME != ''
                     GROUP BY ZIPCODE
                 )
-                SELECT p.ZIP_CODE, COALESCE(d.DMA_NAME, 'Unknown') as DMA_NAME, COUNT(*) as IMPRESSIONS,
+                SELECT p.ZIP_CODE, COALESCE(d.DMA_NAME, 'Unknown') as DMA_NAME, COUNT(DISTINCT p.CACHE_BUSTER) as IMPRESSIONS,
                     COUNT(DISTINCT CASE WHEN p.IS_STORE_VISIT = 'TRUE' THEN p.IMP_MAID END) as STORE_VISITS,
                     COUNT(DISTINCT CASE WHEN p.IS_SITE_VISIT = 'TRUE' THEN p.IMP_MAID END) as WEB_VISITS
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS p
@@ -632,7 +631,7 @@ def get_zip_performance():
                   AND p.IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
                   AND p.ZIP_CODE IS NOT NULL AND p.ZIP_CODE != '' AND p.ZIP_CODE != 'null' AND p.ZIP_CODE != 'UNKNOWN'
                   {filters}
-                GROUP BY p.ZIP_CODE, d.DMA_NAME HAVING COUNT(*) >= 100
+                GROUP BY p.ZIP_CODE, d.DMA_NAME HAVING COUNT(DISTINCT p.CACHE_BUSTER) >= 100
                 ORDER BY 4 DESC, 3 DESC LIMIT 200
             """
             cursor.execute(query, {'advertiser_id': advertiser_id, 'start_date': start_date, 'end_date': end_date})
@@ -704,14 +703,14 @@ def get_dma_performance():
                     WHERE DMA_NAME IS NOT NULL AND DMA_NAME != ''
                     GROUP BY ZIPCODE
                 )
-                SELECT d.DMA_NAME as DMA, COUNT(*) as IMPRESSIONS,
+                SELECT d.DMA_NAME as DMA, COUNT(DISTINCT p.CACHE_BUSTER) as IMPRESSIONS,
                     COUNT(DISTINCT CASE WHEN p.IS_STORE_VISIT = 'TRUE' THEN p.IMP_MAID END) as STORE_VISITS,
                     COUNT(DISTINCT CASE WHEN p.IS_SITE_VISIT = 'TRUE' THEN p.IMP_MAID END) as WEB_VISITS
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS p
                 JOIN zip_dma d ON p.ZIP_CODE = d.ZIPCODE
                 WHERE p.QUORUM_ADVERTISER_ID = %(advertiser_id)s
                   AND p.IMP_DATE BETWEEN %(start_date)s AND %(end_date)s {filters}
-                GROUP BY d.DMA_NAME HAVING COUNT(*) >= 100 ORDER BY 2 DESC LIMIT 50
+                GROUP BY d.DMA_NAME HAVING COUNT(DISTINCT p.CACHE_BUSTER) >= 100 ORDER BY 2 DESC LIMIT 50
             """
             cursor.execute(query, {'advertiser_id': advertiser_id, 'start_date': start_date, 'end_date': end_date})
         else:
@@ -756,10 +755,10 @@ def get_summary():
         cursor = conn.cursor()
 
         if agency_id == 1480:
-            # FIXED v3: Exact COUNT DISTINCT on impression report (fast for single advertiser)
+            # FIXED v4: COUNT(DISTINCT CACHE_BUSTER) for correct impression count
             query = """
                 SELECT
-                    COUNT(*) as IMPRESSIONS,
+                    COUNT(DISTINCT CACHE_BUSTER) as IMPRESSIONS,
                     COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
                     COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITS,
                     MIN(IMP_DATE) as MIN_DATE,
@@ -814,11 +813,11 @@ def get_timeseries():
         cursor = conn.cursor()
 
         if agency_id == 1480:
-            # FIXED v3: Exact COUNT DISTINCT on impression report (fast for single advertiser)
+            # FIXED v4: COUNT(DISTINCT CACHE_BUSTER) for correct impression count
             query = """
                 SELECT
                     IMP_DATE as LOG_DATE,
-                    COUNT(*) as IMPRESSIONS,
+                    COUNT(DISTINCT CACHE_BUSTER) as IMPRESSIONS,
                     COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
                     COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITS
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
@@ -930,12 +929,12 @@ def get_lift_analysis():
                 ),
                 campaign_metrics AS (
                     SELECT {group_cols}, {name_cols}
-                        COUNT(*) as IMPRESSIONS, COUNT(DISTINCT IMP_MAID) as REACH,
+                        COUNT(DISTINCT CACHE_BUSTER) as IMPRESSIONS, COUNT(DISTINCT IMP_MAID) as REACH,
                         COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END) as WEB_VISITORS
                     FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
                     WHERE QUORUM_ADVERTISER_ID::INT = %(advertiser_id)s
                       AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
-                    GROUP BY {group_cols} HAVING COUNT(*) >= 1000
+                    GROUP BY {group_cols} HAVING COUNT(DISTINCT CACHE_BUSTER) >= 1000
                 ),
                 adv_baselines AS (
                     SELECT SUM(WEB_VISITORS)::FLOAT / NULLIF(SUM(REACH), 0) * 100 as WEB_BASELINE,
@@ -1403,37 +1402,38 @@ def get_optimize():
 
         date_filter = "IMP_DATE BETWEEN DATEADD(day, -35, CURRENT_DATE) AND DATEADD(day, -5, CURRENT_DATE)"
         adv_filter = "QUORUM_ADVERTISER_ID = %(adv_id)s"
-        web_expr = "SUM(CASE WHEN IS_SITE_VISIT = 'TRUE' THEN 1 ELSE 0 END)"
-        store_expr = "SUM(CASE WHEN IS_STORE_VISIT = 'TRUE' THEN 1 ELSE 0 END)"
-        web_vr = f"ROUND({web_expr}*100.0/NULLIF(COUNT(*),0), 4)"
-        store_vr = f"ROUND({store_expr}*100.0/NULLIF(COUNT(*),0), 4)"
+        imps_expr = "COUNT(DISTINCT CACHE_BUSTER)"
+        web_expr = "COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IMP_MAID END)"
+        store_expr = "COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END)"
+        web_vr = f"ROUND({web_expr}*100.0/NULLIF({imps_expr},0), 4)"
+        store_vr = f"ROUND({store_expr}*100.0/NULLIF({imps_expr},0), 4)"
 
         q1 = f"""
             SELECT 'baseline' as DIM_TYPE, 'overall' as DIM_KEY, NULL as DIM_NAME,
-                COUNT(*) as IMPS, {web_expr} as WEB_VISITS, {store_expr} as STORE_VISITS,
+                {imps_expr} as IMPS, {web_expr} as WEB_VISITS, {store_expr} as STORE_VISITS,
                 {web_vr} as WEB_VR, {store_vr} as STORE_VR
             FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
             WHERE {adv_filter} AND {date_filter}
             UNION ALL
-            SELECT 'campaign', IO_ID::VARCHAR, MAX(IO_NAME), COUNT(*), {web_expr}, {store_expr}, {web_vr}, {store_vr}
+            SELECT 'campaign', IO_ID::VARCHAR, MAX(IO_NAME), {imps_expr}, {web_expr}, {store_expr}, {web_vr}, {store_vr}
             FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
             WHERE {adv_filter} AND {date_filter} GROUP BY IO_ID
             UNION ALL
-            SELECT 'lineitem', LINEITEM_ID::VARCHAR, MAX(LINEITEM_NAME), COUNT(*), {web_expr}, {store_expr}, {web_vr}, {store_vr}
+            SELECT 'lineitem', LINEITEM_ID::VARCHAR, MAX(LINEITEM_NAME), {imps_expr}, {web_expr}, {store_expr}, {web_vr}, {store_vr}
             FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
             WHERE {adv_filter} AND {date_filter} GROUP BY LINEITEM_ID
             UNION ALL
-            SELECT 'creative', CREATIVE_NAME, NULL, COUNT(*), {web_expr}, {store_expr}, {web_vr}, {store_vr}
+            SELECT 'creative', CREATIVE_NAME, NULL, {imps_expr}, {web_expr}, {store_expr}, {web_vr}, {store_vr}
             FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
             WHERE {adv_filter} AND {date_filter} GROUP BY CREATIVE_NAME
             UNION ALL
-            SELECT 'dow', DAYOFWEEK(IMP_DATE)::VARCHAR, NULL, COUNT(*), {web_expr}, {store_expr}, {web_vr}, {store_vr}
+            SELECT 'dow', DAYOFWEEK(IMP_DATE)::VARCHAR, NULL, {imps_expr}, {web_expr}, {store_expr}, {web_vr}, {store_vr}
             FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
             WHERE {adv_filter} AND {date_filter} GROUP BY DAYOFWEEK(IMP_DATE)
             UNION ALL
-            SELECT 'site', SITE, NULL, COUNT(*), {web_expr}, {store_expr}, {web_vr}, {store_vr}
+            SELECT 'site', SITE, NULL, {imps_expr}, {web_expr}, {store_expr}, {web_vr}, {store_vr}
             FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-            WHERE {adv_filter} AND {date_filter} GROUP BY SITE HAVING COUNT(*) >= 2000
+            WHERE {adv_filter} AND {date_filter} GROUP BY SITE HAVING COUNT(DISTINCT CACHE_BUSTER) >= 500
             ORDER BY 1, 4 DESC
         """
 
@@ -1466,25 +1466,26 @@ def get_optimize_geo():
 
         date_filter = "IMP_DATE BETWEEN DATEADD(day, -35, CURRENT_DATE) AND DATEADD(day, -5, CURRENT_DATE)"
         adv_filter = "QUORUM_ADVERTISER_ID = %(adv_id)s"
-        web_expr = "SUM(CASE WHEN i.IS_SITE_VISIT = 'TRUE' THEN 1 ELSE 0 END)"
-        store_expr = "SUM(CASE WHEN i.IS_STORE_VISIT = 'TRUE' THEN 1 ELSE 0 END)"
-        web_vr = f"ROUND({web_expr}*100.0/NULLIF(COUNT(*),0), 4)"
-        store_vr = f"ROUND({store_expr}*100.0/NULLIF(COUNT(*),0), 4)"
+        imps_expr = "COUNT(DISTINCT i.CACHE_BUSTER)"
+        web_expr = "COUNT(DISTINCT CASE WHEN i.IS_SITE_VISIT = 'TRUE' THEN i.IMP_MAID END)"
+        store_expr = "COUNT(DISTINCT CASE WHEN i.IS_STORE_VISIT = 'TRUE' THEN i.IMP_MAID END)"
+        web_vr = f"ROUND({web_expr}*100.0/NULLIF({imps_expr},0), 4)"
+        store_vr = f"ROUND({store_expr}*100.0/NULLIF({imps_expr},0), 4)"
 
         q2 = f"""
             SELECT 'dma' as DIM_TYPE, z.DMA_CODE as DIM_KEY, MAX(z.DMA_NAME) as DIM_NAME,
-                COUNT(*) as IMPS, {web_expr} as WEB_VISITS, {store_expr} as STORE_VISITS,
+                {imps_expr} as IMPS, {web_expr} as WEB_VISITS, {store_expr} as STORE_VISITS,
                 {web_vr} as WEB_VR, {store_vr} as STORE_VR
             FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS i
             JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING z ON i.ZIP_CODE = z.ZIP_CODE
             WHERE i.{adv_filter} AND i.{date_filter}
-            GROUP BY z.DMA_CODE HAVING COUNT(*) >= 2000
+            GROUP BY z.DMA_CODE HAVING COUNT(DISTINCT i.CACHE_BUSTER) >= 500
             UNION ALL
-            SELECT 'zip', i.ZIP_CODE, MAX(z.DMA_NAME), COUNT(*), {web_expr}, {store_expr}, {web_vr}, {store_vr}
+            SELECT 'zip', i.ZIP_CODE, MAX(z.DMA_NAME), {imps_expr}, {web_expr}, {store_expr}, {web_vr}, {store_vr}
             FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS i
             JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING z ON i.ZIP_CODE = z.ZIP_CODE
             WHERE i.{adv_filter} AND i.{date_filter}
-            GROUP BY i.ZIP_CODE HAVING COUNT(*) >= 200
+            GROUP BY i.ZIP_CODE HAVING COUNT(DISTINCT i.CACHE_BUSTER) >= 50
             ORDER BY 1, 4 DESC
         """
 
