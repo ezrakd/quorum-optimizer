@@ -1057,6 +1057,8 @@ def get_traffic_sources():
                 SELECT DISTINCT LOWER(REPLACE(IMP_MAID, '-', '')) AS clean_maid
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
                 WHERE QUORUM_ADVERTISER_ID = %(advertiser_id_int)s
+                  AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
+                  AND IMP_MAID IS NOT NULL AND IMP_MAID != ''
             ),
             classified AS (
                 SELECT md.dominant_source AS traffic_source,
