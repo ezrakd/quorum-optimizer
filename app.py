@@ -1556,282 +1556,315 @@ def get_optimize_geo():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # =============================================================================
-# PIPELINE HEALTH DASHBOARD
+# OPS CONSOLE — PIPELINE HEALTH DASHBOARD
 # =============================================================================
 @app.route('/api/v5/pipeline-health', methods=['GET'])
 def pipeline_health():
-    """Cross-client pipeline health: ad impressions, store visits, web pixels."""
+    """Ops console: table freshness, volume trends, scheduled tasks, anomalies."""
     try:
         conn = get_snowflake_connection()
         cursor = conn.cursor()
 
-        # 1. Agency name lookup (ID → name, using individual advertiser IDs)
-        cursor.execute("""
-            SELECT DISTINCT ID, COMP_NAME, AGENCY_NAME, ADVERTISER_ID
-            FROM QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER
-        """)
-        agency_map = {}
-        parent_map = {}
-        for row in cursor.fetchall():
-            agency_map[row[0]] = {'name': row[1], 'agency': row[2], 'parent_id': row[3]}
-            if row[3] not in parent_map:
-                parent_map[row[3]] = row[2]
+        import math
 
-        # 2. Ad impression health by agency (last 30d)
-        cursor.execute("""
-            SELECT AGENCY_ID,
-                   MAX(CASE WHEN AUCTION_TIMESTAMP <= CURRENT_TIMESTAMP() THEN AUCTION_TIMESTAMP END)::DATE AS last_data,
-                   COUNT(*) AS impressions_30d,
-                   SUM(CASE WHEN AUCTION_TIMESTAMP >= DATEADD('day', -7, CURRENT_DATE())
-                            AND AUCTION_TIMESTAMP <= CURRENT_TIMESTAMP() THEN 1 ELSE 0 END) AS impressions_7d,
-                   SUM(CASE WHEN AUCTION_TIMESTAMP >= DATEADD('day', -14, CURRENT_DATE())
-                            AND AUCTION_TIMESTAMP < DATEADD('day', -7, CURRENT_DATE()) THEN 1 ELSE 0 END) AS impressions_prev_7d,
-                   COUNT(DISTINCT DSP_PLATFORM_TYPE) AS platforms,
-                   COUNT(DISTINCT QUORUM_ADVERTISER_ID) AS advertisers
-            FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2
-            WHERE AUCTION_TIMESTAMP >= DATEADD('day', -30, CURRENT_DATE())
-            GROUP BY AGENCY_ID
-        """)
-        imp_cols = [d[0] for d in cursor.description]
-        impression_health = {}
-        for row in cursor.fetchall():
-            d = dict(zip(imp_cols, row))
-            aid = d['AGENCY_ID']
-            last = d['LAST_DATA']
-            days_stale = (datetime.now().date() - last).days if last else 999
-            cur_7d = int(d['IMPRESSIONS_7D'] or 0)
-            prev_7d = int(d['IMPRESSIONS_PREV_7D'] or 0)
-            wow_change = ((cur_7d - prev_7d) / prev_7d * 100) if prev_7d > 0 else 0
-            impression_health[aid] = {
-                'last_data': str(last) if last else None,
-                'days_stale': days_stale,
-                'count_30d': int(d['IMPRESSIONS_30D'] or 0),
-                'count_7d': cur_7d,
-                'wow_change': round(wow_change, 1),
-                'platforms': int(d['PLATFORMS'] or 0),
-                'advertisers': int(d['ADVERTISERS'] or 0),
-                'status': 'green' if days_stale <= 2 else ('yellow' if days_stale <= 7 else 'red')
-            }
+        # =====================================================================
+        # 1. TABLE FRESHNESS — key tables with last data timestamp + row counts
+        # =====================================================================
+        table_health = []
 
-        # 3. Store visit health by agency (last 60d for trend visibility)
-        cursor.execute("""
-            SELECT AGENCY_ID,
-                   MAX(STORE_VISIT_DATE) AS last_data,
-                   COUNT(*) AS visits_60d,
-                   SUM(CASE WHEN STORE_VISIT_DATE >= DATEADD('day', -7, CURRENT_DATE()) THEN 1 ELSE 0 END) AS visits_7d,
-                   SUM(CASE WHEN STORE_VISIT_DATE >= DATEADD('day', -14, CURRENT_DATE())
-                            AND STORE_VISIT_DATE < DATEADD('day', -7, CURRENT_DATE()) THEN 1 ELSE 0 END) AS visits_prev_7d,
-                   COUNT(DISTINCT QUORUM_ADVERTISER_ID) AS advertisers
-            FROM QUORUMDB.BASE_TABLES.STORE_VISITS
-            WHERE STORE_VISIT_DATE >= DATEADD('day', -60, CURRENT_DATE())
-            GROUP BY AGENCY_ID
-        """)
-        sv_cols = [d[0] for d in cursor.description]
-        visit_health = {}
-        for row in cursor.fetchall():
-            d = dict(zip(sv_cols, row))
-            aid = d['AGENCY_ID']
-            last = d['LAST_DATA']
-            days_stale = (datetime.now().date() - last).days if last else 999
-            cur_7d = int(d['VISITS_7D'] or 0)
-            prev_7d = int(d['VISITS_PREV_7D'] or 0)
-            wow_change = ((cur_7d - prev_7d) / prev_7d * 100) if prev_7d > 0 else (0 if cur_7d == 0 else 100)
-            visit_health[aid] = {
-                'last_data': str(last) if last else None,
-                'days_stale': days_stale,
-                'count_60d': int(d['VISITS_60D'] or 0),
-                'count_7d': cur_7d,
-                'wow_change': round(wow_change, 1),
-                'advertisers': int(d['ADVERTISERS'] or 0),
-                'status': 'green' if days_stale <= 3 else ('yellow' if days_stale <= 10 else 'red')
-            }
+        # Define monitored tables: (label, schema.table, timestamp_col, description)
+        monitored_tables = [
+            ('Ad Impressions (V2)', 'QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2', 'AUCTION_TIMESTAMP', 'Primary ad impression log from all DSPs'),
+            ('Store Visits', 'QUORUMDB.BASE_TABLES.STORE_VISITS', 'STORE_VISIT_DATE', 'Foot traffic attribution data'),
+            ('Web Pixel Raw', 'QUORUMDB.BASE_TABLES.WEBPIXEL_IMPRESSION_LOG', 'SYS_TIMESTAMP', 'Raw web pixel fire events'),
+            ('Web Pixel Events', 'QUORUMDB.DERIVED_TABLES.WEBPIXEL_EVENTS', 'STAGING_SYS_TIMESTAMP', 'Transformed web pixel analytical layer'),
+            ('Advertiser Weekly Stats', 'QUORUMDB.SEGMENT_DATA.ADVERTISER_WEEKLY_STATS', 'CREATED_AT', 'Weekly aggregated advertiser statistics'),
+        ]
 
-        # 4. Web pixel health (from staging table — accessible via SEGMENT_DATA)
-        pixel_health = {}
+        for label, table, ts_col, description in monitored_tables:
+            try:
+                cursor.execute(f"""
+                    SELECT MAX({ts_col})::TIMESTAMP_NTZ AS last_data,
+                           DATEDIFF('day', MAX(CASE WHEN {ts_col} <= CURRENT_TIMESTAMP() THEN {ts_col} END)::DATE, CURRENT_DATE()) AS days_stale
+                    FROM {table}
+                    WHERE {ts_col} <= CURRENT_TIMESTAMP()
+                """)
+                row = cursor.fetchone()
+                last_data = str(row[0]) if row and row[0] else None
+                days_stale = int(row[1]) if row and row[1] is not None else 999
+
+                # Get approximate row count from metadata (fast)
+                schema_table = table.split('.')
+                try:
+                    cursor.execute(f"SHOW TABLES LIKE '{schema_table[-1]}' IN SCHEMA {schema_table[0]}.{schema_table[1]}")
+                    trow = cursor.fetchone()
+                    total_rows = int(trow[7]) if trow else 0  # rows column
+                    total_bytes = int(trow[8]) if trow else 0
+                except:
+                    total_rows = 0
+                    total_bytes = 0
+
+                if days_stale <= 1:
+                    status = 'green'
+                elif days_stale <= 3:
+                    status = 'yellow'
+                elif days_stale <= 7:
+                    status = 'yellow'
+                else:
+                    status = 'red'
+
+                table_health.append({
+                    'label': label,
+                    'table': table,
+                    'description': description,
+                    'last_data': last_data,
+                    'days_stale': days_stale,
+                    'total_rows': total_rows,
+                    'total_bytes': total_bytes,
+                    'status': status
+                })
+            except Exception as te:
+                table_health.append({
+                    'label': label,
+                    'table': table,
+                    'description': description,
+                    'last_data': None,
+                    'days_stale': 999,
+                    'total_rows': 0,
+                    'total_bytes': 0,
+                    'status': 'red',
+                    'error': str(te)[:200]
+                })
+
+        # =====================================================================
+        # 2. DAILY VOLUME TRENDS — last 14 days for key pipelines
+        # =====================================================================
+        volume_trends = {}
+
+        # Ad Impressions daily
         try:
             cursor.execute("""
-                SELECT AG_ID,
-                       MAX(SYS_TIMESTAMP)::DATE AS last_data,
-                       COUNT(*) AS events_30d,
-                       SUM(CASE WHEN SYS_TIMESTAMP >= DATEADD('day', -7, CURRENT_DATE()) THEN 1 ELSE 0 END) AS events_7d
-                FROM QUORUMDB.SEGMENT_DATA.WEBPIXEL_IMPRESSION_LOG
-                WHERE SYS_TIMESTAMP >= DATEADD('day', -30, CURRENT_DATE())
-                GROUP BY AG_ID
+                SELECT AUCTION_TIMESTAMP::DATE AS dt, COUNT(*) AS cnt
+                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2
+                WHERE AUCTION_TIMESTAMP >= DATEADD('day', -14, CURRENT_DATE())
+                  AND AUCTION_TIMESTAMP <= CURRENT_TIMESTAMP()
+                GROUP BY 1 ORDER BY 1
             """)
-            px_cols = [d[0] for d in cursor.description]
-            for row in cursor.fetchall():
-                d = dict(zip(px_cols, row))
-                aid = d['AG_ID']
-                last = d['LAST_DATA']
-                days_stale = (datetime.now().date() - last).days if last else 999
-                pixel_health[aid] = {
-                    'last_data': str(last) if last else None,
-                    'days_stale': days_stale,
-                    'count_30d': int(d['EVENTS_30D'] or 0),
-                    'count_7d': int(d['EVENTS_7D'] or 0),
-                    'status': 'green' if days_stale <= 2 else ('yellow' if days_stale <= 7 else 'red')
-                }
-        except Exception:
-            pass  # May not have access
+            volume_trends['impressions'] = [{'date': str(r[0]), 'count': int(r[1])} for r in cursor.fetchall()]
+        except:
+            volume_trends['impressions'] = []
 
-        # 5. Transform log status (DERIVED_TABLES — may not be accessible)
+        # Store Visits daily
+        try:
+            cursor.execute("""
+                SELECT STORE_VISIT_DATE AS dt, COUNT(*) AS cnt
+                FROM QUORUMDB.BASE_TABLES.STORE_VISITS
+                WHERE STORE_VISIT_DATE >= DATEADD('day', -30, CURRENT_DATE())
+                GROUP BY 1 ORDER BY 1
+            """)
+            volume_trends['store_visits'] = [{'date': str(r[0]), 'count': int(r[1])} for r in cursor.fetchall()]
+        except:
+            volume_trends['store_visits'] = []
+
+        # Web Pixels daily
+        try:
+            cursor.execute("""
+                SELECT SYS_TIMESTAMP::DATE AS dt, COUNT(*) AS cnt
+                FROM QUORUMDB.BASE_TABLES.WEBPIXEL_IMPRESSION_LOG
+                WHERE SYS_TIMESTAMP >= DATEADD('day', -14, CURRENT_DATE())
+                GROUP BY 1 ORDER BY 1
+            """)
+            volume_trends['web_pixels'] = [{'date': str(r[0]), 'count': int(r[1])} for r in cursor.fetchall()]
+        except:
+            volume_trends['web_pixels'] = []
+
+        # =====================================================================
+        # 3. ANOMALY DETECTION — compare recent vs baseline
+        # =====================================================================
+        alerts = []
+
+        for pipeline_name, trend_data in volume_trends.items():
+            if len(trend_data) < 7:
+                continue
+            # Last 3 days vs prior 7 days
+            recent = trend_data[-3:] if len(trend_data) >= 3 else trend_data
+            baseline = trend_data[-10:-3] if len(trend_data) >= 10 else trend_data[:-3]
+
+            if not baseline or not recent:
+                continue
+
+            avg_recent = sum(d['count'] for d in recent) / len(recent)
+            avg_baseline = sum(d['count'] for d in baseline) / len(baseline)
+
+            if avg_baseline > 0:
+                change_pct = ((avg_recent - avg_baseline) / avg_baseline) * 100
+            else:
+                change_pct = 0
+
+            if change_pct < -50:
+                alerts.append({
+                    'severity': 'critical',
+                    'pipeline': pipeline_name,
+                    'message': f'{pipeline_name.replace("_", " ").title()} volume dropped {abs(change_pct):.0f}% — avg {avg_recent:,.0f}/day vs baseline {avg_baseline:,.0f}/day',
+                    'avg_recent': avg_recent,
+                    'avg_baseline': avg_baseline,
+                    'change_pct': round(change_pct, 1)
+                })
+            elif change_pct < -25:
+                alerts.append({
+                    'severity': 'warning',
+                    'pipeline': pipeline_name,
+                    'message': f'{pipeline_name.replace("_", " ").title()} volume down {abs(change_pct):.0f}% — avg {avg_recent:,.0f}/day vs baseline {avg_baseline:,.0f}/day',
+                    'avg_recent': avg_recent,
+                    'avg_baseline': avg_baseline,
+                    'change_pct': round(change_pct, 1)
+                })
+
+        # Add staleness alerts from table health
+        for t in table_health:
+            if t['days_stale'] > 7:
+                alerts.append({
+                    'severity': 'critical',
+                    'pipeline': t['label'],
+                    'message': f"{t['label']} has not received data in {t['days_stale']} days (last: {t['last_data'][:10] if t['last_data'] else 'never'})"
+                })
+            elif t['days_stale'] > 3:
+                alerts.append({
+                    'severity': 'warning',
+                    'pipeline': t['label'],
+                    'message': f"{t['label']} is {t['days_stale']} days stale (last: {t['last_data'][:10] if t['last_data'] else 'never'})"
+                })
+
+        # =====================================================================
+        # 4. SCHEDULED TASKS — check what's running/suspended
+        # =====================================================================
+        tasks = []
+        try:
+            cursor.execute("SHOW TASKS IN DATABASE QUORUMDB")
+            for row in cursor.fetchall():
+                task_name = row[1]
+                schema = row[4]
+                schedule = row[8]
+                state = row[10]
+                definition = row[11][:200] if row[11] else ''
+                last_committed = str(row[15]) if row[15] else None
+                last_suspended = str(row[16]) if row[16] else None
+                suspend_reason = row[20] if len(row) > 20 else None
+
+                task_status = 'green' if state == 'started' else 'red'
+                tasks.append({
+                    'name': task_name,
+                    'schema': schema,
+                    'schedule': schedule,
+                    'state': state,
+                    'status': task_status,
+                    'definition_preview': definition,
+                    'last_committed': last_committed,
+                    'last_suspended': last_suspended,
+                    'suspend_reason': suspend_reason
+                })
+
+                # Alert on suspended tasks
+                if state == 'suspended':
+                    alerts.append({
+                        'severity': 'critical',
+                        'pipeline': task_name,
+                        'message': f"Scheduled task {task_name} is SUSPENDED" + (f" — {suspend_reason}" if suspend_reason else "")
+                    })
+        except Exception as te:
+            tasks.append({'name': 'TASKS_UNAVAILABLE', 'error': str(te)[:200], 'status': 'unknown'})
+
+        # =====================================================================
+        # 5. TRANSFORM LOG — recent batch runs
+        # =====================================================================
         transform_log = []
         try:
             cursor.execute("""
-                SELECT BATCH_ID, STATUS, STARTED_AT, COMPLETED_AT, EVENTS_INSERTED, ERROR_MESSAGE
+                SELECT BATCH_ID, STATUS, STARTED_AT, COMPLETED_AT,
+                       EVENTS_INSERTED, ERROR_MESSAGE, HOUR_START, HOUR_END
                 FROM QUORUMDB.DERIVED_TABLES.WEBPIXEL_TRANSFORM_LOG
-                ORDER BY STARTED_AT DESC LIMIT 10
+                ORDER BY STARTED_AT DESC
+                LIMIT 20
             """)
-            log_cols = [d[0] for d in cursor.description]
             for row in cursor.fetchall():
-                d = dict(zip(log_cols, row))
-                for k, v in d.items():
-                    if hasattr(v, 'isoformat'):
-                        d[k] = v.isoformat()
-                    elif hasattr(v, 'is_integer'):
-                        d[k] = int(v) if v else 0
-                transform_log.append(d)
-        except Exception:
-            pass  # OPTIMIZER_READONLY_ROLE may not have DERIVED_TABLES access
+                transform_log.append({
+                    'BATCH_ID': row[0], 'STATUS': row[1],
+                    'STARTED_AT': str(row[2]) if row[2] else None,
+                    'COMPLETED_AT': str(row[3]) if row[3] else None,
+                    'EVENTS_INSERTED': int(row[4]) if row[4] else 0,
+                    'ERROR_MESSAGE': row[5],
+                    'HOUR_START': str(row[6]) if row[6] else None,
+                    'HOUR_END': str(row[7]) if row[7] else None,
+                })
+        except:
+            pass  # DERIVED_TABLES may not be accessible
+
+        # =====================================================================
+        # 6. STORED PROCEDURES — inventory
+        # =====================================================================
+        procedures = []
+        try:
+            cursor.execute("SHOW USER PROCEDURES IN DATABASE QUORUMDB")
+            for row in cursor.fetchall():
+                proc_name = row[1]
+                schema = row[2]
+                desc = row[9] if len(row) > 9 else ''
+                if proc_name.startswith('SYSTEM$'):
+                    continue
+                procedures.append({
+                    'name': proc_name,
+                    'schema': schema,
+                    'description': desc[:200] if desc else ''
+                })
+        except:
+            pass
 
         cursor.close()
         conn.close()
 
-        # 6. Roll up to parent agency level
-        # Build child→parent mapping: advertiser ID → (parent_id, agency_name)
-        child_to_parent = {}
-        for child_id, info in agency_map.items():
-            pid = info.get('parent_id')
-            aname = info.get('agency')
-            if pid and aname:
-                child_to_parent[child_id] = (pid, aname)
+        # =====================================================================
+        # 7. BUILD RESPONSE
+        # =====================================================================
+        # Sort alerts: critical first, then warning
+        severity_order = {'critical': 0, 'warning': 1, 'info': 2}
+        alerts.sort(key=lambda a: severity_order.get(a.get('severity', 'info'), 3))
 
-        def merge_pipeline(existing, new_data):
-            """Merge two pipeline dicts by taking max dates and summing volumes."""
-            if not existing:
-                return dict(new_data)
-            if not new_data:
-                return existing
-            merged = dict(existing)
-            # Take the most recent last_data
-            if new_data.get('last_data') and (not merged.get('last_data') or new_data['last_data'] > merged['last_data']):
-                merged['last_data'] = new_data['last_data']
-                merged['days_stale'] = new_data['days_stale']
-            # Sum volumes
-            for key in ['count_30d', 'count_60d', 'count_7d']:
-                if key in new_data:
-                    merged[key] = merged.get(key, 0) + new_data[key]
-            # Recalculate status from the best (freshest) data
-            stale = merged.get('days_stale', 999)
-            if 'count_60d' in merged:
-                merged['status'] = 'green' if stale <= 3 else ('yellow' if stale <= 10 else 'red')
-            else:
-                merged['status'] = 'green' if stale <= 2 else ('yellow' if stale <= 7 else 'red')
-            # Sum advertisers if present
-            if 'advertisers' in new_data:
-                merged['advertisers'] = merged.get('advertisers', 0) + new_data.get('advertisers', 0)
-            # Recalculate wow from summed 7d volumes (approximate)
-            merged.pop('wow_change', None)
-            return merged
+        # Overall system status
+        has_critical = any(a['severity'] == 'critical' for a in alerts)
+        has_warning = any(a['severity'] == 'warning' for a in alerts)
+        overall_status = 'red' if has_critical else ('yellow' if has_warning else 'green')
 
-        # Collect all advertiser IDs across pipelines
-        all_adv_ids = set(list(impression_health.keys()) + list(visit_health.keys()) + list(pixel_health.keys()))
-
-        # Roll up: group by parent agency
-        parent_agencies = {}  # parent_id → {name, impressions, store_visits, web_pixels}
-        orphan_agencies = {}  # IDs that don't map to a parent
-
-        for aid in all_adv_ids:
-            if aid is None or aid == 0:
-                continue
-            aid_int = int(aid) if aid else 0
-
-            imp = impression_health.get(aid, {})
-            sv = visit_health.get(aid, {})
-            px = pixel_health.get(aid, {})
-
-            # Find parent
-            if aid_int in child_to_parent:
-                pid, pname = child_to_parent[aid_int]
-            elif aid_int in parent_map:
-                pid, pname = aid_int, parent_map[aid_int]
-            else:
-                # Check AGENCY_CONFIG for known agencies
-                config = AGENCY_CONFIG.get(aid_int)
-                if config:
-                    pid, pname = aid_int, config['name']
-                else:
-                    pid, pname = aid_int, f"Agency {aid_int}"
-
-            if pid not in parent_agencies:
-                parent_agencies[pid] = {
-                    'name': pname,
-                    'impressions': {},
-                    'store_visits': {},
-                    'web_pixels': {},
-                    'child_count': 0
-                }
-
-            parent_agencies[pid]['impressions'] = merge_pipeline(parent_agencies[pid]['impressions'], imp)
-            parent_agencies[pid]['store_visits'] = merge_pipeline(parent_agencies[pid]['store_visits'], sv)
-            parent_agencies[pid]['web_pixels'] = merge_pipeline(parent_agencies[pid]['web_pixels'], px)
-            parent_agencies[pid]['child_count'] += 1
-
-        # Override names from AGENCY_CONFIG where available
-        for pid in parent_agencies:
-            config = AGENCY_CONFIG.get(pid)
-            if config:
-                parent_agencies[pid]['name'] = config['name']
-
-        agencies = []
-        for pid, data in parent_agencies.items():
-            imp = data['impressions'] or None
-            sv = data['store_visits'] or None
-            px = data['web_pixels'] or None
-
-            # Overall status: worst of all pipelines that have data
-            statuses = [s.get('status', 'green') for s in [imp, sv, px] if s]
-            if 'red' in statuses:
-                overall = 'red'
-            elif 'yellow' in statuses:
-                overall = 'yellow'
-            else:
-                overall = 'green'
-
-            agencies.append({
-                'agency_id': pid,
-                'name': data['name'],
-                'advertisers': data['child_count'],
-                'overall_status': overall,
-                'impressions': imp if imp else None,
-                'store_visits': sv if sv else None,
-                'web_pixels': px if px else None
-            })
-
-        # Sort by overall status (red first), then by impression volume
-        status_order = {'red': 0, 'yellow': 1, 'green': 2}
-        agencies.sort(key=lambda a: (
-            status_order.get(a['overall_status'], 3),
-            -(a['impressions'] or {}).get('count_30d', 0)
-        ))
+        # Pipeline-level status summary
+        pipeline_status = {}
+        for t in table_health:
+            pipeline_status[t['label']] = t['status']
+        for task in tasks:
+            if task.get('state') == 'suspended':
+                pipeline_status[task['name']] = 'red'
 
         return jsonify({
             'success': True,
-            'data': agencies,
+            'overall_status': overall_status,
+            'tables': table_health,
+            'volume_trends': volume_trends,
+            'alerts': alerts,
+            'tasks': tasks,
             'transform_log': transform_log,
+            'procedures': procedures,
+            'pipeline_status': pipeline_status,
             'summary': {
-                'total_agencies': len(agencies),
-                'red': sum(1 for a in agencies if a['overall_status'] == 'red'),
-                'yellow': sum(1 for a in agencies if a['overall_status'] == 'yellow'),
-                'green': sum(1 for a in agencies if a['overall_status'] == 'green'),
-                'store_visit_alert': all(
-                    (v.get('days_stale', 0) > 7) for v in visit_health.values()
-                ) if visit_health else False
+                'total_tables_monitored': len(table_health),
+                'tables_healthy': sum(1 for t in table_health if t['status'] == 'green'),
+                'tables_warning': sum(1 for t in table_health if t['status'] == 'yellow'),
+                'tables_critical': sum(1 for t in table_health if t['status'] == 'red'),
+                'total_alerts': len(alerts),
+                'critical_alerts': sum(1 for a in alerts if a['severity'] == 'critical'),
+                'tasks_running': sum(1 for t in tasks if t.get('state') == 'started'),
+                'tasks_suspended': sum(1 for t in tasks if t.get('state') == 'suspended'),
             }
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
-
 
 # =============================================================================
 # MAIN
