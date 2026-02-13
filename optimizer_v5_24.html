@@ -1883,6 +1883,7 @@
             const tasks = result.tasks || [];
             const transformLog = result.transform_log || [];
             const procs = result.procedures || [];
+            const tableAccess = result.table_access || [];
             const summary = result.summary || {};
             const overallStatus = result.overall_status || 'green';
 
@@ -2084,6 +2085,53 @@
                         </tbody>
                     </table>
                 </div>` : ''}
+
+                ${tableAccess.length > 0 && !tableAccess[0].error ? `
+                <div class="table-container">
+                    <div class="table-title">
+                        Table Access Tracking
+                        <span class="table-note">Last 7 days · ${tableAccess.length} tables monitored</span>
+                    </div>
+                    <table>
+                        <thead><tr>
+                            <th>Status</th>
+                            <th>Table</th>
+                            <th class="text-right">Queries (7d)</th>
+                            <th class="text-right">Avg/Day</th>
+                            <th class="text-right">Today</th>
+                            <th class="text-right">Yesterday</th>
+                            <th class="text-right">Users</th>
+                            <th>Last Accessed</th>
+                            <th>Signal</th>
+                        </tr></thead>
+                        <tbody>
+                            ${tableAccess.map(a => {
+                                const anomalyColors = {normal:'#00ba7c', silent:'#f4212e', drop:'#f7931a', spike:'#1d9bf0'};
+                                const anomalyLabels = {normal:'Normal', silent:'Gone Dark', drop:'Drop', spike:'Spike'};
+                                const anomalyBg = {normal:'#0d2818', silent:'#3d1f1f', drop:'#2d2010', spike:'#0d2030'};
+                                const dotColor = a.anomaly === 'normal' ? '#00ba7c' : (a.anomaly === 'silent' ? '#f4212e' : '#f7931a');
+                                return `<tr>
+                                    <td><span style="display:inline-block; width:10px; height:10px; border-radius:50%; background:${dotColor};"></span></td>
+                                    <td style="font-size:12px;"><strong>${a.label}</strong><br><span class="text-muted" style="font-size:10px; font-family:monospace;">${a.table_name}</span></td>
+                                    <td class="text-right">${(a.total_queries_7d || 0).toLocaleString()}</td>
+                                    <td class="text-right">${a.avg_daily_queries || 0}</td>
+                                    <td class="text-right" style="color:${a.today_queries < (a.avg_daily_queries * 0.3) && a.avg_daily_queries > 10 ? '#f4212e' : '#e7e9ea'}; font-weight:${a.anomaly !== 'normal' ? '600' : '400'};">${a.today_queries || 0}</td>
+                                    <td class="text-right">${a.yesterday_queries || 0}</td>
+                                    <td class="text-right">${a.max_daily_users || 0}</td>
+                                    <td class="text-muted" style="font-size:11px;">${a.last_accessed || 'never'}</td>
+                                    <td><span style="display:inline-block; padding:2px 8px; border-radius:10px; font-size:10px; font-weight:600; color:${anomalyColors[a.anomaly] || '#aaa'}; background:${anomalyBg[a.anomaly] || '#222'}; border:1px solid ${anomalyColors[a.anomaly] || '#555'}30;">${anomalyLabels[a.anomaly] || a.anomaly}</span></td>
+                                </tr>`;
+                            }).join('')}
+                        </tbody>
+                    </table>
+                </div>` : (tableAccess.length > 0 && tableAccess[0].error ? `
+                <div class="table-container">
+                    <div class="table-title">Table Access Tracking <span class="table-note" style="color:#f7931a;">Grant needed</span></div>
+                    <div style="padding:16px; color:#94a3b8; font-size:13px;">
+                        Table access tracking requires IMPORTED PRIVILEGES on the SNOWFLAKE database.<br>
+                        <code style="font-size:11px; color:#f7931a; background:#2d2010; padding:4px 8px; border-radius:4px; margin-top:8px; display:inline-block;">${tableAccess[0].grant_needed}</code>
+                    </div>
+                </div>` : '')}
             `;
         }
 

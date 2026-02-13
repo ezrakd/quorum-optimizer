@@ -1803,11 +1803,108 @@ def pipeline_health():
         except:
             pass
 
+        # =====================================================================
+        # 7. TABLE ACCESS TRACKING — who's querying what, anomaly detection
+        # =====================================================================
+        table_access = []
+        access_alerts = []
+        try:
+            cursor.execute("""
+                WITH known_tables AS (
+                    SELECT * FROM (VALUES
+                        ('AD_IMPRESSION_LOG_V2','Ad Impressions'),
+                        ('STORE_VISITS','Store Visits'),
+                        ('WEBPIXEL_IMPRESSION_LOG','Web Pixel Raw'),
+                        ('WEBPIXEL_EVENTS','Web Pixel Events'),
+                        ('SEGMENT_DEVICES_CAPTURED','Segment Devices'),
+                        ('XANDR_IMPRESSION_LOG','Xandr Impressions'),
+                        ('CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS','Campaign Weekly Stats'),
+                        ('PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS','Paramount 90-Day'),
+                        ('PARAMOUNT_IMPRESSIONS_REPORT','Paramount Full'),
+                        ('AGENCY_ADVERTISER','Agency Advertiser'),
+                        ('LIVERAMP_IMPRESSION_LOG','LiveRamp Impressions'),
+                        ('CENTRIOD_DATA','Centroid Data'),
+                        ('PIXEL_IMPRESSIONS','Pixel Impressions'),
+                        ('CENTROID_MD5_VISITS_VISITORS','Centroid MD5 Visits')
+                    ) AS t(TABLE_NAME, LABEL)
+                ),
+                daily_access AS (
+                    SELECT
+                        kt.TABLE_NAME,
+                        kt.LABEL,
+                        qh.START_TIME::DATE as query_date,
+                        COUNT(*) as queries,
+                        COUNT(DISTINCT qh.USER_NAME) as users
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY qh
+                    CROSS JOIN known_tables kt
+                    WHERE qh.START_TIME >= DATEADD('day', -7, CURRENT_TIMESTAMP())
+                      AND qh.DATABASE_NAME = 'QUORUMDB'
+                      AND qh.QUERY_TYPE IN ('SELECT','INSERT','CREATE_TABLE_AS_SELECT','MERGE')
+                      AND UPPER(qh.QUERY_TEXT) LIKE '%' || kt.TABLE_NAME || '%'
+                    GROUP BY kt.TABLE_NAME, kt.LABEL, query_date
+                ),
+                summary AS (
+                    SELECT
+                        TABLE_NAME,
+                        LABEL,
+                        SUM(queries) as total_queries_7d,
+                        MAX(users) as max_daily_users,
+                        MAX(query_date) as last_accessed,
+                        ROUND(AVG(queries), 0) as avg_daily_queries,
+                        MAX(CASE WHEN query_date = CURRENT_DATE() THEN queries ELSE 0 END) as today_queries,
+                        MAX(CASE WHEN query_date = CURRENT_DATE() - 1 THEN queries ELSE 0 END) as yesterday_queries
+                    FROM daily_access
+                    GROUP BY TABLE_NAME, LABEL
+                )
+                SELECT
+                    s.TABLE_NAME, s.LABEL, s.total_queries_7d, s.max_daily_users,
+                    s.last_accessed, s.avg_daily_queries, s.today_queries, s.yesterday_queries,
+                    CASE
+                        WHEN s.today_queries = 0 AND s.avg_daily_queries > 10 THEN 'silent'
+                        WHEN s.today_queries < s.avg_daily_queries * 0.3 AND s.avg_daily_queries > 10 THEN 'drop'
+                        WHEN s.today_queries > s.avg_daily_queries * 3 AND s.avg_daily_queries > 10 THEN 'spike'
+                        ELSE 'normal'
+                    END as anomaly
+                FROM summary s
+                ORDER BY s.total_queries_7d DESC
+            """)
+            for row in cursor.fetchall():
+                entry = {
+                    'table_name': row[0], 'label': row[1],
+                    'total_queries_7d': int(row[2] or 0),
+                    'max_daily_users': int(row[3] or 0),
+                    'last_accessed': str(row[4]) if row[4] else None,
+                    'avg_daily_queries': int(row[5] or 0),
+                    'today_queries': int(row[6] or 0),
+                    'yesterday_queries': int(row[7] or 0),
+                    'anomaly': row[8]
+                }
+                table_access.append(entry)
+
+                # Generate alerts for anomalies
+                if entry['anomaly'] == 'silent':
+                    access_alerts.append({
+                        'severity': 'warning',
+                        'pipeline': entry['label'],
+                        'message': f"{entry['label']} — zero queries today (avg {entry['avg_daily_queries']}/day). Table may have gone dark."
+                    })
+                elif entry['anomaly'] == 'drop':
+                    access_alerts.append({
+                        'severity': 'warning',
+                        'pipeline': entry['label'],
+                        'message': f"{entry['label']} — query volume dropped to {entry['today_queries']} (avg {entry['avg_daily_queries']}/day)"
+                    })
+
+            alerts.extend(access_alerts)
+        except Exception as ae:
+            # SNOWFLAKE.ACCOUNT_USAGE may require IMPORTED PRIVILEGES grant
+            table_access = [{'error': str(ae)[:200], 'grant_needed': 'GRANT IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE TO ROLE OPTIMIZER_READONLY_ROLE;'}]
+
         cursor.close()
         conn.close()
 
         # =====================================================================
-        # 7. BUILD RESPONSE
+        # 8. BUILD RESPONSE
         # =====================================================================
         # Sort alerts: critical first, then warning
         severity_order = {'critical': 0, 'warning': 1, 'info': 2}
@@ -1835,6 +1932,7 @@ def pipeline_health():
             'tasks': tasks,
             'transform_log': transform_log,
             'procedures': procedures,
+            'table_access': table_access,
             'pipeline_status': pipeline_status,
             'summary': {
                 'total_tables_monitored': len(table_health),
