@@ -128,14 +128,15 @@ def get_date_range():
 def health_check():
     return jsonify({
         'status': 'healthy',
-        'version': '5.12-ip-traffic-sources',
-        'description': 'IP-level traffic sources: fixes device-graph fan-out in pageview stats',
+        'version': '5.13-pipeline-health',
+        'description': 'Added pipeline health dashboard: cross-client monitoring for impressions, store visits, web pixels',
         'endpoints': [
             '/api/v5/agencies', '/api/v5/advertisers', '/api/v5/campaigns',
             '/api/v5/lineitems', '/api/v5/creative-performance', '/api/v5/publishers',
             '/api/v5/zip-performance', '/api/v5/dma-performance', '/api/v5/summary',
             '/api/v5/timeseries', '/api/v5/lift-analysis', '/api/v5/traffic-sources',
-            '/api/v5/optimize', '/api/v5/agency-timeseries', '/api/v5/advertiser-timeseries'
+            '/api/v5/optimize', '/api/v5/agency-timeseries', '/api/v5/advertiser-timeseries',
+            '/api/v5/pipeline-health'
         ]
     })
 
@@ -1553,6 +1554,214 @@ def get_optimize_geo():
         return jsonify({'success': True, 'data': results})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
+# =============================================================================
+# PIPELINE HEALTH DASHBOARD
+# =============================================================================
+@app.route('/api/v5/pipeline-health', methods=['GET'])
+def pipeline_health():
+    """Cross-client pipeline health: ad impressions, store visits, web pixels."""
+    try:
+        conn = get_snowflake_connection()
+        cursor = conn.cursor()
+
+        # 1. Agency name lookup (ID → name, using individual advertiser IDs)
+        cursor.execute("""
+            SELECT DISTINCT ID, COMP_NAME, AGENCY_NAME, ADVERTISER_ID
+            FROM QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER
+        """)
+        agency_map = {}
+        parent_map = {}
+        for row in cursor.fetchall():
+            agency_map[row[0]] = {'name': row[1], 'agency': row[2], 'parent_id': row[3]}
+            if row[3] not in parent_map:
+                parent_map[row[3]] = row[2]
+
+        # 2. Ad impression health by agency (last 30d)
+        cursor.execute("""
+            SELECT AGENCY_ID,
+                   MAX(CASE WHEN AUCTION_TIMESTAMP <= CURRENT_TIMESTAMP() THEN AUCTION_TIMESTAMP END)::DATE AS last_data,
+                   COUNT(*) AS impressions_30d,
+                   SUM(CASE WHEN AUCTION_TIMESTAMP >= DATEADD('day', -7, CURRENT_DATE())
+                            AND AUCTION_TIMESTAMP <= CURRENT_TIMESTAMP() THEN 1 ELSE 0 END) AS impressions_7d,
+                   SUM(CASE WHEN AUCTION_TIMESTAMP >= DATEADD('day', -14, CURRENT_DATE())
+                            AND AUCTION_TIMESTAMP < DATEADD('day', -7, CURRENT_DATE()) THEN 1 ELSE 0 END) AS impressions_prev_7d,
+                   COUNT(DISTINCT DSP_PLATFORM_TYPE) AS platforms,
+                   COUNT(DISTINCT QUORUM_ADVERTISER_ID) AS advertisers
+            FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2
+            WHERE AUCTION_TIMESTAMP >= DATEADD('day', -30, CURRENT_DATE())
+            GROUP BY AGENCY_ID
+        """)
+        imp_cols = [d[0] for d in cursor.description]
+        impression_health = {}
+        for row in cursor.fetchall():
+            d = dict(zip(imp_cols, row))
+            aid = d['AGENCY_ID']
+            last = d['LAST_DATA']
+            days_stale = (datetime.now().date() - last).days if last else 999
+            cur_7d = int(d['IMPRESSIONS_7D'] or 0)
+            prev_7d = int(d['IMPRESSIONS_PREV_7D'] or 0)
+            wow_change = ((cur_7d - prev_7d) / prev_7d * 100) if prev_7d > 0 else 0
+            impression_health[aid] = {
+                'last_data': str(last) if last else None,
+                'days_stale': days_stale,
+                'count_30d': int(d['IMPRESSIONS_30D'] or 0),
+                'count_7d': cur_7d,
+                'wow_change': round(wow_change, 1),
+                'platforms': int(d['PLATFORMS'] or 0),
+                'advertisers': int(d['ADVERTISERS'] or 0),
+                'status': 'green' if days_stale <= 2 else ('yellow' if days_stale <= 7 else 'red')
+            }
+
+        # 3. Store visit health by agency (last 60d for trend visibility)
+        cursor.execute("""
+            SELECT AGENCY_ID,
+                   MAX(STORE_VISIT_DATE) AS last_data,
+                   COUNT(*) AS visits_60d,
+                   SUM(CASE WHEN STORE_VISIT_DATE >= DATEADD('day', -7, CURRENT_DATE()) THEN 1 ELSE 0 END) AS visits_7d,
+                   SUM(CASE WHEN STORE_VISIT_DATE >= DATEADD('day', -14, CURRENT_DATE())
+                            AND STORE_VISIT_DATE < DATEADD('day', -7, CURRENT_DATE()) THEN 1 ELSE 0 END) AS visits_prev_7d,
+                   COUNT(DISTINCT QUORUM_ADVERTISER_ID) AS advertisers
+            FROM QUORUMDB.BASE_TABLES.STORE_VISITS
+            WHERE STORE_VISIT_DATE >= DATEADD('day', -60, CURRENT_DATE())
+            GROUP BY AGENCY_ID
+        """)
+        sv_cols = [d[0] for d in cursor.description]
+        visit_health = {}
+        for row in cursor.fetchall():
+            d = dict(zip(sv_cols, row))
+            aid = d['AGENCY_ID']
+            last = d['LAST_DATA']
+            days_stale = (datetime.now().date() - last).days if last else 999
+            cur_7d = int(d['VISITS_7D'] or 0)
+            prev_7d = int(d['VISITS_PREV_7D'] or 0)
+            wow_change = ((cur_7d - prev_7d) / prev_7d * 100) if prev_7d > 0 else (0 if cur_7d == 0 else 100)
+            visit_health[aid] = {
+                'last_data': str(last) if last else None,
+                'days_stale': days_stale,
+                'count_60d': int(d['VISITS_60D'] or 0),
+                'count_7d': cur_7d,
+                'wow_change': round(wow_change, 1),
+                'advertisers': int(d['ADVERTISERS'] or 0),
+                'status': 'green' if days_stale <= 3 else ('yellow' if days_stale <= 10 else 'red')
+            }
+
+        # 4. Web pixel health (from events table if populated, else transform log)
+        pixel_health = {}
+        try:
+            cursor.execute("""
+                SELECT AGENCY_ID,
+                       MAX(EVENT_DATE) AS last_data,
+                       COUNT(*) AS events_30d,
+                       SUM(CASE WHEN EVENT_DATE >= DATEADD('day', -7, CURRENT_DATE()) THEN 1 ELSE 0 END) AS events_7d
+                FROM QUORUMDB.DERIVED_TABLES.WEBPIXEL_EVENTS
+                WHERE EVENT_DATE >= DATEADD('day', -30, CURRENT_DATE())
+                GROUP BY AGENCY_ID
+            """)
+            px_cols = [d[0] for d in cursor.description]
+            for row in cursor.fetchall():
+                d = dict(zip(px_cols, row))
+                aid = d['AGENCY_ID']
+                last = d['LAST_DATA']
+                days_stale = (datetime.now().date() - last).days if last else 999
+                pixel_health[aid] = {
+                    'last_data': str(last) if last else None,
+                    'days_stale': days_stale,
+                    'count_30d': int(d['EVENTS_30D'] or 0),
+                    'count_7d': int(d['EVENTS_7D'] or 0),
+                    'status': 'green' if days_stale <= 2 else ('yellow' if days_stale <= 7 else 'red')
+                }
+        except Exception:
+            pass  # Table may still be backfilling
+
+        # 5. Transform log status
+        cursor.execute("""
+            SELECT BATCH_ID, STATUS, STARTED_AT, COMPLETED_AT, EVENTS_INSERTED, ERROR_MESSAGE
+            FROM QUORUMDB.DERIVED_TABLES.WEBPIXEL_TRANSFORM_LOG
+            ORDER BY STARTED_AT DESC LIMIT 10
+        """)
+        log_cols = [d[0] for d in cursor.description]
+        transform_log = []
+        for row in cursor.fetchall():
+            d = dict(zip(log_cols, row))
+            for k, v in d.items():
+                if hasattr(v, 'isoformat'):
+                    d[k] = v.isoformat()
+                elif hasattr(v, 'is_integer'):
+                    d[k] = int(v) if v else 0
+            transform_log.append(d)
+
+        cursor.close()
+        conn.close()
+
+        # 6. Merge into per-agency view
+        all_agency_ids = set(list(impression_health.keys()) + list(visit_health.keys()) + list(pixel_health.keys()))
+        agencies = []
+        for aid in all_agency_ids:
+            if aid is None or aid == 0:
+                continue
+            # Resolve name: check AGENCY_CONFIG first, then agency_map
+            name = None
+            agency_group = None
+            config = AGENCY_CONFIG.get(int(aid) if aid else 0)
+            if config:
+                name = config['name']
+            info = agency_map.get(int(aid) if aid else 0)
+            if info:
+                if not name:
+                    name = info['name']
+                agency_group = info['agency']
+            if not name:
+                name = parent_map.get(int(aid), f"Agency {aid}")
+                agency_group = name
+
+            imp = impression_health.get(aid, {})
+            sv = visit_health.get(aid, {})
+            px = pixel_health.get(aid, {})
+
+            # Overall status: worst of all pipelines that have data
+            statuses = [s.get('status', 'green') for s in [imp, sv, px] if s]
+            if 'red' in statuses:
+                overall = 'red'
+            elif 'yellow' in statuses:
+                overall = 'yellow'
+            else:
+                overall = 'green'
+
+            agencies.append({
+                'agency_id': int(aid) if aid else 0,
+                'name': name,
+                'agency_group': agency_group,
+                'overall_status': overall,
+                'impressions': imp if imp else None,
+                'store_visits': sv if sv else None,
+                'web_pixels': px if px else None
+            })
+
+        # Sort by overall status (red first), then by impression volume
+        status_order = {'red': 0, 'yellow': 1, 'green': 2}
+        agencies.sort(key=lambda a: (
+            status_order.get(a['overall_status'], 3),
+            -(a['impressions'] or {}).get('count_30d', 0)
+        ))
+
+        return jsonify({
+            'success': True,
+            'data': agencies,
+            'transform_log': transform_log,
+            'summary': {
+                'total_agencies': len(agencies),
+                'red': sum(1 for a in agencies if a['overall_status'] == 'red'),
+                'yellow': sum(1 for a in agencies if a['overall_status'] == 'yellow'),
+                'green': sum(1 for a in agencies if a['overall_status'] == 'green'),
+                'store_visit_alert': all(
+                    (v.get('days_stale', 0) > 7) for v in visit_health.values()
+                ) if visit_health else False
+            }
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 
 # =============================================================================
 # MAIN
