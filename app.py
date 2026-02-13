@@ -1697,30 +1697,97 @@ def pipeline_health():
         cursor.close()
         conn.close()
 
-        # 6. Merge into per-agency view
-        all_agency_ids = set(list(impression_health.keys()) + list(visit_health.keys()) + list(pixel_health.keys()))
-        agencies = []
-        for aid in all_agency_ids:
+        # 6. Roll up to parent agency level
+        # Build child→parent mapping: advertiser ID → (parent_id, agency_name)
+        child_to_parent = {}
+        for child_id, info in agency_map.items():
+            pid = info.get('parent_id')
+            aname = info.get('agency')
+            if pid and aname:
+                child_to_parent[child_id] = (pid, aname)
+
+        def merge_pipeline(existing, new_data):
+            """Merge two pipeline dicts by taking max dates and summing volumes."""
+            if not existing:
+                return dict(new_data)
+            if not new_data:
+                return existing
+            merged = dict(existing)
+            # Take the most recent last_data
+            if new_data.get('last_data') and (not merged.get('last_data') or new_data['last_data'] > merged['last_data']):
+                merged['last_data'] = new_data['last_data']
+                merged['days_stale'] = new_data['days_stale']
+            # Sum volumes
+            for key in ['count_30d', 'count_60d', 'count_7d']:
+                if key in new_data:
+                    merged[key] = merged.get(key, 0) + new_data[key]
+            # Recalculate status from the best (freshest) data
+            stale = merged.get('days_stale', 999)
+            if 'count_60d' in merged:
+                merged['status'] = 'green' if stale <= 3 else ('yellow' if stale <= 10 else 'red')
+            else:
+                merged['status'] = 'green' if stale <= 2 else ('yellow' if stale <= 7 else 'red')
+            # Sum advertisers if present
+            if 'advertisers' in new_data:
+                merged['advertisers'] = merged.get('advertisers', 0) + new_data.get('advertisers', 0)
+            # Recalculate wow from summed 7d volumes (approximate)
+            merged.pop('wow_change', None)
+            return merged
+
+        # Collect all advertiser IDs across pipelines
+        all_adv_ids = set(list(impression_health.keys()) + list(visit_health.keys()) + list(pixel_health.keys()))
+
+        # Roll up: group by parent agency
+        parent_agencies = {}  # parent_id → {name, impressions, store_visits, web_pixels}
+        orphan_agencies = {}  # IDs that don't map to a parent
+
+        for aid in all_adv_ids:
             if aid is None or aid == 0:
                 continue
-            # Resolve name: check AGENCY_CONFIG first, then agency_map
-            name = None
-            agency_group = None
-            config = AGENCY_CONFIG.get(int(aid) if aid else 0)
-            if config:
-                name = config['name']
-            info = agency_map.get(int(aid) if aid else 0)
-            if info:
-                if not name:
-                    name = info['name']
-                agency_group = info['agency']
-            if not name:
-                name = parent_map.get(int(aid), f"Agency {aid}")
-                agency_group = name
+            aid_int = int(aid) if aid else 0
 
             imp = impression_health.get(aid, {})
             sv = visit_health.get(aid, {})
             px = pixel_health.get(aid, {})
+
+            # Find parent
+            if aid_int in child_to_parent:
+                pid, pname = child_to_parent[aid_int]
+            elif aid_int in parent_map:
+                pid, pname = aid_int, parent_map[aid_int]
+            else:
+                # Check AGENCY_CONFIG for known agencies
+                config = AGENCY_CONFIG.get(aid_int)
+                if config:
+                    pid, pname = aid_int, config['name']
+                else:
+                    pid, pname = aid_int, f"Agency {aid_int}"
+
+            if pid not in parent_agencies:
+                parent_agencies[pid] = {
+                    'name': pname,
+                    'impressions': {},
+                    'store_visits': {},
+                    'web_pixels': {},
+                    'child_count': 0
+                }
+
+            parent_agencies[pid]['impressions'] = merge_pipeline(parent_agencies[pid]['impressions'], imp)
+            parent_agencies[pid]['store_visits'] = merge_pipeline(parent_agencies[pid]['store_visits'], sv)
+            parent_agencies[pid]['web_pixels'] = merge_pipeline(parent_agencies[pid]['web_pixels'], px)
+            parent_agencies[pid]['child_count'] += 1
+
+        # Override names from AGENCY_CONFIG where available
+        for pid in parent_agencies:
+            config = AGENCY_CONFIG.get(pid)
+            if config:
+                parent_agencies[pid]['name'] = config['name']
+
+        agencies = []
+        for pid, data in parent_agencies.items():
+            imp = data['impressions'] or None
+            sv = data['store_visits'] or None
+            px = data['web_pixels'] or None
 
             # Overall status: worst of all pipelines that have data
             statuses = [s.get('status', 'green') for s in [imp, sv, px] if s]
@@ -1732,9 +1799,9 @@ def pipeline_health():
                 overall = 'green'
 
             agencies.append({
-                'agency_id': int(aid) if aid else 0,
-                'name': name,
-                'agency_group': agency_group,
+                'agency_id': pid,
+                'name': data['name'],
+                'advertisers': data['child_count'],
                 'overall_status': overall,
                 'impressions': imp if imp else None,
                 'store_visits': sv if sv else None,
