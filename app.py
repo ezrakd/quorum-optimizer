@@ -32,7 +32,7 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 import snowflake.connector
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import re
 import time
 import threading
@@ -1565,118 +1565,75 @@ def pipeline_health():
         conn = get_snowflake_connection()
         cursor = conn.cursor()
 
-        import math
+        # =====================================================================
+        # 1. TABLE METADATA — fast row counts and sizes from SHOW TABLES
+        # =====================================================================
+        table_meta = {}  # table_name → {rows, bytes}
+        for schema in ['BASE_TABLES', 'DERIVED_TABLES', 'SEGMENT_DATA']:
+            try:
+                cursor.execute(f"SHOW TABLES IN SCHEMA QUORUMDB.{schema}")
+                for row in cursor.fetchall():
+                    full_name = f"QUORUMDB.{schema}.{row[1]}"
+                    table_meta[full_name] = {
+                        'rows': int(row[7]) if row[7] else 0,
+                        'bytes': int(row[8]) if row[8] else 0
+                    }
+            except:
+                pass
 
         # =====================================================================
-        # 1. TABLE FRESHNESS — key tables with last data timestamp + row counts
+        # 2. COMBINED FRESHNESS + VOLUME — single query per pipeline
+        #    Only scan recent data (not full table) to keep it fast
         # =====================================================================
         table_health = []
+        volume_trends = {}
 
-        # Define monitored tables: (label, schema.table, timestamp_col, description)
-        monitored_tables = [
-            ('Ad Impressions (V2)', 'QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2', 'AUCTION_TIMESTAMP', 'Primary ad impression log from all DSPs'),
-            ('Store Visits', 'QUORUMDB.BASE_TABLES.STORE_VISITS', 'STORE_VISIT_DATE', 'Foot traffic attribution data'),
-            ('Web Pixel Raw', 'QUORUMDB.BASE_TABLES.WEBPIXEL_IMPRESSION_LOG', 'SYS_TIMESTAMP', 'Raw web pixel fire events'),
-            ('Web Pixel Events', 'QUORUMDB.DERIVED_TABLES.WEBPIXEL_EVENTS', 'STAGING_SYS_TIMESTAMP', 'Transformed web pixel analytical layer'),
-            ('Advertiser Weekly Stats', 'QUORUMDB.SEGMENT_DATA.ADVERTISER_WEEKLY_STATS', 'CREATED_AT', 'Weekly aggregated advertiser statistics'),
+        # Define pipelines: (label, table, ts_col, description, trend_days)
+        pipelines = [
+            ('Ad Impressions (V2)', 'QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2', 'AUCTION_TIMESTAMP', 'Primary ad impression log from all DSPs', 14),
+            ('Store Visits', 'QUORUMDB.BASE_TABLES.STORE_VISITS', 'STORE_VISIT_DATE', 'Foot traffic attribution data', 30),
+            ('Web Pixel Raw', 'QUORUMDB.BASE_TABLES.WEBPIXEL_IMPRESSION_LOG', 'SYS_TIMESTAMP', 'Raw web pixel fire events', 14),
+            ('Web Pixel Events', 'QUORUMDB.DERIVED_TABLES.WEBPIXEL_EVENTS', 'STAGING_SYS_TIMESTAMP', 'Transformed web pixel analytical layer', 14),
         ]
 
-        for label, table, ts_col, description in monitored_tables:
+        for label, table, ts_col, description, trend_days in pipelines:
+            trend_key = label.lower().replace(' ', '_').replace('(', '').replace(')', '')
+            meta = table_meta.get(table, {})
             try:
+                # Single query: daily counts for trend + freshness from recent window
                 cursor.execute(f"""
-                    SELECT MAX({ts_col})::TIMESTAMP_NTZ AS last_data,
-                           DATEDIFF('day', MAX(CASE WHEN {ts_col} <= CURRENT_TIMESTAMP() THEN {ts_col} END)::DATE, CURRENT_DATE()) AS days_stale
+                    SELECT {ts_col}::DATE AS dt, COUNT(*) AS cnt
                     FROM {table}
-                    WHERE {ts_col} <= CURRENT_TIMESTAMP()
+                    WHERE {ts_col} >= DATEADD('day', -{trend_days}, CURRENT_DATE())
+                      AND {ts_col} <= CURRENT_TIMESTAMP()
+                    GROUP BY 1 ORDER BY 1
                 """)
-                row = cursor.fetchone()
-                last_data = str(row[0]) if row and row[0] else None
-                days_stale = int(row[1]) if row and row[1] is not None else 999
+                daily = [{'date': str(r[0]), 'count': int(r[1])} for r in cursor.fetchall()]
+                volume_trends[trend_key] = daily
 
-                # Get approximate row count from metadata (fast)
-                schema_table = table.split('.')
-                try:
-                    cursor.execute(f"SHOW TABLES LIKE '{schema_table[-1]}' IN SCHEMA {schema_table[0]}.{schema_table[1]}")
-                    trow = cursor.fetchone()
-                    total_rows = int(trow[7]) if trow else 0  # rows column
-                    total_bytes = int(trow[8]) if trow else 0
-                except:
-                    total_rows = 0
-                    total_bytes = 0
-
-                if days_stale <= 1:
-                    status = 'green'
-                elif days_stale <= 3:
-                    status = 'yellow'
-                elif days_stale <= 7:
-                    status = 'yellow'
+                if daily:
+                    last_date = daily[-1]['date']
+                    last_dt = datetime.strptime(last_date, '%Y-%m-%d').date()
+                    days_stale = (date.today() - last_dt).days
                 else:
-                    status = 'red'
+                    last_date = None
+                    days_stale = trend_days + 1  # stale beyond our window
 
+                status = 'green' if days_stale <= 1 else ('yellow' if days_stale <= 3 else 'red')
                 table_health.append({
-                    'label': label,
-                    'table': table,
-                    'description': description,
-                    'last_data': last_data,
-                    'days_stale': days_stale,
-                    'total_rows': total_rows,
-                    'total_bytes': total_bytes,
+                    'label': label, 'table': table, 'description': description,
+                    'last_data': last_date, 'days_stale': days_stale,
+                    'total_rows': meta.get('rows', 0), 'total_bytes': meta.get('bytes', 0),
                     'status': status
                 })
             except Exception as te:
+                volume_trends[trend_key] = []
                 table_health.append({
-                    'label': label,
-                    'table': table,
-                    'description': description,
-                    'last_data': None,
-                    'days_stale': 999,
-                    'total_rows': 0,
-                    'total_bytes': 0,
-                    'status': 'red',
-                    'error': str(te)[:200]
+                    'label': label, 'table': table, 'description': description,
+                    'last_data': None, 'days_stale': 999,
+                    'total_rows': meta.get('rows', 0), 'total_bytes': meta.get('bytes', 0),
+                    'status': 'red', 'error': str(te)[:200]
                 })
-
-        # =====================================================================
-        # 2. DAILY VOLUME TRENDS — last 14 days for key pipelines
-        # =====================================================================
-        volume_trends = {}
-
-        # Ad Impressions daily
-        try:
-            cursor.execute("""
-                SELECT AUCTION_TIMESTAMP::DATE AS dt, COUNT(*) AS cnt
-                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2
-                WHERE AUCTION_TIMESTAMP >= DATEADD('day', -14, CURRENT_DATE())
-                  AND AUCTION_TIMESTAMP <= CURRENT_TIMESTAMP()
-                GROUP BY 1 ORDER BY 1
-            """)
-            volume_trends['impressions'] = [{'date': str(r[0]), 'count': int(r[1])} for r in cursor.fetchall()]
-        except:
-            volume_trends['impressions'] = []
-
-        # Store Visits daily
-        try:
-            cursor.execute("""
-                SELECT STORE_VISIT_DATE AS dt, COUNT(*) AS cnt
-                FROM QUORUMDB.BASE_TABLES.STORE_VISITS
-                WHERE STORE_VISIT_DATE >= DATEADD('day', -30, CURRENT_DATE())
-                GROUP BY 1 ORDER BY 1
-            """)
-            volume_trends['store_visits'] = [{'date': str(r[0]), 'count': int(r[1])} for r in cursor.fetchall()]
-        except:
-            volume_trends['store_visits'] = []
-
-        # Web Pixels daily
-        try:
-            cursor.execute("""
-                SELECT SYS_TIMESTAMP::DATE AS dt, COUNT(*) AS cnt
-                FROM QUORUMDB.BASE_TABLES.WEBPIXEL_IMPRESSION_LOG
-                WHERE SYS_TIMESTAMP >= DATEADD('day', -14, CURRENT_DATE())
-                GROUP BY 1 ORDER BY 1
-            """)
-            volume_trends['web_pixels'] = [{'date': str(r[0]), 'count': int(r[1])} for r in cursor.fetchall()]
-        except:
-            volume_trends['web_pixels'] = []
 
         # =====================================================================
         # 3. ANOMALY DETECTION — compare recent vs baseline
