@@ -1646,22 +1646,22 @@ def pipeline_health():
                 'status': 'green' if days_stale <= 3 else ('yellow' if days_stale <= 10 else 'red')
             }
 
-        # 4. Web pixel health (from events table if populated, else transform log)
+        # 4. Web pixel health (from staging table — accessible via SEGMENT_DATA)
         pixel_health = {}
         try:
             cursor.execute("""
-                SELECT AGENCY_ID,
-                       MAX(EVENT_DATE) AS last_data,
+                SELECT AG_ID,
+                       MAX(SYS_TIMESTAMP)::DATE AS last_data,
                        COUNT(*) AS events_30d,
-                       SUM(CASE WHEN EVENT_DATE >= DATEADD('day', -7, CURRENT_DATE()) THEN 1 ELSE 0 END) AS events_7d
-                FROM QUORUMDB.DERIVED_TABLES.WEBPIXEL_EVENTS
-                WHERE EVENT_DATE >= DATEADD('day', -30, CURRENT_DATE())
-                GROUP BY AGENCY_ID
+                       SUM(CASE WHEN SYS_TIMESTAMP >= DATEADD('day', -7, CURRENT_DATE()) THEN 1 ELSE 0 END) AS events_7d
+                FROM QUORUMDB.SEGMENT_DATA.WEBPIXEL_IMPRESSION_LOG
+                WHERE SYS_TIMESTAMP >= DATEADD('day', -30, CURRENT_DATE())
+                GROUP BY AG_ID
             """)
             px_cols = [d[0] for d in cursor.description]
             for row in cursor.fetchall():
                 d = dict(zip(px_cols, row))
-                aid = d['AGENCY_ID']
+                aid = d['AG_ID']
                 last = d['LAST_DATA']
                 days_stale = (datetime.now().date() - last).days if last else 999
                 pixel_health[aid] = {
@@ -1672,24 +1672,27 @@ def pipeline_health():
                     'status': 'green' if days_stale <= 2 else ('yellow' if days_stale <= 7 else 'red')
                 }
         except Exception:
-            pass  # Table may still be backfilling
+            pass  # May not have access
 
-        # 5. Transform log status
-        cursor.execute("""
-            SELECT BATCH_ID, STATUS, STARTED_AT, COMPLETED_AT, EVENTS_INSERTED, ERROR_MESSAGE
-            FROM QUORUMDB.DERIVED_TABLES.WEBPIXEL_TRANSFORM_LOG
-            ORDER BY STARTED_AT DESC LIMIT 10
-        """)
-        log_cols = [d[0] for d in cursor.description]
+        # 5. Transform log status (DERIVED_TABLES — may not be accessible)
         transform_log = []
-        for row in cursor.fetchall():
-            d = dict(zip(log_cols, row))
-            for k, v in d.items():
-                if hasattr(v, 'isoformat'):
-                    d[k] = v.isoformat()
-                elif hasattr(v, 'is_integer'):
-                    d[k] = int(v) if v else 0
-            transform_log.append(d)
+        try:
+            cursor.execute("""
+                SELECT BATCH_ID, STATUS, STARTED_AT, COMPLETED_AT, EVENTS_INSERTED, ERROR_MESSAGE
+                FROM QUORUMDB.DERIVED_TABLES.WEBPIXEL_TRANSFORM_LOG
+                ORDER BY STARTED_AT DESC LIMIT 10
+            """)
+            log_cols = [d[0] for d in cursor.description]
+            for row in cursor.fetchall():
+                d = dict(zip(log_cols, row))
+                for k, v in d.items():
+                    if hasattr(v, 'isoformat'):
+                        d[k] = v.isoformat()
+                    elif hasattr(v, 'is_integer'):
+                        d[k] = int(v) if v else 0
+                transform_log.append(d)
+        except Exception:
+            pass  # OPTIMIZER_READONLY_ROLE may not have DERIVED_TABLES access
 
         cursor.close()
         conn.close()
