@@ -1566,10 +1566,10 @@ def pipeline_health():
         cursor = conn.cursor()
 
         # =====================================================================
-        # 1. TABLE METADATA — fast row counts and sizes from SHOW TABLES
+        # 1. TABLE METADATA — batch SHOW TABLES (metadata only, instant)
         # =====================================================================
-        table_meta = {}  # table_name → {rows, bytes}
-        for schema in ['BASE_TABLES', 'DERIVED_TABLES', 'SEGMENT_DATA']:
+        table_meta = {}
+        for schema in ['BASE_TABLES', 'DERIVED_TABLES']:
             try:
                 cursor.execute(f"SHOW TABLES IN SCHEMA QUORUMDB.{schema}")
                 for row in cursor.fetchall():
@@ -1582,114 +1582,123 @@ def pipeline_health():
                 pass
 
         # =====================================================================
-        # 2. COMBINED FRESHNESS + VOLUME — single query per pipeline
-        #    Only scan recent data (not full table) to keep it fast
+        # 2. FRESHNESS + VOLUME — single UNION ALL query (scans recent partitions only)
         # =====================================================================
         table_health = []
         volume_trends = {}
 
-        # Define pipelines: (label, table, ts_col, description, trend_days)
-        pipelines = [
-            ('Ad Impressions (V2)', 'QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2', 'AUCTION_TIMESTAMP', 'Primary ad impression log from all DSPs', 14),
-            ('Store Visits', 'QUORUMDB.BASE_TABLES.STORE_VISITS', 'STORE_VISIT_DATE', 'Foot traffic attribution data', 30),
-            ('Web Pixel Raw', 'QUORUMDB.BASE_TABLES.WEBPIXEL_IMPRESSION_LOG', 'SYS_TIMESTAMP', 'Raw web pixel fire events', 14),
-            ('Web Pixel Events', 'QUORUMDB.DERIVED_TABLES.WEBPIXEL_EVENTS', 'STAGING_SYS_TIMESTAMP', 'Transformed web pixel analytical layer', 14),
+        try:
+            cursor.execute("""
+                SELECT 'impressions' AS pipeline,
+                       MAX(CASE WHEN AUCTION_TIMESTAMP <= CURRENT_TIMESTAMP() THEN AUCTION_TIMESTAMP END)::DATE AS last_data,
+                       COUNT(*) AS vol_7d,
+                       0 AS vol_prev_7d
+                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2
+                WHERE AUCTION_TIMESTAMP >= DATEADD('day', -7, CURRENT_DATE())
+                  AND AUCTION_TIMESTAMP <= CURRENT_TIMESTAMP()
+                UNION ALL
+                SELECT 'store_visits',
+                       MAX(STORE_VISIT_DATE),
+                       SUM(CASE WHEN STORE_VISIT_DATE >= DATEADD('day', -7, CURRENT_DATE()) THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN STORE_VISIT_DATE >= DATEADD('day', -14, CURRENT_DATE()) AND STORE_VISIT_DATE < DATEADD('day', -7, CURRENT_DATE()) THEN 1 ELSE 0 END)
+                FROM QUORUMDB.BASE_TABLES.STORE_VISITS
+                WHERE STORE_VISIT_DATE >= DATEADD('day', -14, CURRENT_DATE())
+                UNION ALL
+                SELECT 'web_pixel_raw',
+                       MAX(CASE WHEN SYS_TIMESTAMP <= CURRENT_TIMESTAMP() THEN SYS_TIMESTAMP END)::DATE,
+                       COUNT(*),
+                       0
+                FROM QUORUMDB.BASE_TABLES.WEBPIXEL_IMPRESSION_LOG
+                WHERE SYS_TIMESTAMP >= DATEADD('day', -7, CURRENT_DATE())
+                  AND SYS_TIMESTAMP <= CURRENT_TIMESTAMP()
+            """)
+            for row in cursor.fetchall():
+                pname = row[0]
+                last_data_str = str(row[1]) if row[1] else None
+                vol_7d = int(row[2]) if row[2] else 0
+                vol_prev_7d = int(row[3]) if row[3] else 0
+                ds = (date.today() - datetime.strptime(last_data_str, '%Y-%m-%d').date()).days if last_data_str else 999
+                wow = round(((vol_7d - vol_prev_7d) / vol_prev_7d * 100), 1) if vol_prev_7d > 0 else 0
+
+                volume_trends[pname] = {
+                    'last_data': last_data_str, 'days_stale': ds,
+                    'vol_7d': vol_7d, 'vol_prev_7d': vol_prev_7d,
+                    'wow_pct': wow, 'avg_daily_7d': round(vol_7d / 7)
+                }
+        except:
+            pass
+
+        # Web pixel events (DERIVED_TABLES — may fail on readonly role)
+        try:
+            cursor.execute("""
+                SELECT MAX(STAGING_SYS_TIMESTAMP)::DATE, COUNT(*)
+                FROM QUORUMDB.DERIVED_TABLES.WEBPIXEL_EVENTS
+                WHERE STAGING_SYS_TIMESTAMP >= DATEADD('day', -7, CURRENT_DATE())
+            """)
+            row = cursor.fetchone()
+            if row and row[0]:
+                ld = str(row[0])
+                v7 = int(row[1]) if row[1] else 0
+                ds = (date.today() - datetime.strptime(ld, '%Y-%m-%d').date()).days
+                volume_trends['web_pixel_events'] = {
+                    'last_data': ld, 'days_stale': ds,
+                    'vol_7d': v7, 'vol_prev_7d': 0, 'wow_pct': 0, 'avg_daily_7d': round(v7 / 7)
+                }
+        except:
+            pass
+
+        # Build table_health from volume_trends + metadata
+        pipeline_config = [
+            ('Ad Impressions (V2)', 'QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2', 'impressions', 'Primary ad impression log from all DSPs'),
+            ('Store Visits', 'QUORUMDB.BASE_TABLES.STORE_VISITS', 'store_visits', 'Foot traffic attribution data'),
+            ('Web Pixel Raw', 'QUORUMDB.BASE_TABLES.WEBPIXEL_IMPRESSION_LOG', 'web_pixel_raw', 'Raw web pixel fire events'),
+            ('Web Pixel Events', 'QUORUMDB.DERIVED_TABLES.WEBPIXEL_EVENTS', 'web_pixel_events', 'Transformed web pixel analytical layer'),
         ]
-
-        for label, table, ts_col, description, trend_days in pipelines:
-            trend_key = label.lower().replace(' ', '_').replace('(', '').replace(')', '')
-            meta = table_meta.get(table, {})
-            try:
-                # Single query: daily counts for trend + freshness from recent window
-                cursor.execute(f"""
-                    SELECT {ts_col}::DATE AS dt, COUNT(*) AS cnt
-                    FROM {table}
-                    WHERE {ts_col} >= DATEADD('day', -{trend_days}, CURRENT_DATE())
-                      AND {ts_col} <= CURRENT_TIMESTAMP()
-                    GROUP BY 1 ORDER BY 1
-                """)
-                daily = [{'date': str(r[0]), 'count': int(r[1])} for r in cursor.fetchall()]
-                volume_trends[trend_key] = daily
-
-                if daily:
-                    last_date = daily[-1]['date']
-                    last_dt = datetime.strptime(last_date, '%Y-%m-%d').date()
-                    days_stale = (date.today() - last_dt).days
-                else:
-                    last_date = None
-                    days_stale = trend_days + 1  # stale beyond our window
-
-                status = 'green' if days_stale <= 1 else ('yellow' if days_stale <= 3 else 'red')
-                table_health.append({
-                    'label': label, 'table': table, 'description': description,
-                    'last_data': last_date, 'days_stale': days_stale,
-                    'total_rows': meta.get('rows', 0), 'total_bytes': meta.get('bytes', 0),
-                    'status': status
-                })
-            except Exception as te:
-                volume_trends[trend_key] = []
-                table_health.append({
-                    'label': label, 'table': table, 'description': description,
-                    'last_data': None, 'days_stale': 999,
-                    'total_rows': meta.get('rows', 0), 'total_bytes': meta.get('bytes', 0),
-                    'status': 'red', 'error': str(te)[:200]
-                })
+        for label, tbl, key, desc in pipeline_config:
+            meta = table_meta.get(tbl, {})
+            vt = volume_trends.get(key, {})
+            ds = vt.get('days_stale', 999)
+            status = 'green' if ds <= 1 else ('yellow' if ds <= 3 else 'red')
+            table_health.append({
+                'label': label, 'table': tbl, 'description': desc,
+                'last_data': vt.get('last_data'), 'days_stale': ds,
+                'total_rows': meta.get('rows', 0), 'total_bytes': meta.get('bytes', 0),
+                'vol_7d': vt.get('vol_7d', 0), 'vol_prev_7d': vt.get('vol_prev_7d', 0),
+                'wow_pct': vt.get('wow_pct', 0), 'avg_daily': vt.get('avg_daily_7d', 0),
+                'status': status
+            })
 
         # =====================================================================
-        # 3. ANOMALY DETECTION — compare recent vs baseline
+        # 3. ALERTS — staleness + wow drops
         # =====================================================================
         alerts = []
 
-        for pipeline_name, trend_data in volume_trends.items():
-            if len(trend_data) < 7:
-                continue
-            # Last 3 days vs prior 7 days
-            recent = trend_data[-3:] if len(trend_data) >= 3 else trend_data
-            baseline = trend_data[-10:-3] if len(trend_data) >= 10 else trend_data[:-3]
-
-            if not baseline or not recent:
-                continue
-
-            avg_recent = sum(d['count'] for d in recent) / len(recent)
-            avg_baseline = sum(d['count'] for d in baseline) / len(baseline)
-
-            if avg_baseline > 0:
-                change_pct = ((avg_recent - avg_baseline) / avg_baseline) * 100
-            else:
-                change_pct = 0
-
-            if change_pct < -50:
-                alerts.append({
-                    'severity': 'critical',
-                    'pipeline': pipeline_name,
-                    'message': f'{pipeline_name.replace("_", " ").title()} volume dropped {abs(change_pct):.0f}% — avg {avg_recent:,.0f}/day vs baseline {avg_baseline:,.0f}/day',
-                    'avg_recent': avg_recent,
-                    'avg_baseline': avg_baseline,
-                    'change_pct': round(change_pct, 1)
-                })
-            elif change_pct < -25:
-                alerts.append({
-                    'severity': 'warning',
-                    'pipeline': pipeline_name,
-                    'message': f'{pipeline_name.replace("_", " ").title()} volume down {abs(change_pct):.0f}% — avg {avg_recent:,.0f}/day vs baseline {avg_baseline:,.0f}/day',
-                    'avg_recent': avg_recent,
-                    'avg_baseline': avg_baseline,
-                    'change_pct': round(change_pct, 1)
-                })
-
-        # Add staleness alerts from table health
         for t in table_health:
             if t['days_stale'] > 7:
                 alerts.append({
                     'severity': 'critical',
                     'pipeline': t['label'],
-                    'message': f"{t['label']} has not received data in {t['days_stale']} days (last: {t['last_data'][:10] if t['last_data'] else 'never'})"
+                    'message': f"{t['label']} — no data in {t['days_stale']} days (last: {t['last_data'] or 'never'})"
                 })
             elif t['days_stale'] > 3:
                 alerts.append({
                     'severity': 'warning',
                     'pipeline': t['label'],
-                    'message': f"{t['label']} is {t['days_stale']} days stale (last: {t['last_data'][:10] if t['last_data'] else 'never'})"
+                    'message': f"{t['label']} — {t['days_stale']} days stale (last: {t['last_data'] or 'never'})"
+                })
+            # Volume drop alert (wow)
+            wow = t.get('wow_pct', 0)
+            if wow < -50 and t.get('vol_prev_7d', 0) > 0:
+                alerts.append({
+                    'severity': 'critical',
+                    'pipeline': t['label'],
+                    'message': f"{t['label']} volume dropped {abs(wow):.0f}% WoW — {t['vol_7d']:,} last 7d vs {t['vol_prev_7d']:,} prior 7d"
+                })
+            elif wow < -25 and t.get('vol_prev_7d', 0) > 0:
+                alerts.append({
+                    'severity': 'warning',
+                    'pipeline': t['label'],
+                    'message': f"{t['label']} volume down {abs(wow):.0f}% WoW — {t['vol_7d']:,} last 7d vs {t['vol_prev_7d']:,} prior 7d"
                 })
 
         # =====================================================================
