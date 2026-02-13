@@ -702,7 +702,7 @@
                     <button class="tab" data-tab="zips" onclick="showTab('zips', this)">Geographic</button>
                     <button class="tab" data-tab="lift" onclick="showTab('lift', this)">Lift Analysis</button>
                     <button class="tab" data-tab="traffic" onclick="showTab('traffic', this)" ${state.agencyId == 1480 ? '' : 'style="display:none"'}>Traffic Sources</button>
-                    <button class="tab" data-tab="optimize" onclick="showTab('optimize', this)" style="background: linear-gradient(135deg, #f59e0b, #ef4444); color: #fff; font-weight: 600; ${state.agencyId == 1480 ? '' : 'display:none'}">⚡ Optimize</button>
+                    <button class="tab" data-tab="optimize" onclick="showTab('optimize', this)" style="background: linear-gradient(135deg, #f59e0b, #ef4444); color: #fff; font-weight: 600;">⚡ Optimize</button>
                 </div>
                 <div id="tabContent">
                     ${renderCampaigns(campData)}
@@ -830,7 +830,7 @@
                 content.innerHTML = renderTrafficSources(window.tabData.traffic, result.success, window.tabData.trafficError);
             } else if (tab === 'optimize') {
                 content.innerHTML = '<div class="loading"><div class="spinner"></div> Analyzing performance across all dimensions (30-day baseline)...</div>';
-                const params = { advertiser_id: state.advertiserId };
+                const params = { advertiser_id: state.advertiserId, agency_id: state.agencyId };
                 const result = await api('/api/v5/optimize', params);
                 if (result.success) {
                     window.tabData.optimize = result.data;
