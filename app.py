@@ -1803,98 +1803,7 @@ def pipeline_health():
         except:
             pass
 
-        # =====================================================================
-        # 7. TABLE ACCESS TRACKING — single-pass CASE WHEN (fast, no CROSS JOIN)
-        # =====================================================================
-        table_access = []
-        access_alerts = []
-        try:
-            # Single scan of QUERY_HISTORY with CASE WHEN per table — runs in seconds
-            tracked = [
-                ('AD_IMPRESSION_LOG_V2', 'Ad Impressions'),
-                ('STORE_VISITS', 'Store Visits'),
-                ('WEBPIXEL_IMPRESSION_LOG', 'Web Pixel Raw'),
-                ('WEBPIXEL_EVENTS', 'Web Pixel Events'),
-                ('SEGMENT_DEVICES_CAPTURED', 'Segment Devices'),
-                ('XANDR_IMPRESSION_LOG', 'Xandr Impressions'),
-                ('CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS', 'Campaign Weekly Stats'),
-                ('PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS', 'Paramount 90-Day'),
-                ('AGENCY_ADVERTISER', 'Agency Advertiser'),
-                ('LIVERAMP_IMPRESSION_LOG', 'LiveRamp Impressions'),
-            ]
-            case_cols = ",\n".join(
-                f"SUM(CASE WHEN UPPER(QUERY_TEXT) LIKE '%{t[0]}%' THEN 1 ELSE 0 END) AS \"{t[0]}\""
-                for t in tracked
-            )
-            cursor.execute(f"""
-                SELECT
-                    START_TIME::DATE as query_date,
-                    COUNT(DISTINCT USER_NAME) as daily_users,
-                    {case_cols}
-                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-                WHERE START_TIME >= DATEADD('day', -7, CURRENT_TIMESTAMP())
-                  AND DATABASE_NAME = 'QUORUMDB'
-                  AND QUERY_TYPE IN ('SELECT','INSERT','CREATE_TABLE_AS_SELECT','MERGE')
-                GROUP BY query_date
-                ORDER BY query_date
-            """)
-            columns = [desc[0] for desc in cursor.description]
-            daily_rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
-
-            today_str = str(date.today())
-            yesterday_str = str(date.today() - timedelta(days=1))
-
-            for tbl_name, label in tracked:
-                col = tbl_name
-                daily_counts = [(r['QUERY_DATE'], int(r.get(col) or 0)) for r in daily_rows if int(r.get(col) or 0) > 0]
-                total_7d = sum(c for _, c in daily_counts)
-                if total_7d == 0:
-                    continue  # Skip tables with zero access
-
-                avg_daily = round(total_7d / max(len(daily_counts), 1))
-                today_q = next((int(r.get(col) or 0) for r in daily_rows if str(r['QUERY_DATE']) == today_str), 0)
-                yesterday_q = next((int(r.get(col) or 0) for r in daily_rows if str(r['QUERY_DATE']) == yesterday_str), 0)
-                max_users = max((int(r.get('DAILY_USERS') or 0) for r in daily_rows if int(r.get(col) or 0) > 0), default=0)
-                last_accessed = str(max(d for d, c in daily_counts)) if daily_counts else None
-
-                # Anomaly detection
-                if today_q == 0 and avg_daily > 10:
-                    anomaly = 'silent'
-                elif avg_daily > 10 and today_q < avg_daily * 0.3:
-                    anomaly = 'drop'
-                elif avg_daily > 10 and today_q > avg_daily * 3:
-                    anomaly = 'spike'
-                else:
-                    anomaly = 'normal'
-
-                entry = {
-                    'table_name': tbl_name, 'label': label,
-                    'total_queries_7d': total_7d,
-                    'max_daily_users': max_users,
-                    'last_accessed': last_accessed,
-                    'avg_daily_queries': avg_daily,
-                    'today_queries': today_q,
-                    'yesterday_queries': yesterday_q,
-                    'anomaly': anomaly
-                }
-                table_access.append(entry)
-
-                if anomaly == 'silent':
-                    access_alerts.append({
-                        'severity': 'warning', 'pipeline': label,
-                        'message': f"{label} — zero queries today (avg {avg_daily}/day). Table may have gone dark."
-                    })
-                elif anomaly == 'drop':
-                    access_alerts.append({
-                        'severity': 'warning', 'pipeline': label,
-                        'message': f"{label} — query volume dropped to {today_q} (avg {avg_daily}/day)"
-                    })
-
-            # Sort by total queries descending
-            table_access.sort(key=lambda x: x['total_queries_7d'], reverse=True)
-            alerts.extend(access_alerts)
-        except Exception as ae:
-            table_access = [{'error': str(ae)[:200], 'grant_needed': 'GRANT IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE TO ROLE OPTIMIZER_READONLY_ROLE;'}]
+        # Table access tracking is loaded async via /api/v5/table-access
 
         cursor.close()
         conn.close()
@@ -1943,6 +1852,100 @@ def pipeline_health():
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
+# =============================================================================
+# TABLE ACCESS TRACKING — async endpoint (QUERY_HISTORY scan is slow)
+# =============================================================================
+@app.route('/api/v5/table-access', methods=['GET'])
+def get_table_access():
+    """Table access tracking: who's querying what, anomaly detection."""
+    try:
+        conn = get_snowflake_connection()
+        cursor = conn.cursor()
+
+        tracked = [
+            ('AD_IMPRESSION_LOG_V2', 'Ad Impressions'),
+            ('STORE_VISITS', 'Store Visits'),
+            ('WEBPIXEL_IMPRESSION_LOG', 'Web Pixel Raw'),
+            ('WEBPIXEL_EVENTS', 'Web Pixel Events'),
+            ('SEGMENT_DEVICES_CAPTURED', 'Segment Devices'),
+            ('XANDR_IMPRESSION_LOG', 'Xandr Impressions'),
+            ('CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS', 'Campaign Weekly Stats'),
+            ('PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS', 'Paramount 90-Day'),
+            ('AGENCY_ADVERTISER', 'Agency Advertiser'),
+            ('LIVERAMP_IMPRESSION_LOG', 'LiveRamp Impressions'),
+        ]
+        case_cols = ",\n".join(
+            f"SUM(CASE WHEN UPPER(QUERY_TEXT) LIKE '%{t[0]}%' THEN 1 ELSE 0 END) AS \"{t[0]}\""
+            for t in tracked
+        )
+        cursor.execute(f"""
+            SELECT
+                START_TIME::DATE as query_date,
+                COUNT(DISTINCT USER_NAME) as daily_users,
+                {case_cols}
+            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+            WHERE START_TIME >= DATEADD('day', -7, CURRENT_TIMESTAMP())
+              AND DATABASE_NAME = 'QUORUMDB'
+              AND QUERY_TYPE IN ('SELECT','INSERT','CREATE_TABLE_AS_SELECT','MERGE')
+            GROUP BY query_date
+            ORDER BY query_date
+        """)
+        columns = [desc[0] for desc in cursor.description]
+        daily_rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        today_str = str(date.today())
+        yesterday_str = str(date.today() - timedelta(days=1))
+
+        table_access = []
+        access_alerts = []
+
+        for tbl_name, label in tracked:
+            col = tbl_name
+            daily_counts = [(r['QUERY_DATE'], int(r.get(col) or 0)) for r in daily_rows if int(r.get(col) or 0) > 0]
+            total_7d = sum(c for _, c in daily_counts)
+            if total_7d == 0:
+                continue
+
+            avg_daily = round(total_7d / max(len(daily_counts), 1))
+            today_q = next((int(r.get(col) or 0) for r in daily_rows if str(r['QUERY_DATE']) == today_str), 0)
+            yesterday_q = next((int(r.get(col) or 0) for r in daily_rows if str(r['QUERY_DATE']) == yesterday_str), 0)
+            max_users = max((int(r.get('DAILY_USERS') or 0) for r in daily_rows if int(r.get(col) or 0) > 0), default=0)
+            last_accessed = str(max(d for d, c in daily_counts)) if daily_counts else None
+
+            if today_q == 0 and avg_daily > 10:
+                anomaly = 'silent'
+            elif avg_daily > 10 and today_q < avg_daily * 0.3:
+                anomaly = 'drop'
+            elif avg_daily > 10 and today_q > avg_daily * 3:
+                anomaly = 'spike'
+            else:
+                anomaly = 'normal'
+
+            entry = {
+                'table_name': tbl_name, 'label': label,
+                'total_queries_7d': total_7d, 'max_daily_users': max_users,
+                'last_accessed': last_accessed, 'avg_daily_queries': avg_daily,
+                'today_queries': today_q, 'yesterday_queries': yesterday_q,
+                'anomaly': anomaly
+            }
+            table_access.append(entry)
+
+            if anomaly == 'silent':
+                access_alerts.append({'severity': 'warning', 'pipeline': label,
+                    'message': f"{label} — zero queries today (avg {avg_daily}/day). Table may have gone dark."})
+            elif anomaly == 'drop':
+                access_alerts.append({'severity': 'warning', 'pipeline': label,
+                    'message': f"{label} — query volume dropped to {today_q} (avg {avg_daily}/day)"})
+
+        table_access.sort(key=lambda x: x['total_queries_7d'], reverse=True)
+
+        cursor.close()
+        conn.close()
+        return jsonify({'success': True, 'data': table_access, 'alerts': access_alerts})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)[:200],
+            'grant_needed': 'GRANT IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE TO ROLE OPTIMIZER_READONLY_ROLE;'}), 500
 
 # =============================================================================
 # MAIN
