@@ -1973,36 +1973,30 @@
                 <div class="table-container" style="margin-bottom:20px;">
                     <div class="table-title">
                         Table Health
-                        <span class="table-note">Freshness &middot; volume &middot; 7-day window</span>
+                        <span class="table-note">Data freshness &middot; row counts from metadata</span>
                     </div>
                     <table>
                         <thead><tr>
                             <th style="width:24px;"></th>
                             <th>Pipeline</th>
+                            <th>Description</th>
                             <th class="text-right">Total Rows</th>
                             <th class="text-right">Size</th>
                             <th>Last Data</th>
                             <th class="text-right">Stale</th>
-                            <th class="text-right">Vol (7d)</th>
-                            <th class="text-right">Avg/Day</th>
-                            <th class="text-right">WoW</th>
                         </tr></thead>
                         <tbody>
-                            ${tables.map(t => {
-                                const wowColor = (t.wow_pct || 0) < -25 ? '#f4212e' : (t.wow_pct || 0) < -10 ? '#f7931a' : (t.wow_pct || 0) > 10 ? '#00ba7c' : '#8b98a5';
-                                const wowStr = t.wow_pct ? ((t.wow_pct > 0 ? '+' : '') + t.wow_pct.toFixed(0) + '%') : '—';
-                                return `<tr>
+                            ${tables.map(t => `
+                                <tr>
                                     <td>${statusDot(t.status)}</td>
                                     <td><strong style="font-size:12px;">${t.label}</strong><br><span class="text-muted" style="font-size:10px; font-family:monospace;">${t.table}</span></td>
+                                    <td class="text-muted" style="font-size:12px;">${t.description || ''}</td>
                                     <td class="text-right" style="font-size:12px;">${fmt(t.total_rows)}</td>
                                     <td class="text-right" style="font-size:12px;">${fmtBytes(t.total_bytes)}</td>
                                     <td style="font-size:12px;">${t.last_data || '<span class="text-red">never</span>'}</td>
                                     <td class="text-right">${t.days_stale <= 1 ? '<span class="text-green">' + t.days_stale + 'd</span>' : t.days_stale <= 3 ? '<span style="color:#f7931a;">' + t.days_stale + 'd</span>' : '<span class="text-red">' + t.days_stale + 'd</span>'}</td>
-                                    <td class="text-right" style="font-size:12px;">${fmt(t.vol_7d || 0)}</td>
-                                    <td class="text-right" style="font-size:12px;">${fmt(t.avg_daily || 0)}</td>
-                                    <td class="text-right" style="font-size:12px; color:${wowColor};">${wowStr}</td>
-                                </tr>`;
-                            }).join('')}
+                                </tr>
+                            `).join('')}
                         </tbody>
                     </table>
                 </div>

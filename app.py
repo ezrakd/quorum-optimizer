@@ -1582,72 +1582,31 @@ def pipeline_health():
                 pass
 
         # =====================================================================
-        # 2. FRESHNESS + VOLUME — single UNION ALL query (scans recent partitions only)
+        # 2. FRESHNESS — MAX only (no COUNT, uses micropartition metadata)
+        #    Row counts come from SHOW TABLES metadata above (zero scan)
         # =====================================================================
         table_health = []
         volume_trends = {}
 
-        try:
-            cursor.execute("""
-                SELECT 'impressions' AS pipeline,
-                       MAX(CASE WHEN AUCTION_TIMESTAMP <= CURRENT_TIMESTAMP() THEN AUCTION_TIMESTAMP END)::DATE AS last_data,
-                       COUNT(*) AS vol_7d,
-                       0 AS vol_prev_7d
-                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2
-                WHERE AUCTION_TIMESTAMP >= DATEADD('day', -7, CURRENT_DATE())
-                  AND AUCTION_TIMESTAMP <= CURRENT_TIMESTAMP()
-                UNION ALL
-                SELECT 'store_visits',
-                       MAX(STORE_VISIT_DATE),
-                       SUM(CASE WHEN STORE_VISIT_DATE >= DATEADD('day', -7, CURRENT_DATE()) THEN 1 ELSE 0 END),
-                       SUM(CASE WHEN STORE_VISIT_DATE >= DATEADD('day', -14, CURRENT_DATE()) AND STORE_VISIT_DATE < DATEADD('day', -7, CURRENT_DATE()) THEN 1 ELSE 0 END)
-                FROM QUORUMDB.BASE_TABLES.STORE_VISITS
-                WHERE STORE_VISIT_DATE >= DATEADD('day', -14, CURRENT_DATE())
-                UNION ALL
-                SELECT 'web_pixel_raw',
-                       MAX(CASE WHEN SYS_TIMESTAMP <= CURRENT_TIMESTAMP() THEN SYS_TIMESTAMP END)::DATE,
-                       COUNT(*),
-                       0
-                FROM QUORUMDB.BASE_TABLES.WEBPIXEL_IMPRESSION_LOG
-                WHERE SYS_TIMESTAMP >= DATEADD('day', -7, CURRENT_DATE())
-                  AND SYS_TIMESTAMP <= CURRENT_TIMESTAMP()
-            """)
-            for row in cursor.fetchall():
-                pname = row[0]
-                last_data_str = str(row[1]) if row[1] else None
-                vol_7d = int(row[2]) if row[2] else 0
-                vol_prev_7d = int(row[3]) if row[3] else 0
+        # MAX queries are fast: Snowflake resolves from partition stats
+        freshness_queries = [
+            ('impressions', "SELECT MAX(AUCTION_TIMESTAMP)::DATE FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 WHERE AUCTION_TIMESTAMP >= DATEADD('day', -3, CURRENT_DATE()) AND AUCTION_TIMESTAMP <= CURRENT_TIMESTAMP()"),
+            ('store_visits', "SELECT MAX(STORE_VISIT_DATE) FROM QUORUMDB.BASE_TABLES.STORE_VISITS WHERE STORE_VISIT_DATE >= DATEADD('day', -60, CURRENT_DATE())"),
+            ('web_pixel_raw', "SELECT MAX(SYS_TIMESTAMP)::DATE FROM QUORUMDB.BASE_TABLES.WEBPIXEL_IMPRESSION_LOG WHERE SYS_TIMESTAMP >= DATEADD('day', -3, CURRENT_DATE()) AND SYS_TIMESTAMP <= CURRENT_TIMESTAMP()"),
+            ('web_pixel_events', "SELECT MAX(STAGING_SYS_TIMESTAMP)::DATE FROM QUORUMDB.DERIVED_TABLES.WEBPIXEL_EVENTS WHERE STAGING_SYS_TIMESTAMP >= DATEADD('day', -30, CURRENT_DATE())"),
+        ]
+
+        for pname, query in freshness_queries:
+            try:
+                cursor.execute(query)
+                row = cursor.fetchone()
+                last_data_str = str(row[0]) if row and row[0] else None
                 ds = (date.today() - datetime.strptime(last_data_str, '%Y-%m-%d').date()).days if last_data_str else 999
-                wow = round(((vol_7d - vol_prev_7d) / vol_prev_7d * 100), 1) if vol_prev_7d > 0 else 0
+                volume_trends[pname] = {'last_data': last_data_str, 'days_stale': ds}
+            except:
+                volume_trends[pname] = {'last_data': None, 'days_stale': 999}
 
-                volume_trends[pname] = {
-                    'last_data': last_data_str, 'days_stale': ds,
-                    'vol_7d': vol_7d, 'vol_prev_7d': vol_prev_7d,
-                    'wow_pct': wow, 'avg_daily_7d': round(vol_7d / 7)
-                }
-        except:
-            pass
-
-        # Web pixel events (DERIVED_TABLES — may fail on readonly role)
-        try:
-            cursor.execute("""
-                SELECT MAX(STAGING_SYS_TIMESTAMP)::DATE, COUNT(*)
-                FROM QUORUMDB.DERIVED_TABLES.WEBPIXEL_EVENTS
-                WHERE STAGING_SYS_TIMESTAMP >= DATEADD('day', -7, CURRENT_DATE())
-            """)
-            row = cursor.fetchone()
-            if row and row[0]:
-                ld = str(row[0])
-                v7 = int(row[1]) if row[1] else 0
-                ds = (date.today() - datetime.strptime(ld, '%Y-%m-%d').date()).days
-                volume_trends['web_pixel_events'] = {
-                    'last_data': ld, 'days_stale': ds,
-                    'vol_7d': v7, 'vol_prev_7d': 0, 'wow_pct': 0, 'avg_daily_7d': round(v7 / 7)
-                }
-        except:
-            pass
-
-        # Build table_health from volume_trends + metadata
+        # Build table_health from freshness + metadata (zero data scanning)
         pipeline_config = [
             ('Ad Impressions (V2)', 'QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2', 'impressions', 'Primary ad impression log from all DSPs'),
             ('Store Visits', 'QUORUMDB.BASE_TABLES.STORE_VISITS', 'store_visits', 'Foot traffic attribution data'),
@@ -1663,8 +1622,6 @@ def pipeline_health():
                 'label': label, 'table': tbl, 'description': desc,
                 'last_data': vt.get('last_data'), 'days_stale': ds,
                 'total_rows': meta.get('rows', 0), 'total_bytes': meta.get('bytes', 0),
-                'vol_7d': vt.get('vol_7d', 0), 'vol_prev_7d': vt.get('vol_prev_7d', 0),
-                'wow_pct': vt.get('wow_pct', 0), 'avg_daily': vt.get('avg_daily_7d', 0),
                 'status': status
             })
 
@@ -1685,20 +1642,6 @@ def pipeline_health():
                     'severity': 'warning',
                     'pipeline': t['label'],
                     'message': f"{t['label']} — {t['days_stale']} days stale (last: {t['last_data'] or 'never'})"
-                })
-            # Volume drop alert (wow)
-            wow = t.get('wow_pct', 0)
-            if wow < -50 and t.get('vol_prev_7d', 0) > 0:
-                alerts.append({
-                    'severity': 'critical',
-                    'pipeline': t['label'],
-                    'message': f"{t['label']} volume dropped {abs(wow):.0f}% WoW — {t['vol_7d']:,} last 7d vs {t['vol_prev_7d']:,} prior 7d"
-                })
-            elif wow < -25 and t.get('vol_prev_7d', 0) > 0:
-                alerts.append({
-                    'severity': 'warning',
-                    'pipeline': t['label'],
-                    'message': f"{t['label']} volume down {abs(wow):.0f}% WoW — {t['vol_7d']:,} last 7d vs {t['vol_prev_7d']:,} prior 7d"
                 })
 
         # =====================================================================
