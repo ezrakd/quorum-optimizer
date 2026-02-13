@@ -1837,7 +1837,6 @@ def pipeline_health():
             'tasks': tasks,
             'transform_log': transform_log,
             'procedures': procedures,
-            'table_access': table_access,
             'pipeline_status': pipeline_status,
             'summary': {
                 'total_tables_monitored': len(table_health),
