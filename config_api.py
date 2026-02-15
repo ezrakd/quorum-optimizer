@@ -112,65 +112,95 @@ def get_unmapped_impressions():
 @config_bp.route('/unmapped-webpixels', methods=['GET'])
 def get_unmapped_webpixels():
     """
-    Returns web pixel domains firing in the last 7 days that are not yet mapped
-    in ADVERTISER_DOMAIN_MAPPING. Uses direct query against WEBPIXEL_EVENTS
-    instead of the slow V_UNMAPPED_WEB_PIXELS view.
+    Returns web pixel base domains firing in the last 7 days.
+    Two-step approach: fast domain aggregation, then Python-side filtering
+    against mapped domains to avoid expensive SQL NOT EXISTS.
     """
     try:
         agency_id = request.args.get('agency_id')
+        if not agency_id:
+            return jsonify({'success': False, 'error': 'agency_id is required'}), 400
 
+        agency_id = int(agency_id)
         conn = get_config_connection()
         cursor = conn.cursor()
 
-        query = """
-            WITH recent_pixels AS (
-                SELECT
-                    we.AGENCY_ID,
-                    we.PAGE_URL_DOMAIN as DOMAIN,
-                    COUNT(*) as EVENT_COUNT_7D,
-                    COUNT(DISTINCT we.DEVICE_ID) as UNIQUE_DEVICES_7D,
-                    MIN(we.EVENT_TIMESTAMP) as FIRST_SEEN,
-                    MAX(we.EVENT_TIMESTAMP) as LAST_SEEN
-                FROM QUORUMDB.DERIVED_TABLES.WEBPIXEL_EVENTS we
-                WHERE we.EVENT_TIMESTAMP >= DATEADD(day, -7, CURRENT_TIMESTAMP())
-                  AND we.PAGE_URL_DOMAIN IS NOT NULL
-                  AND we.PAGE_URL_DOMAIN != ''
-        """
-        params = {}
+        # Step 1: Get already-mapped domains for this agency (fast, small result set)
+        cursor.execute("""
+            SELECT DISTINCT LOWER(
+                SPLIT_PART(
+                    SPLIT_PART(
+                        REPLACE(REPLACE("URL", 'https://', ''), 'http://', ''),
+                    '/', 1),
+                '?', 1)
+            ) as MAPPED_DOMAIN
+            FROM QUORUMDB.DERIVED_TABLES.ADVERTISER_DOMAIN_MAPPING
+            WHERE "Agency_Id" = %s AND "URL" IS NOT NULL
+        """, (agency_id,))
+        mapped_domains = set(row[0] for row in cursor.fetchall())
 
-        if agency_id:
-            query += " AND we.AGENCY_ID = %(agency_id)s"
-            params['agency_id'] = int(agency_id)
-
-        query += """
-                GROUP BY we.AGENCY_ID, we.PAGE_URL_DOMAIN
-                HAVING COUNT(*) >= 10
-            )
+        # Step 2: Get active pixel domains for this agency (fast with agency filter)
+        cursor.execute("""
             SELECT
-                rp.AGENCY_ID,
-                COALESCE(MAX(aa.AGENCY_NAME), 'Agency ' || rp.AGENCY_ID) as AGENCY_NAME,
-                rp.DOMAIN,
-                rp.EVENT_COUNT_7D,
-                rp.UNIQUE_DEVICES_7D,
-                rp.FIRST_SEEN,
-                rp.LAST_SEEN
-            FROM recent_pixels rp
-            LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa
-                ON rp.AGENCY_ID = aa.ADVERTISER_ID
-            LEFT JOIN QUORUMDB.DERIVED_TABLES.ADVERTISER_DOMAIN_MAPPING adm
-                ON rp.AGENCY_ID = adm.AGENCY_ID
-                AND rp.DOMAIN LIKE '%' || adm.DOMAIN || '%'
-            WHERE adm.MAPPING_ID IS NULL
-            GROUP BY rp.AGENCY_ID, rp.DOMAIN, rp.EVENT_COUNT_7D, rp.UNIQUE_DEVICES_7D, rp.FIRST_SEEN, rp.LAST_SEEN
-            ORDER BY rp.EVENT_COUNT_7D DESC
-            LIMIT 100
-        """
+                LOWER(SPLIT_PART(SPLIT_PART(PAGE_URL, '://', 2), '/', 1)) as BASE_DOMAIN,
+                COUNT(*) as EVENT_COUNT_7D,
+                COUNT(DISTINCT CLIENT_IP) as UNIQUE_DEVICES_7D,
+                MIN(EVENT_TIMESTAMP) as FIRST_SEEN,
+                MAX(EVENT_TIMESTAMP) as LAST_SEEN
+            FROM QUORUMDB.DERIVED_TABLES.WEBPIXEL_EVENTS
+            WHERE EVENT_TIMESTAMP >= DATEADD(day, -7, CURRENT_TIMESTAMP())
+              AND PAGE_URL IS NOT NULL AND PAGE_URL != ''
+              AND AGENCY_ID = %s
+            GROUP BY BASE_DOMAIN
+            HAVING COUNT(*) >= 10
+            ORDER BY EVENT_COUNT_7D DESC
+            LIMIT 500
+        """, (agency_id,))
 
-        cursor.execute(query, params)
-        results = rows_to_dicts(cursor)
+        columns = [desc[0] for desc in cursor.description]
+        all_domains = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
         cursor.close()
         conn.close()
+
+        # Step 3: Filter out mapped domains in Python (fast)
+        platform_detect = {
+            'shopify': 'SHOPIFY', 'myshopify.com': 'SHOPIFY',
+            'squarespace': 'SQUARESPACE',
+            'wix': 'WIX',
+            'ticketmaster': 'TICKETMASTER', 'livenation': 'TICKETMASTER',
+            'woocommerce': 'WOOCOMMERCE',
+        }
+
+        results = []
+        for d in all_domains:
+            domain = d.get('BASE_DOMAIN', '')
+            if not domain:
+                continue
+
+            # Check if domain is already mapped
+            is_mapped = False
+            for md in mapped_domains:
+                if domain == md or md in domain or domain in md:
+                    is_mapped = True
+                    break
+            if is_mapped:
+                continue
+
+            # Detect platform
+            detected = 'STANDARD'
+            for key, platform in platform_detect.items():
+                if key in domain:
+                    detected = platform
+                    break
+
+            d['AGENCY_ID'] = agency_id
+            d['DETECTED_PLATFORM'] = detected
+            d['IS_MAPPED'] = False
+            results.append(d)
+
+            if len(results) >= 100:
+                break
 
         return jsonify({'success': True, 'count': len(results), 'data': results})
 
