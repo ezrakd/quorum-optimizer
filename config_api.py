@@ -242,6 +242,7 @@ def get_campaign_mappings():
                 pcm.LINE_ITEM_NAME_FROM_DSP,
                 pcm.CAMPAIGN_NAME_MANUAL,
                 COALESCE(aa.COMP_NAME, '') as QUORUM_ADVERTISER_NAME,
+                pcm.IMPRESSIONS_14DAY_ROLLING, pcm.REACH_14DAY_ROLLING,
                 pcm.IMPRESSION_COUNT, pcm.FIRST_IMPRESSION_TIMESTAMP, pcm.LAST_IMPRESSION_TIMESTAMP,
                 pcm.CAMPAIGN_START_DATE, pcm.CAMPAIGN_END_DATE,
                 pcm.CREATED_AT, pcm.MODIFIED_AT

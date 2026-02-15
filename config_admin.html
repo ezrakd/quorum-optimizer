@@ -110,7 +110,7 @@
 
         /* Autocomplete */
         .autocomplete-wrap { position: relative; }
-        .autocomplete-results { position: absolute; top: 100%; left: 0; right: 0; background: #273340; border: 1px solid #3d5466; border-top: none; border-radius: 0 0 6px 6px; max-height: 200px; overflow-y: auto; z-index: 10; display: none; }
+        .autocomplete-results { position: absolute; top: 100%; left: 0; right: 0; background: #273340; border: 1px solid #3d5466; border-top: none; border-radius: 0 0 6px 6px; max-height: 320px; overflow-y: auto; z-index: 10; display: none; }
         .autocomplete-results.show { display: block; }
         .autocomplete-item { padding: 8px 12px; cursor: pointer; font-size: 13px; border-bottom: 1px solid #2f3942; }
         .autocomplete-item:hover { background: #1d3a4d; }
@@ -809,17 +809,19 @@
                     return;
                 }
 
-                let html = '<table><thead><tr><th>Campaign / Line Item</th><th>Platform</th><th>Quorum Advertiser</th><th class="text-right">Impressions</th><th>Last Seen</th><th>Status</th></tr></thead><tbody>';
+                let html = '<table><thead><tr><th>Campaign / Line Item</th><th>Platform</th><th>Quorum Advertiser</th><th class="text-right">Impressions (14d)</th><th class="text-right">Reach (14d)</th><th>Last Seen</th><th>Status</th></tr></thead><tbody>';
                 json.data.forEach(r => {
                     const mapped = r.QUORUM_ADVERTISER_ID != null;
                     const campaignName = r.CAMPAIGN_NAME_MANUAL || r.INSERTION_ORDER_NAME_FROM_DSP || r.LINE_ITEM_NAME_FROM_DSP || r.ADVERTISER_NAME_FROM_DSP || '—';
                     const platformName = r.PLATFORM_NAME || r.DATA_SOURCE || '—';
                     const quorumName = mapped ? (r.QUORUM_ADVERTISER_NAME || `ID ${r.QUORUM_ADVERTISER_ID}`) : '—';
+                    const impressions = r.IMPRESSIONS_14DAY_ROLLING || r.IMPRESSION_COUNT || 0;
                     html += `<tr>
                         <td><span class="truncate" title="${esc(campaignName)}">${esc(campaignName)}</span></td>
                         <td>${esc(platformName)}</td>
                         <td>${mapped ? `<span class="text-green">${esc(quorumName)}</span>` : '<span class="text-muted">—</span>'}</td>
-                        <td class="text-right">${fmt(r.IMPRESSION_COUNT)}</td>
+                        <td class="text-right">${fmt(impressions)}</td>
+                        <td class="text-right text-muted">${fmt(r.REACH_14DAY_ROLLING || 0)}</td>
                         <td class="text-muted">${r.LAST_IMPRESSION_TIMESTAMP ? new Date(r.LAST_IMPRESSION_TIMESTAMP).toLocaleDateString() : '—'}</td>
                         <td>${mapped ? '<span class="status-badge success">Mapped</span>' : '<span class="status-badge warning">Unmapped</span>'}</td>
                     </tr>`;
@@ -1087,9 +1089,10 @@
                     ['Web Visit Attribution', cfgCurrentData.HAS_WEB_VISIT_ATTRIBUTION ? '✓ Yes' : '✗ No'],
                     ['Impression Tracking', cfgCurrentData.HAS_IMPRESSION_TRACKING ? '✓ Yes' : '✗ No'],
                     ['Web Pixel Integration', cfgCurrentData.WEB_PIXEL_INTEGRATION_TYPE || '—'],
-                    ['Segment Count', cfgCurrentData.SEGMENT_COUNT ?? '—'],
-                    ['Campaign Mapping Count', cfgCurrentData.CAMPAIGN_MAPPING_COUNT ?? '—'],
-                    ['Platform Type IDs', cfgCurrentData.PLATFORM_TYPE_IDS || '—'],
+                    ['POI Segments Assigned', cfgCurrentData.SEGMENT_COUNT > 0 ? `✓ ${cfgCurrentData.SEGMENT_COUNT} segments` : '✗ None'],
+                    ['Campaign Mappings', cfgCurrentData.CAMPAIGN_MAPPING_COUNT > 0 ? `✓ ${cfgCurrentData.CAMPAIGN_MAPPING_COUNT} mappings` : '✗ None'],
+                    ['Web Pixel URLs', cfgCurrentData.WEB_PIXEL_URL_COUNT > 0 ? `✓ ${cfgCurrentData.WEB_PIXEL_URL_COUNT} URLs` : '✗ None'],
+                    ['Platforms', cfgCurrentData.PLATFORM_TYPE_IDS || '—'],
                     ['Last Updated', cfgCurrentData.UPDATED_AT || cfgCurrentData.CREATED_AT || '—'],
                 ];
                 grid.innerHTML = fields.map(([label, val]) => `
