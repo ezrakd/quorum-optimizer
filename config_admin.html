@@ -645,12 +645,6 @@
 
                 document.getElementById('unmappedPixelCount').textContent = `${json.count} domains`;
 
-                if (json.warning) {
-                    container.innerHTML = `<div class="empty" style="color:#b45309">⚠ ${esc(json.warning)}</div>`;
-                    document.getElementById('unmappedPixelCount').textContent = 'timeout';
-                    return;
-                }
-
                 if (json.count === 0) {
                     container.innerHTML = '<div class="empty">No unmapped web pixels found.</div>';
                     return;
@@ -659,15 +653,14 @@
                 const agencies = [...new Set(json.data.filter(r => r.AGENCY_ID).map(r => JSON.stringify({ id: r.AGENCY_ID, name: r.AGENCY_NAME || r.AGENCY_ID })))].map(s => JSON.parse(s));
                 populateAgencyFilter('pixelAgencyFilter', agencies);
 
-                let html = '<table><thead><tr><th>Agency</th><th>Domain</th><th class="text-right">Events</th><th>Active Days</th><th>Status</th><th></th></tr></thead><tbody>';
+                let html = '<table><thead><tr><th>Agency</th><th>Domain</th><th class="text-right">Events</th><th>Status</th><th></th></tr></thead><tbody>';
                 json.data.forEach(r => {
-                    const statusClass = (r.ACTION_REQUIRED || '').includes('NEW_AGENCY') ? 'new' : 'warning';
-                    const statusText = r.ACTION_REQUIRED || 'Unmapped';
+                    const statusClass = (r.STATUS || '').includes('NEW_AGENCY') ? 'new' : 'warning';
+                    const statusText = r.STATUS || r.ACTION_REQUIRED || 'Unmapped';
                     html += `<tr class="clickable" onclick='openConfigDomainModal(${JSON.stringify(r).replace(/'/g, "&#39;")})'>
                         <td>${esc(r.AGENCY_NAME || r.AGENCY_ID || '—')}</td>
-                        <td><span class="truncate">${esc(r.SITE_DOMAIN || r.DOMAIN || r.URL || '')}</span></td>
+                        <td><span class="truncate">${esc(r.DOMAIN || r.URL || '')}</span></td>
                         <td class="text-right text-blue">${fmt(r.EVENTS_30D)}</td>
-                        <td class="text-right">${r.ACTIVE_DAYS || '—'}</td>
                         <td><span class="status-badge ${statusClass}">${esc(statusText)}</span></td>
                         <td><button class="btn btn-sm btn-primary">Configure</button></td>
                     </tr>`;
@@ -710,15 +703,13 @@
                 html += '<table><thead><tr><th style="width:40px"><input type="checkbox" id="poiSelectAll" onchange="toggleAllPOI(this)"></th><th>Brand</th><th>Category</th><th>DMA</th><th class="text-right">Locations</th><th class="text-right">Zips</th></tr></thead><tbody>';
                 json.data.forEach((r, i) => {
                     const md5 = r.SEGMENT_MD5 || r.MD5 || r.LOCATION_MD5 || `row_${i}`;
-                    const brandName = r.BRAND || r.BRAND_NAME || '';
-                    const dmaName = r.DMA_NAME || r.DMA || '';
                     html += `<tr>
-                        <td><input type="checkbox" class="poi-check" value="${esc(md5)}" data-brand="${esc(brandName)}" data-dma="${esc(dmaName)}"></td>
-                        <td>${esc(brandName)}</td>
+                        <td><input type="checkbox" class="poi-check" value="${esc(md5)}" data-brand="${esc(r.BRAND_NAME || '')}" data-dma="${esc(r.DMA || '')}"></td>
+                        <td>${esc(r.BRAND_NAME || '')}</td>
                         <td class="text-muted">${esc(r.CATEGORY || '')}</td>
-                        <td>${esc(dmaName)}</td>
+                        <td>${esc(r.DMA || '')}</td>
                         <td class="text-right">${fmt(r.UNIQUE_LOCATIONS || r.LOCATION_COUNT || 1)}</td>
-                        <td class="text-right text-muted">${fmt(r.ZIP_CODES || r.ZIP_COUNT || '')}</td>
+                        <td class="text-right text-muted">${fmt(r.ZIP_COUNT || '')}</td>
                     </tr>`;
                 });
                 html += '</tbody></table></div>';
