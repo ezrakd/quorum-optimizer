@@ -157,7 +157,7 @@ def get_unmapped_webpixels():
             FROM recent_pixels rp
             LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa
                 ON rp.AGENCY_ID = aa.ADVERTISER_ID
-            LEFT JOIN QUORUMDB.REF_DATA.ADVERTISER_DOMAIN_MAPPING adm
+            LEFT JOIN QUORUMDB.DERIVED_TABLES.ADVERTISER_DOMAIN_MAPPING adm
                 ON rp.AGENCY_ID = adm.AGENCY_ID
                 AND rp.DOMAIN LIKE '%' || adm.DOMAIN || '%'
             WHERE adm.MAPPING_ID IS NULL

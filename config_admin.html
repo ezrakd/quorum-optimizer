@@ -207,12 +207,13 @@
                 <!-- Unmapped Web Pixels -->
                 <div class="table-section" id="unmappedPixels">
                     <div class="table-header">
-                        Unmapped Web Pixels (30-day)
+                        Unmapped Web Pixels (7-day)
                         <span class="count" id="unmappedPixelCount"></span>
                     </div>
                     <div class="table-filters">
                         <select class="filter-select" id="pixelAgencyFilter" onchange="loadUnmappedWebPixels()">
                             <option value="">All Agencies</option>
+                            <option value="1480" selected>Paramount (1480)</option>
                         </select>
                     </div>
                     <div id="unmappedPixelBody">
@@ -665,16 +666,15 @@
                 const agencies = [...new Set(json.data.filter(r => r.AGENCY_ID).map(r => JSON.stringify({ id: r.AGENCY_ID, name: r.AGENCY_NAME || r.AGENCY_ID })))].map(s => JSON.parse(s));
                 populateAgencyFilter('pixelAgencyFilter', agencies);
 
-                let html = '<table><thead><tr><th>Agency</th><th>Domain</th><th class="text-right">Events</th><th>Active Days</th><th>Status</th><th></th></tr></thead><tbody>';
+                let html = '<table><thead><tr><th>Agency</th><th>Domain</th><th class="text-right">Events (7d)</th><th class="text-right">Devices (7d)</th><th>Last Seen</th><th></th></tr></thead><tbody>';
                 json.data.forEach(r => {
-                    const statusClass = (r.ACTION_REQUIRED || '').includes('NEW_AGENCY') ? 'new' : 'warning';
-                    const statusText = r.ACTION_REQUIRED || 'Unmapped';
+                    const lastSeen = r.LAST_SEEN ? new Date(r.LAST_SEEN).toLocaleDateString() : '—';
                     html += `<tr class="clickable" onclick='openConfigDomainModal(${JSON.stringify(r).replace(/'/g, "&#39;")})'>
                         <td>${esc(r.AGENCY_NAME || r.AGENCY_ID || '—')}</td>
-                        <td><span class="truncate">${esc(r.SITE_DOMAIN || r.DOMAIN || r.URL || '')}</span></td>
-                        <td class="text-right text-blue">${fmt(r.EVENTS_30D)}</td>
-                        <td class="text-right">${r.ACTIVE_DAYS || '—'}</td>
-                        <td><span class="status-badge ${statusClass}">${esc(statusText)}</span></td>
+                        <td><span class="truncate">${esc(r.DOMAIN || '')}</span></td>
+                        <td class="text-right text-blue">${fmt(r.EVENT_COUNT_7D)}</td>
+                        <td class="text-right">${fmt(r.UNIQUE_DEVICES_7D)}</td>
+                        <td>${lastSeen}</td>
                         <td><button class="btn btn-sm btn-primary">Configure</button></td>
                     </tr>`;
                 });
