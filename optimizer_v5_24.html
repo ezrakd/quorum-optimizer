@@ -1,0 +1,2201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quorum Optimizer v5</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f1419; color: #e7e9ea; }
+        .app { display: flex; min-height: 100vh; }
+        
+        /* Sidebar */
+        .sidebar { width: 220px; min-width: 120px; max-width: 400px; background: #16202a; border-right: none; padding: 16px; overflow-y: auto; position: fixed; height: 100vh; }
+        .sidebar-resize { position: fixed; top: 0; width: 5px; height: 100vh; cursor: col-resize; background: #2f3942; z-index: 100; transition: background 0.2s; }
+        .sidebar-resize:hover, .sidebar-resize.dragging { background: #1d9bf0; }
+        .logo { margin-bottom: 20px; }
+        .version { font-size: 10px; color: #8b98a5; font-weight: normal; }
+        .search { width: 100%; padding: 10px 12px; background: #273340; border: 1px solid #3d5466; border-radius: 8px; color: #e7e9ea; margin-bottom: 16px; }
+        .search:focus { outline: none; border-color: #1d9bf0; }
+        .agency-list { display: flex; flex-direction: column; gap: 4px; }
+        .agency-item { padding: 12px; background: #1e2732; border-radius: 8px; cursor: pointer; transition: background 0.2s; overflow: hidden; }
+        .agency-item:hover { background: #2c3640; }
+        .agency-item.active { background: #1d3a4d; border: 1px solid #1d9bf0; }
+        .agency-name { font-weight: 500; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .agency-meta { font-size: 12px; color: #8b98a5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .agency-meta .highlight { color: #00ba7c; }
+        
+        /* Main */
+        .main { margin-left: 225px; flex: 1; padding: 24px; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+        .title { font-size: 24px; font-weight: 700; }
+        .breadcrumb { font-size: 20px; font-weight: 600; color: #e2e8f0; margin-bottom: 8px; }
+        .breadcrumb a { color: #1d9bf0; text-decoration: none; }
+        .date-range { display: flex; gap: 8px; }
+        .date-btn { padding: 8px 16px; background: #273340; border: 1px solid #3d5466; border-radius: 6px; color: #e7e9ea; cursor: pointer; }
+        .date-btn:hover { background: #2c3640; }
+        .date-btn.active { background: #1d9bf0; border-color: #1d9bf0; }
+        
+        /* Cards */
+        .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 24px; }
+        .truncate { max-width: 300px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .opt-table { table-layout: fixed; font-size: 12px; }
+        .opt-table th { font-size: 11px; padding: 6px 8px; }
+        .opt-table td { padding: 5px 8px; }
+        .opt-table th:first-child, .opt-table td:first-child { width: 35%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .card { background: #1e2732; border-radius: 12px; padding: 20px; }
+        .card-label { font-size: 12px; color: #8b98a5; text-transform: uppercase; margin-bottom: 8px; }
+        .card-value { font-size: 24px; font-weight: 700; }
+        .card-value.green { color: #00ba7c; }
+        .card-value.blue { color: #1d9bf0; }
+        .card-sub { font-size: 11px; color: #8b98a5; margin-top: 4px; }
+        
+        /* Tabs */
+        .tabs { display: flex; gap: 4px; margin-bottom: 20px; border-bottom: 1px solid #2f3942; }
+        .tab { padding: 12px 20px; background: transparent; border: none; color: #8b98a5; cursor: pointer; font-size: 14px; border-bottom: 2px solid transparent; }
+        .tab:hover { color: #e7e9ea; }
+        .tab.active { color: #1d9bf0; border-bottom-color: #1d9bf0; }
+        
+        /* Table */
+        .table-container { background: #1e2732; border-radius: 12px; overflow: hidden; margin-bottom: 20px; }
+        .table-container:last-child { margin-bottom: 0; }
+        .table-title { padding: 16px 20px; font-weight: 600; border-bottom: 1px solid #2f3942; display: flex; justify-content: space-between; align-items: center; }
+        .table-note { font-size: 12px; color: #8b98a5; font-weight: normal; }
+        table { width: 100%; border-collapse: collapse; }
+        th { text-align: left; padding: 12px 16px; font-size: 12px; color: #8b98a5; text-transform: uppercase; background: #16202a; }
+        td { padding: 14px 16px; border-bottom: 1px solid #2f3942; }
+        tr:hover { background: #252e38; }
+        tr:last-child td { border-bottom: none; }
+        .clickable { cursor: pointer; }
+        .text-right { text-align: right; }
+        .text-green { color: #00ba7c; }
+        .text-blue { color: #1d9bf0; }
+        .text-yellow { color: #f7931a; }
+        .text-red { color: #f4212e; }
+        .text-muted { color: #8b98a5; }
+        
+        /* Loading */
+        .loading { display: flex; justify-content: center; align-items: center; padding: 60px; color: #8b98a5; }
+        .spinner { width: 24px; height: 24px; border: 3px solid #2f3942; border-top-color: #1d9bf0; border-radius: 50%; animation: spin 1s linear infinite; margin-right: 12px; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        
+        .error { background: #3d1f1f; border: 1px solid #f4212e; border-radius: 8px; padding: 16px; color: #f4212e; margin-bottom: 20px; }
+        .empty { text-align: center; padding: 40px; color: #8b98a5; }
+        
+        /* Filter Bar */
+        .filter-bar { background: #1d3a4d; border: 1px solid #1d9bf0; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; }
+        .filter-info { font-size: 14px; }
+        .filter-label { color: #8b98a5; }
+        .filter-value { color: #1d9bf0; font-weight: 500; }
+        .filter-clear { background: transparent; border: 1px solid #8b98a5; color: #8b98a5; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+        .filter-clear:hover { border-color: #e7e9ea; color: #e7e9ea; }
+        
+        /* Clickable rows */
+        tr.clickable-row { cursor: pointer; }
+        tr.clickable-row:hover { background: #1d3a4d; }
+        tr.clickable-row td:first-child::before { content: ''; display: inline-block; width: 6px; height: 6px; background: #1d9bf0; border-radius: 50%; margin-right: 8px; opacity: 0; transition: opacity 0.2s; }
+        tr.clickable-row:hover td:first-child::before { opacity: 1; }
+    </style>
+</head>
+<body>
+    <div class="app">
+        <div class="sidebar">
+            <div class="logo"><img src="data:image/png;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/4gHYSUNDX1BST0ZJTEUAAQEAAAHIAAAAAAQwAABtbnRyUkdCIFhZWiAH4AABAAEAAAAAAABhY3NwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAA9tYAAQAAAADTLQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlkZXNjAAAA8AAAACRyWFlaAAABFAAAABRnWFlaAAABKAAAABRiWFlaAAABPAAAABR3dHB0AAABUAAAABRyVFJDAAABZAAAAChnVFJDAAABZAAAAChiVFJDAAABZAAAAChjcHJ0AAABjAAAADxtbHVjAAAAAAAAAAEAAAAMZW5VUwAAAAgAAAAcAHMAUgBHAEJYWVogAAAAAAAAb6IAADj1AAADkFhZWiAAAAAAAABimQAAt4UAABjaWFlaIAAAAAAAACSgAAAPhAAAts9YWVogAAAAAAAA9tYAAQAAAADTLXBhcmEAAAAAAAQAAAACZmYAAPKnAAANWQAAE9AAAApbAAAAAAAAAABtbHVjAAAAAAAAAAEAAAAMZW5VUwAAACAAAAAcAEcAbwBvAGcAbABlACAASQBuAGMALgAgADIAMAAxADb/2wBDAAUDBAQEAwUEBAQFBQUGBwwIBwcHBw8LCwkMEQ8SEhEPERETFhwXExQaFRERGCEYGh0dHx8fExciJCIeJBweHx7/2wBDAQUFBQcGBw4ICA4eFBEUHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh7/wAARCAArAJYDASIAAhEBAxEB/8QAHAABAAICAwEAAAAAAAAAAAAAAAYHBQgCAwQB/8QAOhAAAQMDAwIDBAcGBwAAAAAAAQIDBAUGEQAHEiExCBNBFCJRYRUjMjNxgZEWF0JicsEkN1J0dYKz/8QAGgEBAAIDAQAAAAAAAAAAAAAAAAIFAwQGB//EACoRAAIBAgQDCAMAAAAAAAAAAAABAgMRBAUhURIxQQYTImFxoeHxMsHw/9oADAMBAAIRAxEAPwDTLXNptx51DTSFOOLUEoQkZKiewA9TrObe0Vq4rwgUZ5XFElSxnBIyEKUM4IOMgZwQceo762Hs+17Atyp+e7TmqdXo7ZzHW84+sg9ObKSSVhXYFIz3T0ORq1wGVTxcePiUY3tr+vtFXmWbUsAvEm3a9kayVSmT6Y8lmoRHY61AlIWPtYJScH1wQR+WvJrax6DZtatURrxh+xlmZIW21LUW3AVPrxwUg+9nthJPUYxnGqg3psqBbMWn1CDT1U5Ex1aERlOqWpKEgEFZUT7xz2HQdB1OTrLjMndGDq05JxST817b/Rr4DPaOLqdy01K7Xk7bPqVlprk2hbjiW20KWtRASlIyST2AGrZheG7euZQxWGrFlpYKPMS07JZbfKcZ+6UsLB/lIz8tUpeFSaa750SVAmvQp0Z6LKYWW3mXmyhbawcFKknqCD6HWbt6zK5XrSuO6Kc0yum26mOqoKW6EqSHllDfFPdXVJ7dtAR3TUko9k16q2JXL1iMsmj0N1hqa4p0BYU6oJQEp7nqRn8dR5hp199thhtbrrighCEJJUpROAAB3JOgOGmrbR4bd61UL6YFiywzw8zyTIZEjjjP3JXzz/Ljl8tVRJYejSHY0llxl9pZQ424kpUhQOCkg9QQemNAdemrI2u2XvPca3pdet9VJbgRZXsjrk2alj6zilWBn5KGsNuhttd221UjQbqpyY4ltl2JIZdS6xIQMZKFpODjIyDgjI6YIyBENNSO17LrtyW5cNfpbLK4NvMNyKgpboSpKFqKU8QftdQdfLesyuV60rjuinNMrptupjqqCluhKkh5ZQ3xT3V1Se3bQEd017aFTJVarkCjQQgy58luMwFqwkrWoJTk+gyRrI39aNesa65ls3JDMSoxFALSDyStJGUrSr+JJByD/fQGB01K9w9vrosEUcXPCTDcq8FM6O1zBWlsnstPdKvik9RpoCwPDdTIPN6ssQEVGqNKKMKfSgxkn1CT1yoZ978QPXNtR3ZbtRrNbmQRTarD8thhQeSS00kr8rI7updK1ZSO5wkYWjOtbNmKsmjbi02W7JWxH+sS9xz76S2rCcD7WVccD1OMddbOU+nS6pWf2mXUVQJvkJbjxChDrTSUlZQpwHu59YsEpIwFFIPdR7TKZd/g4xprWLd1ptz99/jzrtbh5xrOcuTS113/AB06O2unrfk8TQJNQrtsVFdyUsQHoqpDiIyn08YuXFkvYP3h5ckg9hxIGDyJ8+5MVVyWF5l12+inlDAfU8ZaEmKvH2hnt/Sfw76y8WmVC4LeDlTqaKY41Lk+UmEAsD69fIKWpIUpKiOqRxGAPXBFX+Jm4n5tIplLeUY0lEhapLCFkocASOK0n+JPfHqDkHBGtirLuMLKdRXVuttfX++KvJsNOtmCVNJWk27cXh9NbO/Xnrve7xvgzjUuR4hKImelh11puQ7TkP8ARC5SWlFrP4EEj5gY668luUPc7cXcSsT0XUGb+pri3Uwps52PPdWgnk3H93gCnBHDknA7DA1VlPmSqfOYnwZDsaVHcS6y80spW2tJylSSOoIIznV1R/E/fyQzKl0OzJ9aZQEt1uTRkqnJIHRQWFBOR/Trgz1k7vGg2k3ras6osIj3TOtaE/cTKEhPGYQQSoDsvAAI9AlPx107Hgq8Nm+QSCT7PRz0/wBw7qvtz9w63uNUIdUuSLS1VaOwGX6hGjeS9NAACVPYPFSgBgFKU9DjsBj5tZuNc23FYkVG3nYy25bJjzYctkPRpbX+lxB7j5gg9SM4JyBZG2fTwcbsk9M1KlgfP/EN68vgpiwpO+DK3Wo71SjUyW/R2n8cVzUt+4MHuQnmofDjn01G9zd5rqvqgM247AoVv0Jp72g0yhQfZY7ruMBaxyUVH88euMgYgFIqM+kVSLVKXLehzojqXo77Kilba0nIUCOxB0BnplzX1+8Fdck1atJuxMvCn1LWJSXgrHDHcYPThjHpj01ZPjWYjtbtwH1ssMVqXb8KRXWmgAETlJVzyB2PENn88+uvo8UF/wDFEpyh2W7XUJ4prq6KkzwcY5cuXDP/AFx8tU1W6rUa3V5VXq816bPlul2RIeVyW4s9yToDYrZCi0K4vCzVqJclfNAp029WGl1DyA6llRYRw5AqThJVgFWemcnprD+KxdOs6g2tsnTk1SUbW8+TIqM9ny/aFyFcx5Kcn6sZV1Bxnp1IJNVQr7rETa6ft20xCNJnVJFSdcU2rzw6lISAFcuPHCR045+evTeW5Feu+zaDbdfj0+WqhJLUOpqaV7b5PXDK18uKkDpjKcjiOvU5AsHw8gq2P3tSBk/Q0Q4HwDjmTrhsmCjwz74OqBS2pqjJCj0BPtLnTPx6j9Rqutr9wrm25rzlXtuSylT7JYlRpDQdjymj3Q4g9x+hHoep1INyN67rva3E2yadb9u0Iuh56nUGB7Ky+4OynByUVYPXGcZAOMgYAjm0P+bNn/8AOwv/AHRrbncu9tp6ruLXapuRHaRce3VRcNMjowPppgjkyyoEe8UOkHHoOpyCvGllu1WTQrgptbhpaXJp8tqUyl0EoK21haQoAgkZAzgjXsvy5qhed4VS6aq3Gam1J8vvIjpKW0qPokEkgdPUnQF3+NWty7lY2wuKeG0y6pajMx8NjCQtw81AD4ZOmqgv6/azelPtuDVWYTTVu0pqlw/Z21JKmmxgKXlRyr4kYHy00BFNZO2K9U7brDNVpMlTEhvp8UrT6pUPUH4f31jNNShOUJKUXZojKEZxcZK6ZKryvqs3NEZgSFiPAaccdEdtRwpa1qUVKPqRywPh+uorppqdatUrS46juyNKlClHhgrIaaaaxGQaaaaAaaaaAaaaaAaaaaAaaaaAaaaaAaaaaA//2Q==" alt="Quorum"></div>
+            <div class="version" style="font-size: 11px; color: #64748b; margin-top: -16px; margin-bottom: 16px;"></div>
+            <div style="margin-bottom: 12px;">
+                <button onclick="loadPipelineHealth()" style="width:100%; padding: 10px 12px; background: linear-gradient(135deg, #1e2732, #273340); border: 1px solid #3d5466; border-radius: 8px; color: #e7e9ea; cursor: pointer; font-size: 13px; font-weight: 500; text-align: left; transition: all 0.2s;" onmouseover="this.style.borderColor='#1d9bf0'" onmouseout="this.style.borderColor='#3d5466'">
+                    <span style="margin-right: 6px;">◉</span> Ops Console
+                </button>
+            </div>
+            <input type="text" class="search" id="search" placeholder="Search agencies...">
+            <div class="agency-list" id="agencyList">
+                <div class="loading"><div class="spinner"></div> Loading...</div>
+            </div>
+        </div>
+        <div class="sidebar-resize" id="sidebarResize"></div>
+        <div class="main" id="main">
+            <div class="loading"><div class="spinner"></div> Loading...</div>
+        </div>
+    </div>
+
+    <script>
+        const API = 'https://quorum-optimizer-production.up.railway.app';
+        let state = { 
+            agencyId: null, agencyName: null, 
+            advertiserId: null, advertiserName: null, 
+            days: 30,
+            // Filter state for drilling down
+            filter: { campaignId: null, campaignName: null, lineitemId: null, lineitemName: null },
+            // Lift analysis grouping
+            liftGroupBy: 'campaign'
+        };
+        
+        const fmt = n => n ? Number(n).toLocaleString() : '0';
+        const formatNumber = fmt;
+        const pct = n => n ? Number(n).toFixed(3) + '%' : '0.000%';
+        const rateClass = r => r >= 0.5 ? 'text-green' : r >= 0.1 ? 'text-yellow' : 'text-muted';
+        
+        // Clear filter
+        function clearFilter() {
+            state.filter = { campaignId: null, campaignName: null, lineitemId: null, lineitemName: null };
+            // Reload current tab with no filter
+            const activeTab = document.querySelector('.tab.active');
+            if (activeTab) showTab(activeTab.dataset.tab, activeTab);
+        }
+        
+        // Set campaign filter and switch to Publishers tab
+        function filterByCampaign(campaignId, campaignName) {
+            state.filter = { campaignId, campaignName, lineitemId: null, lineitemName: null };
+            const pubTab = document.querySelector('.tab[data-tab="publishers"]');
+            if (pubTab) showTab('publishers', pubTab);
+        }
+        
+        // Set lineitem filter and switch to Publishers tab
+        function filterByLineitem(lineitemId, lineitemName, campaignId, campaignName) {
+            state.filter = { campaignId, campaignName, lineitemId, lineitemName };
+            const pubTab = document.querySelector('.tab[data-tab="publishers"]');
+            if (pubTab) showTab('publishers', pubTab);
+        }
+        
+        // Filter bar HTML
+        function renderFilterBar() {
+            if (!state.filter.campaignId && !state.filter.lineitemId) return '';
+            const filterText = state.filter.lineitemId 
+                ? `Line Item: <span class="filter-value">${state.filter.lineitemName || state.filter.lineitemId}</span>`
+                : `Campaign: <span class="filter-value">${state.filter.campaignName || state.filter.campaignId}</span>`;
+            return `
+                <div class="filter-bar">
+                    <div class="filter-info"><span class="filter-label">Filtered by</span> ${filterText}</div>
+                    <button class="filter-clear" onclick="clearFilter()">✕ Clear Filter</button>
+                </div>
+            `;
+        }
+        
+        async function api(endpoint, params = {}) {
+            const url = new URL(API + endpoint);
+            Object.entries(params).forEach(([k, v]) => v != null && url.searchParams.append(k, v));
+            console.log('[API Request]', endpoint, params);
+            try {
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), 90000);
+                const res = await fetch(url, { signal: controller.signal });
+                clearTimeout(timeout);
+                const data = await res.json();
+                console.log('[API Response]', endpoint, data);
+                return data.success ? data : { success: false, error: data.error || 'API error' };
+            } catch (e) {
+                const msg = e.name === 'AbortError' ? 'Request timed out (90s)' : e.message;
+                console.warn('[API Error]', endpoint, msg);
+                return { success: false, error: msg };
+            }
+        }
+        
+        function dates() {
+            const end = new Date();
+            const start = new Date();
+            start.setDate(start.getDate() - state.days);
+            return { start_date: start.toISOString().split('T')[0], end_date: end.toISOString().split('T')[0] };
+        }
+        
+        // Chart color palette (consistent, distinguishable)
+        const CHART_COLORS = [
+            '#1d9bf0', '#00ba7c', '#f5c518', '#ff6b35', '#a855f7',
+            '#06b6d4', '#ec4899', '#84cc16', '#f97316', '#6366f1',
+            '#14b8a6', '#e879f9', '#facc15', '#22d3ee', '#fb7185',
+            '#4ade80', '#c084fc', '#fbbf24', '#2dd4bf', '#f472b6'
+        ];
+        
+        let activeCharts = {};
+        
+        function renderStackedChart(canvasId, timeseriesData, entityNames, label) {
+            // Destroy existing chart
+            if (activeCharts[canvasId]) {
+                activeCharts[canvasId].destroy();
+            }
+            
+            const canvas = document.getElementById(canvasId);
+            if (!canvas || !timeseriesData || Object.keys(timeseriesData).length === 0) return;
+            
+            // Sort dates
+            const allDates = Object.keys(timeseriesData).sort();
+            
+            // Get all entity IDs and sort by total impressions descending
+            const entityTotals = {};
+            for (const dt of allDates) {
+                for (const [eid, imps] of Object.entries(timeseriesData[dt])) {
+                    entityTotals[eid] = (entityTotals[eid] || 0) + imps;
+                }
+            }
+            const entityIds = Object.keys(entityTotals).sort((a, b) => entityTotals[b] - entityTotals[a]);
+            
+            // Build datasets (top entities get their own color, rest grouped as "Other")
+            const maxSeries = 10;
+            const topIds = entityIds.slice(0, maxSeries);
+            const otherIds = entityIds.slice(maxSeries);
+            
+            const datasets = topIds.map((eid, i) => ({
+                label: entityNames[eid] || `ID ${eid}`,
+                data: allDates.map(dt => (timeseriesData[dt] || {})[eid] || 0),
+                backgroundColor: CHART_COLORS[i % CHART_COLORS.length],
+                borderWidth: 0,
+                borderRadius: 2,
+            }));
+            
+            // Add "Other" bucket if needed
+            if (otherIds.length > 0) {
+                datasets.push({
+                    label: `+${otherIds.length} more`,
+                    data: allDates.map(dt => {
+                        let sum = 0;
+                        for (const eid of otherIds) sum += (timeseriesData[dt] || {})[eid] || 0;
+                        return sum;
+                    }),
+                    backgroundColor: '#2f3942',
+                    borderWidth: 0,
+                    borderRadius: 2,
+                });
+            }
+            
+            // Format date labels (Mon DD)
+            const labels = allDates.map(d => {
+                const dt = new Date(d + 'T12:00:00');
+                return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+            });
+            
+            activeCharts[canvasId] = new Chart(canvas, {
+                type: 'bar',
+                data: { labels, datasets },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                            labels: { color: '#8b98a5', boxWidth: 12, padding: 12, font: { size: 11 } }
+                        },
+                        tooltip: {
+                            backgroundColor: '#1e2732',
+                            titleColor: '#e7e9ea',
+                            bodyColor: '#8b98a5',
+                            borderColor: '#2f3942',
+                            borderWidth: 1,
+                            callbacks: {
+                                label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y.toLocaleString()}`
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            stacked: true,
+                            ticks: { color: '#8b98a5', font: { size: 10 }, maxRotation: 0, autoSkip: true, maxTicksLimit: 15 },
+                            grid: { color: '#2f3942', lineWidth: 0.5 }
+                        },
+                        y: {
+                            stacked: true,
+                            ticks: { 
+                                color: '#8b98a5', font: { size: 10 },
+                                callback: v => v >= 1e6 ? (v/1e6).toFixed(1) + 'M' : v >= 1e3 ? (v/1e3).toFixed(0) + 'K' : v
+                            },
+                            grid: { color: '#2f3942', lineWidth: 0.5, drawBorder: false }
+                        }
+                    }
+                }
+            });
+        }
+        
+        function renderMixedChart(canvasId, tsData) {
+            if (activeCharts[canvasId]) activeCharts[canvasId].destroy();
+            const canvas = document.getElementById(canvasId);
+            if (!canvas || !tsData || tsData.length === 0) return;
+            
+            // Sort by date
+            const sorted = [...tsData].sort((a, b) => (a.LOG_DATE || '').localeCompare(b.LOG_DATE || ''));
+            
+            const labels = sorted.map(d => {
+                const dt = new Date(d.LOG_DATE + 'T12:00:00');
+                return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+            });
+            const impressions = sorted.map(d => d.IMPRESSIONS || 0);
+            const visits = sorted.map(d => (d.STORE_VISITS || 0) + (d.WEB_VISITS || 0));
+            const hasVisits = visits.some(v => v > 0);
+            
+            const datasets = [{
+                label: 'Impressions',
+                type: 'bar',
+                data: impressions,
+                backgroundColor: 'rgba(29, 155, 240, 0.6)',
+                borderWidth: 0,
+                borderRadius: 2,
+                yAxisID: 'y',
+                order: 2
+            }];
+            
+            if (hasVisits) {
+                datasets.push({
+                    label: 'Visits',
+                    type: 'line',
+                    data: visits,
+                    borderColor: '#00ba7c',
+                    backgroundColor: 'rgba(0, 186, 124, 0.1)',
+                    borderWidth: 2,
+                    pointRadius: 2,
+                    pointHoverRadius: 5,
+                    fill: true,
+                    tension: 0.3,
+                    yAxisID: 'y1',
+                    order: 1
+                });
+            }
+            
+            const scales = {
+                x: {
+                    ticks: { color: '#8b98a5', font: { size: 10 }, maxRotation: 0, autoSkip: true, maxTicksLimit: 15 },
+                    grid: { color: '#2f3942', lineWidth: 0.5 }
+                },
+                y: {
+                    position: 'left',
+                    title: { display: true, text: 'Impressions', color: '#8b98a5', font: { size: 10 } },
+                    ticks: { 
+                        color: '#8b98a5', font: { size: 10 },
+                        callback: v => v >= 1e6 ? (v/1e6).toFixed(1) + 'M' : v >= 1e3 ? (v/1e3).toFixed(0) + 'K' : v
+                    },
+                    grid: { color: '#2f3942', lineWidth: 0.5, drawBorder: false }
+                }
+            };
+            
+            if (hasVisits) {
+                scales.y1 = {
+                    position: 'right',
+                    title: { display: true, text: 'Visits', color: '#00ba7c', font: { size: 10 } },
+                    ticks: { 
+                        color: '#00ba7c', font: { size: 10 },
+                        callback: v => v >= 1e6 ? (v/1e6).toFixed(1) + 'M' : v >= 1e3 ? (v/1e3).toFixed(0) + 'K' : v
+                    },
+                    grid: { drawOnChartArea: false }
+                };
+            }
+            
+            activeCharts[canvasId] = new Chart(canvas, {
+                type: 'bar',
+                data: { labels, datasets },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                            labels: { color: '#8b98a5', boxWidth: 12, padding: 12, font: { size: 11 } }
+                        },
+                        tooltip: {
+                            backgroundColor: '#1e2732',
+                            titleColor: '#e7e9ea',
+                            bodyColor: '#8b98a5',
+                            borderColor: '#2f3942',
+                            borderWidth: 1,
+                            callbacks: {
+                                label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y.toLocaleString()}`
+                            }
+                        }
+                    },
+                    scales
+                }
+            });
+        }
+        
+        // Load agencies in sidebar
+        async function loadAgencies() {
+            const result = await api('/api/v5/agencies', dates());
+            const list = document.getElementById('agencyList');
+            
+            if (!result.success) {
+                list.innerHTML = `<div class="error">${result.error}</div>`;
+                return;
+            }
+            
+            list.innerHTML = result.data.map(a => `
+                <div class="agency-item" onclick="selectAgency(${a.AGENCY_ID}, '${(a.AGENCY_NAME || '').replace(/'/g, "\\'")}')">
+                    <div class="agency-name" title="${a.AGENCY_NAME || 'Agency ' + a.AGENCY_ID}">${a.AGENCY_NAME || 'Agency ' + a.AGENCY_ID}</div>
+                    <div class="agency-meta">
+                        ${fmt(a.IMPRESSIONS)} imps · 
+                        <span class="highlight">${fmt(a.STORE_VISITS)}</span> visits
+                        ${a.WEB_VISITS > 0 ? ` · ${fmt(a.WEB_VISITS)} web` : ''}
+                    </div>
+                </div>
+            `).join('');
+            
+            loadAgencyOverview();
+        }
+        
+        // Agency overview
+        async function loadAgencyOverview() {
+            state.agencyId = null;
+            state.advertiserId = null;
+            document.querySelectorAll('.agency-item').forEach(el => el.classList.remove('active'));
+            
+            const main = document.getElementById('main');
+            main.innerHTML = '<div class="loading"><div class="spinner"></div> Loading...</div>';
+            
+            const result = await api('/api/v5/agencies', dates());
+            
+            if (!result.success) {
+                main.innerHTML = `<div class="error">${result.error}</div>`;
+                return;
+            }
+            
+            const data = result.data || [];
+            const totals = data.reduce((t, a) => ({
+                imps: t.imps + (a.IMPRESSIONS || 0),
+                store: t.store + (a.STORE_VISITS || 0),
+                web: t.web + (a.WEB_VISITS || 0)
+            }), { imps: 0, store: 0, web: 0 });
+            
+            const storeRate = totals.imps > 0 ? (totals.store / totals.imps * 100) : 0;
+            const webRate = totals.imps > 0 ? (totals.web / totals.imps * 100) : 0;
+            
+            main.innerHTML = `
+                <div class="header">
+                    <div>
+                        <div class="title">Agency Overview</div>
+                        <div class="breadcrumb">${data.length} agencies</div>
+                    </div>
+                    <div class="date-range">
+                        <button class="date-btn ${state.days === 30 ? 'active' : ''}" onclick="setDays(30)">30 Days</button>
+                        <button class="date-btn ${state.days === 60 ? 'active' : ''}" onclick="setDays(60)">60 Days</button>
+                        <button class="date-btn ${state.days === 90 ? 'active' : ''}" onclick="setDays(90)">90 Days</button>
+                    </div>
+                </div>
+                <div class="cards">
+                    <div class="card"><div class="card-label">Impressions</div><div class="card-value">${fmt(totals.imps)}</div></div>
+                    <div class="card"><div class="card-label">Store Visits</div><div class="card-value green">${fmt(totals.store)}</div><div class="card-sub">${pct(storeRate)} rate</div></div>
+                    <div class="card"><div class="card-label">Web Visits</div><div class="card-value blue">${fmt(totals.web)}</div><div class="card-sub">${pct(webRate)} rate</div></div>
+                </div>
+                <div class="table-container" style="margin-bottom: 20px;">
+                    <div class="table-title">Weekly Impressions by Agency</div>
+                    <div style="height: 280px; padding: 12px;">
+                        <canvas id="agencyChart"></canvas>
+                    </div>
+                </div>
+                <div class="table-container">
+                    <div class="table-title">All Agencies</div>
+                    <table>
+                        <thead><tr>
+                            <th>Agency</th>
+                            <th class="text-right">Advertisers</th>
+                            <th class="text-right">Impressions</th>
+                            <th class="text-right">Store Visits</th>
+                            <th class="text-right">Web Visits</th>
+                            <th class="text-right">Store VR</th>
+                            <th class="text-right">Web VR</th>
+                        </tr></thead>
+                        <tbody>
+                            ${data.map(a => {
+                                const svr = a.IMPRESSIONS > 0 ? (a.STORE_VISITS / a.IMPRESSIONS * 100) : 0;
+                                const wvr = a.IMPRESSIONS > 0 ? (a.WEB_VISITS / a.IMPRESSIONS * 100) : 0;
+                                return `
+                                <tr class="clickable" onclick="selectAgency(${a.AGENCY_ID}, '${(a.AGENCY_NAME || '').replace(/'/g, "\\'")}')">
+                                    <td><strong>${a.AGENCY_NAME || 'Agency ' + a.AGENCY_ID}</strong></td>
+                                    <td class="text-right">${fmt(a.ADVERTISER_COUNT)}</td>
+                                    <td class="text-right">${fmt(a.IMPRESSIONS)}</td>
+                                    <td class="text-right text-green">${fmt(a.STORE_VISITS)}</td>
+                                    <td class="text-right text-blue">${fmt(a.WEB_VISITS)}</td>
+                                    <td class="text-right ${rateClass(svr)}">${pct(svr)}</td>
+                                    <td class="text-right ${rateClass(wvr)}">${pct(wvr)}</td>
+                                </tr>
+                            `}).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            `;
+            
+            // Async load chart data (with DOM-ready check)
+            api('/api/v5/agency-timeseries', dates()).then(ts => {
+                if (ts.success && ts.data) {
+                    requestAnimationFrame(() => renderStackedChart('agencyChart', ts.data, ts.agencies, 'Impressions'));
+                }
+            }).catch(e => console.warn('Agency chart load failed:', e));
+        }
+        
+        // Select agency
+        function selectAgency(agencyId, agencyName) {
+            state.agencyId = agencyId;
+            state.agencyName = agencyName;
+            state.advertiserId = null;
+            
+            document.querySelectorAll('.agency-item').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.agency-item').forEach(el => {
+                if (el.onclick && el.onclick.toString().includes(agencyId)) el.classList.add('active');
+            });
+            
+            loadAdvertiserOverview();
+        }
+        
+        // Advertiser overview
+        async function loadAdvertiserOverview() {
+            const main = document.getElementById('main');
+            main.innerHTML = '<div class="loading"><div class="spinner"></div> Loading advertisers...</div>';
+            
+            const result = await api('/api/v5/advertisers', { agency_id: state.agencyId, ...dates() });
+            
+            if (!result.success) {
+                main.innerHTML = `<div class="error">${result.error}</div>`;
+                return;
+            }
+            
+            const data = result.data || [];
+            const totals = data.reduce((t, a) => ({
+                imps: t.imps + (a.IMPRESSIONS || 0),
+                store: t.store + (a.STORE_VISITS || 0),
+                web: t.web + (a.WEB_VISITS || 0)
+            }), { imps: 0, store: 0, web: 0 });
+            
+            const storeRate = totals.imps > 0 ? (totals.store / totals.imps * 100) : 0;
+            const webRate = totals.imps > 0 ? (totals.web / totals.imps * 100) : 0;
+            
+            main.innerHTML = `
+                <div class="header">
+                    <div>
+                        <div class="breadcrumb"><a href="#" onclick="loadAgencyOverview(); return false;">Agencies</a> › ${state.agencyName}</div>
+                    </div>
+                    <div class="date-range">
+                        <button class="date-btn ${state.days === 30 ? 'active' : ''}" onclick="setDays(30)">30 Days</button>
+                        <button class="date-btn ${state.days === 60 ? 'active' : ''}" onclick="setDays(60)">60 Days</button>
+                        <button class="date-btn ${state.days === 90 ? 'active' : ''}" onclick="setDays(90)">90 Days</button>
+                    </div>
+                </div>
+                <div class="cards">
+                    <div class="card"><div class="card-label">Advertisers</div><div class="card-value">${data.length}</div></div>
+                    <div class="card"><div class="card-label">Impressions</div><div class="card-value">${fmt(totals.imps)}</div></div>
+                    <div class="card"><div class="card-label">Store Visits</div><div class="card-value green">${fmt(totals.store)}</div><div class="card-sub">${pct(storeRate)} rate</div></div>
+                    <div class="card"><div class="card-label">Web Visits</div><div class="card-value blue">${fmt(totals.web)}</div><div class="card-sub">${pct(webRate)} rate</div></div>
+                </div>
+                <div class="table-container" style="margin-bottom: 20px;">
+                    <div class="table-title">Impressions Over Time by Advertiser</div>
+                    <div style="height: 280px; padding: 12px;">
+                        <canvas id="advertiserChart"></canvas>
+                    </div>
+                </div>
+                <div class="table-container">
+                    <div class="table-title">Advertisers</div>
+                    <table>
+                        <thead><tr>
+                            <th>Advertiser</th>
+                            <th class="text-right">Impressions</th>
+                            <th class="text-right">Store Visits</th>
+                            <th class="text-right">Web Visits</th>
+                            <th class="text-right">Store VR</th>
+                            <th class="text-right">Web VR</th>
+                        </tr></thead>
+                        <tbody>
+                            ${data.length === 0 ? '<tr><td colspan="6" class="empty">No advertisers found</td></tr>' : data.map(a => {
+                                const svr = a.IMPRESSIONS > 0 ? (a.STORE_VISITS / a.IMPRESSIONS * 100) : 0;
+                                const wvr = a.IMPRESSIONS > 0 ? (a.WEB_VISITS / a.IMPRESSIONS * 100) : 0;
+                                return `
+                                <tr class="clickable" onclick="selectAdvertiser(${a.ADVERTISER_ID}, '${(a.ADVERTISER_NAME || '').replace(/'/g, "\\'")}')">
+                                    <td><strong>${a.ADVERTISER_NAME || 'Advertiser ' + a.ADVERTISER_ID}</strong></td>
+                                    <td class="text-right">${fmt(a.IMPRESSIONS)}</td>
+                                    <td class="text-right text-green">${fmt(a.STORE_VISITS)}</td>
+                                    <td class="text-right text-blue">${fmt(a.WEB_VISITS)}</td>
+                                    <td class="text-right ${rateClass(svr)}">${pct(svr)}</td>
+                                    <td class="text-right ${rateClass(wvr)}">${pct(wvr)}</td>
+                                </tr>
+                            `}).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            `;
+            
+            // Async load chart data (with DOM-ready check and timeout)
+            const advChartContainer = document.querySelector('#advertiserChart')?.parentElement;
+            if (advChartContainer) advChartContainer.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#8b98a5;"><div class="spinner" style="margin-right:10px;"></div> Loading chart data...</div>';
+            
+            api('/api/v5/advertiser-timeseries', { agency_id: state.agencyId, ...dates() }).then(ts => {
+                if (ts.success && ts.data && Object.keys(ts.data).length > 0) {
+                    if (advChartContainer) advChartContainer.innerHTML = '<canvas id="advertiserChart"></canvas>';
+                    requestAnimationFrame(() => renderStackedChart('advertiserChart', ts.data, ts.advertisers, 'Impressions'));
+                } else {
+                    console.warn('Advertiser timeseries failed:', ts.error);
+                    if (advChartContainer) advChartContainer.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#8b98a5;font-size:13px;">⚠️ Chart data unavailable${ts.error ? ': ' + ts.error : ''}</div>`;
+                }
+            }).catch(e => {
+                console.warn('Advertiser chart load failed:', e);
+                if (advChartContainer) advChartContainer.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#8b98a5;font-size:13px;">⚠️ Chart request timed out</div>';
+            });
+        }
+        
+        // Select advertiser
+        function selectAdvertiser(advertiserId, advertiserName) {
+            state.advertiserId = advertiserId;
+            state.advertiserName = advertiserName;
+            loadAdvertiserDetail();
+        }
+        
+        // Advertiser detail with tabs
+        async function loadAdvertiserDetail() {
+            // Reset filter when loading new advertiser
+            state.filter = { campaignId: null, campaignName: null, lineitemId: null, lineitemName: null };
+            
+            const main = document.getElementById('main');
+            main.innerHTML = '<div class="loading"><div class="spinner"></div> Loading advertiser data...</div>';
+            
+            const params = { agency_id: state.agencyId, advertiser_id: state.advertiserId, ...dates() };
+            
+            const [summary, campaigns, lineitems, creatives, zips, publishers, dmas, timeseries] = await Promise.all([
+                api('/api/v5/summary', params),
+                api('/api/v5/campaign-performance', params),
+                api('/api/v5/lineitem-performance', params),
+                api('/api/v5/creative-performance', params),
+                api('/api/v5/zip-performance', params),  // No dates - full history
+                api('/api/v5/publisher-performance', params),
+                api('/api/v5/dma-performance', params),
+                api('/api/v5/timeseries', params)
+            ]);
+
+            const s = summary.success ? summary.data : {};
+            const campData = campaigns.success ? campaigns.data : [];
+            const lineData = lineitems.success ? lineitems.data : [];
+            const creativeData = creatives.success ? creatives.data : [];
+            const zipData = zips.success ? zips.data : [];
+            const pubData = publishers.success ? publishers.data : [];
+            const dmaData = dmas.success ? dmas.data : [];
+            const tsData = timeseries.success ? timeseries.data : [];
+            
+            const storeVR = s.STORE_VISIT_RATE || 0;
+            const webVR = s.WEB_VISIT_RATE || 0;
+            
+            main.innerHTML = `
+                <div class="header">
+                    <div>
+                        <div class="breadcrumb">
+                            <a href="#" onclick="loadAgencyOverview(); return false;">Agencies</a> › 
+                            <a href="#" onclick="loadAdvertiserOverview(); return false;">${state.agencyName}</a> › 
+                            ${state.advertiserName}
+                        </div>
+                    </div>
+                    <div class="date-range">
+                        <button class="date-btn ${state.days === 30 ? 'active' : ''}" onclick="setDays(30)">30 Days</button>
+                        <button class="date-btn ${state.days === 60 ? 'active' : ''}" onclick="setDays(60)">60 Days</button>
+                        <button class="date-btn ${state.days === 90 ? 'active' : ''}" onclick="setDays(90)">90 Days</button>
+                    </div>
+                </div>
+                <div class="cards">
+                    <div class="card"><div class="card-label">Impressions</div><div class="card-value">${fmt(s.IMPRESSIONS)}</div></div>
+                    <div class="card"><div class="card-label">Store Visits</div><div class="card-value green">${fmt(s.STORE_VISITS)}</div><div class="card-sub">${pct(storeVR)} rate</div></div>
+                    <div class="card"><div class="card-label">Web Visits</div><div class="card-value blue">${fmt(s.WEB_VISITS)}</div><div class="card-sub">${pct(webVR)} rate</div></div>
+                    <div class="card"><div class="card-label">Campaigns</div><div class="card-value">${s.CAMPAIGN_COUNT || campData.length || 0}</div></div>
+                    <div class="card"><div class="card-label">Line Items</div><div class="card-value">${s.LINEITEM_COUNT || lineData.length || 0}</div></div>
+                </div>
+                <div id="chartContainer" class="table-container" style="margin-bottom: 20px;">
+                    <div class="table-title">Impressions & Visits Over Time</div>
+                    <div style="height: 260px; padding: 12px;">
+                        <canvas id="advDetailChart"></canvas>
+                    </div>
+                </div>
+                <div class="tabs">
+                    <button class="tab active" data-tab="campaigns" onclick="showTab('campaigns', this)">Campaigns</button>
+                    <button class="tab" data-tab="lineitems" onclick="showTab('lineitems', this)">Line Items</button>
+                    <button class="tab" data-tab="creatives" onclick="showTab('creatives', this)">Creatives</button>
+                    <button class="tab" data-tab="publishers" onclick="showTab('publishers', this)">Publishers</button>
+                    <button class="tab" data-tab="zips" onclick="showTab('zips', this)">Geographic</button>
+                    <button class="tab" data-tab="lift" onclick="showTab('lift', this)">Lift Analysis</button>
+                    <button class="tab" data-tab="traffic" onclick="showTab('traffic', this)" ${state.agencyId == 1480 ? '' : 'style="display:none"'}>Traffic Sources</button>
+                    <button class="tab" data-tab="optimize" onclick="showTab('optimize', this)" style="background: linear-gradient(135deg, #f59e0b, #ef4444); color: #fff; font-weight: 600;">⚡ Optimize</button>
+                </div>
+                <div id="tabContent">
+                    ${renderCampaigns(campData)}
+                </div>
+            `;
+            
+            window.tabData = { campaigns: campData, lineitems: lineData, creatives: creativeData, zips: zipData, publishers: pubData, dmas: dmaData };
+            
+            // Render impressions + visits chart
+            if (tsData.length > 0) {
+                renderMixedChart('advDetailChart', tsData);
+            }
+        }
+        
+        async function showTab(tab, btn) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            btn.classList.add('active');
+            const content = document.getElementById('tabContent');
+            
+            // Show chart only on campaigns tab
+            const chartEl = document.getElementById('chartContainer');
+            if (chartEl) chartEl.style.display = tab === 'campaigns' ? '' : 'none';
+            
+            // For campaigns/lineitems, clear filter and show cached data
+            if (tab === 'campaigns') {
+                state.filter = { campaignId: null, campaignName: null, lineitemId: null, lineitemName: null };
+                content.innerHTML = renderCampaigns(window.tabData.campaigns);
+            } else if (tab === 'lineitems') {
+                state.filter = { campaignId: null, campaignName: null, lineitemId: null, lineitemName: null };
+                content.innerHTML = renderLineitems(window.tabData.lineitems);
+            } else if (tab === 'creatives') {
+                // Creatives tab — supports campaign/lineitem filtering
+                if (state.filter.campaignId || state.filter.lineitemId) {
+                    content.innerHTML = '<div class="loading"><div class="spinner"></div> Loading filtered creative data...</div>';
+                    const params = {
+                        agency_id: state.agencyId,
+                        advertiser_id: state.advertiserId,
+                        ...dates(),
+                        ...(state.filter.campaignId && { campaign_id: state.filter.campaignId }),
+                        ...(state.filter.lineitemId && { lineitem_id: state.filter.lineitemId })
+                    };
+                    const result = await api('/api/v5/creative-performance', params);
+                    content.innerHTML = renderFilterBar() + renderCreatives(result.success ? result.data : []);
+                } else {
+                    content.innerHTML = renderCreatives(window.tabData.creatives);
+                }
+            }
+            // For publishers/geographic, reload with filter if active
+            else if (tab === 'publishers') {
+                if (state.filter.campaignId || state.filter.lineitemId) {
+                    content.innerHTML = '<div class="loading"><div class="spinner"></div> Loading filtered data...</div>';
+                    const params = { 
+                        agency_id: state.agencyId, 
+                        advertiser_id: state.advertiserId, 
+                        ...dates(),
+                        ...(state.filter.campaignId && { campaign_id: state.filter.campaignId }),
+                        ...(state.filter.lineitemId && { lineitem_id: state.filter.lineitemId })
+                    };
+                    const result = await api('/api/v5/publisher-performance', params);
+                    content.innerHTML = renderFilterBar() + renderPublishers(result.success ? result.data : []);
+                } else {
+                    content.innerHTML = renderPublishers(window.tabData.publishers);
+                }
+            } else if (tab === 'zips') {
+                if (state.filter.campaignId || state.filter.lineitemId) {
+                    content.innerHTML = '<div class="loading"><div class="spinner"></div> Loading filtered data...</div>';
+                    const params = { 
+                        agency_id: state.agencyId, 
+                        advertiser_id: state.advertiserId, 
+                        ...dates(),
+                        ...(state.filter.campaignId && { campaign_id: state.filter.campaignId }),
+                        ...(state.filter.lineitemId && { lineitem_id: state.filter.lineitemId })
+                    };
+                    const [zips, dmas] = await Promise.all([
+                        api('/api/v5/zip-performance', params),
+                        api('/api/v5/dma-performance', params)
+                    ]);
+                    window.tabData.filteredZips = zips.success ? zips.data : [];
+                    window.tabData.filteredDmas = dmas.success ? dmas.data : [];
+                    content.innerHTML = renderFilterBar() + renderZips(window.tabData.filteredZips, window.tabData.filteredDmas);
+                } else {
+                    content.innerHTML = renderZips(window.tabData.zips, window.tabData.dmas);
+                }
+            } else if (tab === 'lift') {
+                // Load lift analysis data
+                content.innerHTML = '<div class="loading"><div class="spinner"></div> Loading lift analysis...</div>';
+                const params = { 
+                    agency_id: state.agencyId, 
+                    advertiser_id: state.advertiserId, 
+                    ...dates(),
+                    group_by: state.liftGroupBy || 'campaign'
+                };
+                const result = await api('/api/v5/lift-analysis', params);
+                
+                // Handle both old (single data) and new (web_data/store_data) API response formats
+                if (result.web_data !== undefined) {
+                    // New Paramount dual-table format
+                    window.tabData.webLift = result.web_data || [];
+                    window.tabData.storeLift = result.store_data || [];
+                    window.tabData.webBaseline = result.web_network_baseline || result.web_adv_baseline || result.web_baseline;
+                    window.tabData.storeBaseline = result.store_network_baseline || result.store_baseline;
+                    window.tabData.totalWebVisitors = result.total_web_visitors || 0;
+                    window.tabData.totalStoreVisitors = result.total_store_visitors || 0;
+                    window.tabData.liftMessage = result.message;
+                    window.tabData.isDualLift = true;
+                } else {
+                    // Old single-table format (non-Paramount agencies)
+                    window.tabData.lift = result.success ? result.data : [];
+                    window.tabData.liftBaseline = result.baseline;
+                    window.tabData.liftMessage = result.message;
+                    window.tabData.liftVisitType = result.visit_type || 'store';
+                    window.tabData.isDualLift = false;
+                }
+                content.innerHTML = renderLift();
+            } else if (tab === 'traffic') {
+                // Load traffic sources data (Paramount only)
+                content.innerHTML = '<div class="loading"><div class="spinner"></div> Loading traffic sources (this may take 30-60 seconds)...</div>';
+                const params = { 
+                    advertiser_id: state.advertiserId,
+                    ...dates()
+                };
+                const result = await api('/api/v5/traffic-sources', params);
+                window.tabData.traffic = result.success ? result.data : [];
+                window.tabData.trafficError = result.error || null;
+                content.innerHTML = renderTrafficSources(window.tabData.traffic, result.success, window.tabData.trafficError);
+            } else if (tab === 'optimize') {
+                content.innerHTML = '<div class="loading"><div class="spinner"></div> Analyzing performance across all dimensions (30-day baseline)...</div>';
+                const params = { advertiser_id: state.advertiserId, agency_id: state.agencyId };
+                const result = await api('/api/v5/optimize', params);
+                if (result.success) {
+                    window.tabData.optimize = result.data;
+                    content.innerHTML = renderOptimize(result.data);
+                    // Lazy-load geo data in background
+                    api('/api/v5/optimize-geo', params).then(geoResult => {
+                        if (geoResult.success && geoResult.data.length > 0) {
+                            window.tabData.optimize = [...window.tabData.optimize, ...geoResult.data];
+                            // Only re-render if still on optimize tab
+                            const activeTab = document.querySelector('.tab.active');
+                            if (activeTab && activeTab.dataset.tab === 'optimize') {
+                                content.innerHTML = renderOptimize(window.tabData.optimize);
+                            }
+                        }
+                    }).catch(() => {}); // Geo is optional, don't block on failure
+                } else {
+                    content.innerHTML = `<div class="error-box">⚠️ Optimization analysis failed: ${result.error || 'Unknown error'}</div>`;
+                }
+            }
+        }
+        
+        function renderCampaigns(data) {
+            // Check if there are duplicate campaign names
+            const nameCount = {};
+            data.forEach(c => { nameCount[c.IO_NAME] = (nameCount[c.IO_NAME] || 0) + 1; });
+            const hasDupes = Object.values(nameCount).some(n => n > 1);
+            
+            return `<div class="table-container"><div class="table-title">Campaign Performance <span class="table-note">Click a row to filter Publishers & Geographic</span></div>
+                <table><thead><tr><th>Campaign (IO)</th><th class="text-right">Impressions</th><th class="text-right">Store Visits</th><th class="text-right">Web Visits</th><th class="text-right">Store VR</th><th class="text-right">Web VR</th></tr></thead>
+                <tbody>${data.length === 0 ? '<tr><td colspan="6" class="empty">No campaigns</td></tr>' : data.map(c => {
+                    const svr = c.IMPRESSIONS > 0 ? (c.STORE_VISITS / c.IMPRESSIONS * 100) : 0;
+                    const wvr = c.IMPRESSIONS > 0 ? (c.WEB_VISITS / c.IMPRESSIONS * 100) : 0;
+                    const baseName = c.IO_NAME || c.IO_ID || 'Unknown';
+                    // Show IO_ID suffix if there are duplicate names
+                    const displayName = hasDupes && nameCount[c.IO_NAME] > 1 
+                        ? baseName + ' (' + String(c.IO_ID).slice(-6) + ')' 
+                        : baseName;
+                    const name = baseName.replace(/'/g, "\\'");
+                    return `
+                    <tr class="clickable-row" onclick="filterByCampaign('${c.IO_ID}', '${name}')">
+                        <td>${displayName}</td>
+                        <td class="text-right">${fmt(c.IMPRESSIONS)}</td>
+                        <td class="text-right text-green">${fmt(c.STORE_VISITS)}</td>
+                        <td class="text-right text-blue">${fmt(c.WEB_VISITS)}</td>
+                        <td class="text-right ${rateClass(svr)}">${pct(svr)}</td>
+                        <td class="text-right ${rateClass(wvr)}">${pct(wvr)}</td>
+                    </tr>
+                `}).join('')}</tbody></table></div>`;
+        }
+        
+        function renderLineitems(data) {
+            return `<div class="table-container"><div class="table-title">Line Item Performance <span class="table-note">Click a row to filter Publishers & Geographic</span></div>
+                <table><thead><tr><th>Line Item</th><th>Campaign</th><th>Platform</th><th class="text-right">Impressions</th><th class="text-right">Store Visits</th><th class="text-right">Web Visits</th><th class="text-right">Store VR</th><th class="text-right">Web VR</th></tr></thead>
+                <tbody>${data.length === 0 ? '<tr><td colspan="8" class="empty">No line items</td></tr>' : data.map(l => {
+                    const svr = l.IMPRESSIONS > 0 ? (l.STORE_VISITS / l.IMPRESSIONS * 100) : 0;
+                    const wvr = l.IMPRESSIONS > 0 ? ((l.WEB_VISITS || 0) / l.IMPRESSIONS * 100) : 0;
+                    const liName = (l.LI_NAME || l.LI_ID || 'Unknown').replace(/'/g, "\\'");
+                    const ioName = (l.IO_NAME || '').replace(/'/g, "\\'");
+                    return `
+                    <tr class="clickable-row" onclick="filterByLineitem('${l.LI_ID}', '${liName}', '${l.IO_ID || ''}', '${ioName}')">
+                        <td>${l.LI_NAME || l.LI_ID || 'Unknown'}</td>
+                        <td class="text-muted">${l.IO_NAME || ''}</td>
+                        <td class="text-muted">${l.PLATFORM || ''}</td>
+                        <td class="text-right">${fmt(l.IMPRESSIONS)}</td>
+                        <td class="text-right text-green">${fmt(l.STORE_VISITS)}</td>
+                        <td class="text-right text-blue">${fmt(l.WEB_VISITS || 0)}</td>
+                        <td class="text-right ${rateClass(svr)}">${pct(svr)}</td>
+                        <td class="text-right ${rateClass(wvr)}">${pct(wvr)}</td>
+                    </tr>
+                `}).join('')}</tbody></table></div>`;
+        }
+
+        function renderCreatives(data) {
+            // Compute baseline web VR for the entire dataset
+            const totalImps = data.reduce((s, c) => s + (parseInt(c.IMPRESSIONS) || 0), 0);
+            const totalWV = data.reduce((s, c) => s + (parseInt(c.WEB_VISITS) || 0), 0);
+            const baseWVR = totalImps > 0 ? (totalWV / totalImps * 100) : 0;
+
+            function pagesClass(pg) {
+                if (!pg) return '';
+                return pg >= 3 ? 'text-green' : pg <= 1.5 ? 'text-red' : '';
+            }
+
+            return `<div class="table-container"><div class="table-title">Creative Performance</div>
+                <table><thead><tr>
+                    <th>Creative</th>
+                    <th class="text-right">Impressions</th>
+                    <th class="text-right">Store Visits</th>
+                    <th class="text-right">Web Visits</th>
+                    <th class="text-right">Store VR</th>
+                    <th class="text-right">Web VR</th>
+                    <th class="text-right">Avg Pages</th>
+                </tr></thead>
+                <tbody>${data.length === 0 ? '<tr><td colspan="7" class="empty">No creative data available</td></tr>' : data.map(c => {
+                    const svr = c.IMPRESSIONS > 0 ? (c.STORE_VISITS / c.IMPRESSIONS * 100) : 0;
+                    const wvr = c.IMPRESSIONS > 0 ? ((c.WEB_VISITS || 0) / c.IMPRESSIONS * 100) : 0;
+                    const ap = c.AVG_PAGES_PER_VISITOR ? parseFloat(c.AVG_PAGES_PER_VISITOR) : null;
+                    // Decode URL-encoded names and truncate long ones
+                    const rawName = c.CREATIVE_NAME || c.CREATIVE_ID || 'Unknown';
+                    let name; try { name = decodeURIComponent(rawName.replace(/\+/g, ' ')); } catch(e) { name = rawName; }
+                    name = name.replace(/^selfservice_/i, '');
+                    const shortName = name.length > 60 ? name.substring(0, 57) + '...' : name;
+                    return `
+                    <tr>
+                        <td title="${name.replace(/"/g, '&quot;')}">${shortName}</td>
+                        <td class="text-right">${fmt(c.IMPRESSIONS)}</td>
+                        <td class="text-right text-green">${fmt(c.STORE_VISITS)}</td>
+                        <td class="text-right text-blue">${fmt(c.WEB_VISITS || 0)}</td>
+                        <td class="text-right ${rateClass(svr)}">${pct(svr)}</td>
+                        <td class="text-right ${rateClass(wvr)}">${pct(wvr)}</td>
+                        <td class="text-right ${pagesClass(ap)}">${ap !== null ? ap.toFixed(2) : '—'}</td>
+                    </tr>
+                `}).join('')}</tbody></table></div>`;
+        }
+
+        function renderPublishers(data) {
+            return `<div class="table-container"><div class="table-title">Publisher Performance</div>
+                <table><thead><tr><th>Publisher</th><th class="text-right">Impressions</th><th class="text-right">Store Visits</th><th class="text-right">Web Visits</th><th class="text-right">Store VR</th><th class="text-right">Web VR</th></tr></thead>
+                <tbody>${data.length === 0 ? '<tr><td colspan="6" class="empty">No publishers</td></tr>' : data.map(p => {
+                    const svr = p.IMPRESSIONS > 0 ? (p.STORE_VISITS / p.IMPRESSIONS * 100) : 0;
+                    const wvr = p.IMPRESSIONS > 0 ? ((p.WEB_VISITS || 0) / p.IMPRESSIONS * 100) : 0;
+                    return `
+                    <tr>
+                        <td>${p.PUBLISHER || 'Unknown'}</td>
+                        <td class="text-right">${fmt(p.IMPRESSIONS)}</td>
+                        <td class="text-right text-green">${fmt(p.STORE_VISITS)}</td>
+                        <td class="text-right text-blue">${fmt(p.WEB_VISITS || 0)}</td>
+                        <td class="text-right ${rateClass(svr)}">${pct(svr)}</td>
+                        <td class="text-right ${rateClass(wvr)}">${pct(wvr)}</td>
+                    </tr>
+                `}).join('')}</tbody></table></div>`;
+        }
+        
+        function renderZips(data, dmasData) {
+            const zips = data || [];
+            const dmas = dmasData || window.tabData.dmas || [];
+            
+            // Compute baseline VR from DMA totals for index calc
+            const totalImps = dmas.reduce((s,d) => s + (parseInt(d.IMPRESSIONS)||0), 0);
+            const totalSV = dmas.reduce((s,d) => s + (parseInt(d.STORE_VISITS)||0), 0);
+            const totalWV = dmas.reduce((s,d) => s + (parseInt(d.WEB_VISITS)||0), 0);
+            const baseSVR = totalImps > 0 ? (totalSV / totalImps * 100) : 0;
+            const baseWVR = totalImps > 0 ? (totalWV / totalImps * 100) : 0;
+            
+            function calcIdx(vr, base) { return base > 0 ? Math.round(vr / base * 100) : 0; }
+            function actionLabel(idx) { return idx >= 120 ? 'Increase' : idx >= 80 ? 'Keep' : 'Remove'; }
+            function actionColor(a) { return a === 'Increase' ? '#22c55e' : a === 'Keep' ? '#f59e0b' : '#ef4444'; }
+            
+            // Group ZIPs by DMA_NAME
+            const zipsByDma = {};
+            zips.forEach(z => {
+                const dmaName = z.DMA_NAME || 'Unknown';
+                if (!zipsByDma[dmaName]) zipsByDma[dmaName] = [];
+                zipsByDma[dmaName].push(z);
+            });
+            
+            // Sort DMAs by impressions desc
+            const sortedDmas = [...dmas].sort((a,b) => (parseInt(b.IMPRESSIONS)||0) - (parseInt(a.IMPRESSIONS)||0));
+            
+            let html = '<div class="table-container"><div class="table-title">Geographic Performance <span class="table-note">DMA summary with top postal codes to increase or remove</span></div>';
+            html += `<table><thead><tr>
+                <th>Geography</th>
+                <th class="text-right">Impressions</th>
+                <th class="text-right">Store Visits</th>
+                <th class="text-right">Web Visits</th>
+                <th class="text-right">Store VR</th>
+                <th class="text-right">Web VR</th>
+                <th class="text-right">SV Index</th>
+                <th class="text-right">WV Index</th>
+                <th class="text-right">Action</th>
+            </tr></thead><tbody>`;
+            
+            if (sortedDmas.length === 0) {
+                html += '<tr><td colspan="9" class="empty">No geographic data</td></tr>';
+            } else {
+                sortedDmas.forEach(d => {
+                    const dmaImps = parseInt(d.IMPRESSIONS) || 0;
+                    const dmaSV = parseInt(d.STORE_VISITS) || 0;
+                    const dmaWV = parseInt(d.WEB_VISITS) || 0;
+                    const dmaSVR = dmaImps > 0 ? (dmaSV / dmaImps * 100) : 0;
+                    const dmaWVR = dmaImps > 0 ? (dmaWV / dmaImps * 100) : 0;
+                    const svIdx = calcIdx(dmaSVR, baseSVR);
+                    const wvIdx = calcIdx(dmaWVR, baseWVR);
+                    // Use whichever visit type has more volume for action
+                    const primaryIdx = totalSV > totalWV ? svIdx : wvIdx;
+                    const act = actionLabel(primaryIdx);
+                    
+                    // DMA header row
+                    html += `<tr style="background: #1a2332; font-weight: 600;">
+                        <td style="color: #e2e8f0; padding-left: 8px;">📍 ${d.DMA}</td>
+                        <td class="text-right">${fmt(dmaImps)}</td>
+                        <td class="text-right text-green">${fmt(dmaSV)}</td>
+                        <td class="text-right text-blue">${fmt(dmaWV)}</td>
+                        <td class="text-right ${rateClass(dmaSVR)}">${pct(dmaSVR)}</td>
+                        <td class="text-right ${rateClass(dmaWVR)}">${pct(dmaWVR)}</td>
+                        <td class="text-right" style="color:${svIdx >= 100 ? '#22c55e' : '#ef4444'}">${svIdx}</td>
+                        <td class="text-right" style="color:${wvIdx >= 100 ? '#22c55e' : '#ef4444'}">${wvIdx}</td>
+                        <td class="text-right" style="color:${actionColor(act)}; font-weight:600;">${act}</td>
+                    </tr>`;
+                    
+                    // Get ZIPs for this DMA
+                    const dmaZips = zipsByDma[d.DMA] || [];
+                    if (dmaZips.length > 0) {
+                        // Compute index for each ZIP
+                        const scored = dmaZips.map(z => {
+                            const zi = parseInt(z.IMPRESSIONS) || 0;
+                            const zs = parseInt(z.STORE_VISITS) || 0;
+                            const zw = parseInt(z.WEB_VISITS) || 0;
+                            const zsvr = zi > 0 ? (zs / zi * 100) : 0;
+                            const zwvr = zi > 0 ? (zw / zi * 100) : 0;
+                            const zsvIdx = calcIdx(zsvr, baseSVR);
+                            const zwvIdx = calcIdx(zwvr, baseWVR);
+                            const zPrimIdx = totalSV > totalWV ? zsvIdx : zwvIdx;
+                            return { ...z, svr: zsvr, wvr: zwvr, svIdx: zsvIdx, wvIdx: zwvIdx, primIdx: zPrimIdx, imps: zi, sv: zs, wv: zw };
+                        });
+                        
+                        // Top 10 to Increase (highest index first)
+                        const toIncrease = scored.filter(z => z.primIdx >= 120).sort((a,b) => b.primIdx - a.primIdx).slice(0, 10);
+                        // Top 10 to Remove (lowest index first)
+                        const toRemove = scored.filter(z => z.primIdx < 80).sort((a,b) => a.primIdx - b.primIdx).slice(0, 10);
+                        
+                        const showZips = [];
+                        toIncrease.forEach(z => showZips.push(z));
+                        toRemove.forEach(z => { if (!showZips.find(s => s.ZIP_CODE === z.ZIP_CODE)) showZips.push(z); });
+                        
+                        showZips.forEach(z => {
+                            const zAct = actionLabel(z.primIdx);
+                            html += `<tr style="opacity: 0.85;">
+                                <td style="padding-left: 28px; color: #94a3b8; font-size: 12px;">${z.ZIP_CODE}</td>
+                                <td class="text-right" style="font-size: 12px;">${fmt(z.imps)}</td>
+                                <td class="text-right text-green" style="font-size: 12px;">${fmt(z.sv)}</td>
+                                <td class="text-right text-blue" style="font-size: 12px;">${fmt(z.wv)}</td>
+                                <td class="text-right ${rateClass(z.svr)}" style="font-size: 12px;">${pct(z.svr)}</td>
+                                <td class="text-right ${rateClass(z.wvr)}" style="font-size: 12px;">${pct(z.wvr)}</td>
+                                <td class="text-right" style="font-size: 12px; color:${z.svIdx >= 100 ? '#22c55e' : '#ef4444'}">${z.svIdx}</td>
+                                <td class="text-right" style="font-size: 12px; color:${z.wvIdx >= 100 ? '#22c55e' : '#ef4444'}">${z.wvIdx}</td>
+                                <td class="text-right" style="font-size: 12px; color:${actionColor(zAct)}; font-weight:600;">${zAct}</td>
+                            </tr>`;
+                        });
+                    }
+                });
+            }
+            
+            html += '</tbody></table></div>';
+            return html;
+        }
+        
+        function renderLift() {
+            const message = window.tabData.liftMessage;
+            const isDual = window.tabData.isDualLift;
+            
+            // Handle message (error state)
+            if (message) {
+                return `
+                    <div class="table-container">
+                        <div class="table-title">Lift Analysis</div>
+                        <div style="padding: 40px; text-align: center; color: #8b98a5;">
+                            <div style="font-size: 48px; margin-bottom: 16px;">📊</div>
+                            <div style="font-size: 16px; margin-bottom: 8px;">${message}</div>
+                        </div>
+                    </div>
+                `;
+            }
+            
+            const groupBy = state.liftGroupBy || 'campaign';
+            
+            // Group selector
+            const groupSelector = `
+                <div style="margin-bottom: 16px; display: flex; gap: 8px; align-items: center;">
+                    <span style="color: #8b98a5; font-size: 13px;">Group by:</span>
+                    <button class="date-btn ${groupBy === 'campaign' ? 'active' : ''}" onclick="changeLiftGroup('campaign')">Campaign</button>
+                    <button class="date-btn ${groupBy === 'lineitem' ? 'active' : ''}" onclick="changeLiftGroup('lineitem')">Line Item</button>
+                </div>
+            `;
+            
+            if (isDual) {
+                // Paramount dual-table mode
+                const webData = window.tabData.webLift || [];
+                const storeData = window.tabData.storeLift || [];
+                const webBaseline = window.tabData.webBaseline;
+                const storeBaseline = window.tabData.storeBaseline;
+                const totalWeb = window.tabData.totalWebVisitors || 0;
+                const totalStore = window.tabData.totalStoreVisitors || 0;
+                
+                // Thresholds for showing tables (minimum 50 visitors)
+                const showWeb = totalWeb >= 50;
+                const showStore = totalStore >= 50;
+                
+                if (!showWeb && !showStore) {
+                    return groupSelector + `
+                        <div class="table-container">
+                            <div class="table-title">Lift Analysis</div>
+                            <div style="padding: 40px; text-align: center; color: #8b98a5;">
+                                <div style="font-size: 48px; margin-bottom: 16px;">📊</div>
+                                <div style="font-size: 16px;">No lift data available</div>
+                                <div style="font-size: 12px; margin-top: 8px;">Requires minimum visitors per campaign</div>
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                let html = groupSelector;
+                
+                // Web lift table
+                if (showWeb && webData.length > 0) {
+                    html += renderLiftTable(webData, webBaseline, 'web', groupBy, totalWeb);
+                }
+                
+                // Store lift table
+                if (showStore && storeData.length > 0) {
+                    html += renderLiftTable(storeData, storeBaseline, 'store', groupBy, totalStore);
+                }
+                
+                return html;
+            } else {
+                // Non-Paramount single-table mode
+                const data = window.tabData.lift || [];
+                const baseline = window.tabData.liftBaseline;
+                const visitType = window.tabData.liftVisitType || 'store';
+                
+                if (!data || data.length === 0) {
+                    return groupSelector + `
+                        <div class="table-container">
+                            <div class="table-title">Lift Analysis</div>
+                            <div style="padding: 40px; text-align: center; color: #8b98a5;">
+                                <div style="font-size: 48px; margin-bottom: 16px;">📊</div>
+                                <div style="font-size: 16px;">No lift data available</div>
+                                <div style="font-size: 12px; margin-top: 8px;">Requires minimum 1,000 panel reach per campaign</div>
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                return groupSelector + renderLiftTable(data, baseline, visitType, groupBy, null);
+            }
+        }
+        
+        function renderLiftTable(data, baseline, visitType, groupBy, totalVisitors) {
+            // Helper for lift coloring
+            const liftClass = (lift) => {
+                if (lift === null || lift === undefined) return 'text-muted';
+                if (lift >= 50) return 'text-green';
+                if (lift >= 0) return 'text-blue';
+                if (lift >= -25) return 'text-yellow';
+                return 'text-red';
+            };
+            
+            // Helper for index coloring  
+            const indexClass = (idx) => {
+                if (idx === null || idx === undefined) return 'text-muted';
+                if (idx >= 150) return 'text-green';
+                if (idx >= 100) return 'text-blue';
+                if (idx >= 75) return 'text-yellow';
+                return 'text-red';
+            };
+            
+            const headers = groupBy === 'lineitem' 
+                ? '<th>Line Item</th><th>Campaign</th>'
+                : '<th>Campaign</th>';
+            
+            // Count duplicate names to add ID suffix when needed
+            const nameCount = {};
+            data.forEach(d => {
+                const key = d.NAME || 'Unknown';
+                nameCount[key] = (nameCount[key] || 0) + 1;
+            });
+            const hasDupes = Object.values(nameCount).some(c => c > 1);
+            
+            const tableRows = data.map(d => {
+                // Add ID suffix for duplicate names
+                let displayName = d.NAME || 'Unknown';
+                if (hasDupes && nameCount[displayName] > 1 && d.ID) {
+                    displayName = displayName + ' (' + String(d.ID).slice(-6) + ')';
+                }
+                
+                const nameCol = groupBy === 'lineitem'
+                    ? `<td>${displayName}</td><td class="text-muted">${d.PARENT_NAME || ''}</td>`
+                    : `<td>${displayName}</td>`;
+                
+                // Handle both field name formats: Paramount uses LIFT_VS_NETWORK, others use LIFT_PCT
+                const liftVal = d.LIFT_VS_NETWORK !== undefined && d.LIFT_VS_NETWORK !== null 
+                    ? d.LIFT_VS_NETWORK 
+                    : (d.LIFT_PCT !== undefined && d.LIFT_PCT !== null ? d.LIFT_PCT : null);
+                const indexVal = d.INDEX_VS_AVG !== undefined && d.INDEX_VS_AVG !== null 
+                    ? d.INDEX_VS_AVG : null;
+                
+                // Confidence badge (Paramount network lift)
+                const conf = d.CONFIDENCE;
+                const confBadge = conf 
+                    ? `<span style="margin-left: 4px; font-size: 10px; padding: 1px 5px; border-radius: 3px; background: ${conf === 'NS' ? '#3d3520' : '#1a3a2a'}; color: ${conf === 'NS' ? '#f5c518' : '#00ba7c'};">${conf}</span>`
+                    : '';
+                
+                return `
+                    <tr>
+                        ${nameCol}
+                        <td class="text-right">${fmt(d.IMPRESSIONS)}</td>
+                        <td class="text-right">${fmt(d.PANEL_REACH)}</td>
+                        <td class="text-right text-green">${fmt(d.VISITORS)}</td>
+                        <td class="text-right">${pct(d.VISIT_RATE || 0)}</td>
+                        <td class="text-right ${indexClass(indexVal)}">${indexVal !== null ? indexVal.toFixed(0) : '-'}</td>
+                        <td class="text-right ${liftClass(liftVal)}">${liftVal !== null ? (liftVal >= 0 ? '+' : '') + liftVal.toFixed(1) + '%' : '-'}${confBadge}</td>
+                    </tr>
+                `;
+            }).join('');
+            
+            const visitTypeIcon = visitType === 'web' ? '🌐' : '🏪';
+            const visitTypeLabel = visitType === 'web' ? 'Web Visits' : 'Store Visits';
+            const visitTypeColor = visitType === 'web' ? '#1d9bf0' : '#00ba7c';
+            
+            // Check if this is network control lift (Paramount) vs index lift (others)
+            const isNetworkLift = data.length > 0 && data[0].LIFT_VS_NETWORK !== undefined;
+            const liftColHeader = isNetworkLift ? 'Lift vs Network' : 'Lift';
+            
+            return `
+                <div class="table-container" style="margin-bottom: 24px;">
+                    <div class="table-title">
+                        <span style="display: flex; align-items: center; gap: 8px;">
+                            <span style="color: ${visitTypeColor};">${visitTypeIcon} ${visitTypeLabel}</span>
+                            Lift Analysis by ${groupBy.charAt(0).toUpperCase() + groupBy.slice(1)}
+                        </span>
+                        <span class="table-note">
+                            ${baseline ? `${isNetworkLift ? 'Network ' : ''}Baseline: ${pct(baseline)}` : ''} 
+                            ${totalVisitors ? ` | Total: ${fmt(totalVisitors)} visitors` : ''}
+                        </span>
+                    </div>
+                    <table>
+                        <thead>
+                            <tr>
+                                ${headers}
+                                <th class="text-right">Impressions</th>
+                                <th class="text-right">Panel Reach</th>
+                                <th class="text-right">Visitors</th>
+                                <th class="text-right">Visit Rate</th>
+                                <th class="text-right">Index</th>
+                                <th class="text-right">${liftColHeader}</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${tableRows}
+                        </tbody>
+                    </table>
+                </div>
+            `;
+        }
+        
+        function renderTrafficSources(data, available, error) {
+            // Normalize numeric fields from API strings to numbers
+            data = (data || []).map(d => ({
+                ...d,
+                AVG_PAGEVIEWS: parseFloat(d.AVG_PAGEVIEWS) || 0,
+                AVG_PAGES_CTV: d.AVG_PAGES_CTV ? parseFloat(d.AVG_PAGES_CTV) : null,
+                AVG_PAGES_NON_CTV: d.AVG_PAGES_NON_CTV ? parseFloat(d.AVG_PAGES_NON_CTV) : null,
+                BOUNCE_RATE: parseFloat(d.BOUNCE_RATE) || 0,
+                VISITOR_DAYS: parseInt(d.VISITOR_DAYS) || 0,
+                UNIQUE_VISITORS: parseInt(d.UNIQUE_VISITORS) || 0,
+                CTV_OVERLAP: parseInt(d.CTV_OVERLAP) || 0,
+                CTV_OVERLAP_PCT: parseFloat(d.CTV_OVERLAP_PCT) || 0,
+                P50_PAGES: parseFloat(d.P50_PAGES) || 0,
+                P90_PAGES: parseFloat(d.P90_PAGES) || 0,
+            }));
+            if (!available || !data || data.length === 0) {
+                const errorMsg = error ? `<div style="font-size: 12px; color: #f4212e; margin-top: 8px;">Error: ${error}</div>` : '';
+                return `
+                    <div class="table-container">
+                        <div class="table-title">Traffic Source Analysis</div>
+                        <div style="padding: 40px; text-align: center; color: #8b98a5;">
+                            <div style="font-size: 48px; margin-bottom: 16px;">${error ? '⚠️' : '🌐'}</div>
+                            <div style="font-size: 16px; margin-bottom: 8px;">${error ? 'Traffic source analysis failed to load.' : 'Traffic source analysis not available for this advertiser.'}</div>
+                            <div style="font-size: 12px;">${error ? 'The query may have timed out. Try a shorter date range (30 days).' : 'This feature requires web pixel integration (currently Paramount only).'}</div>
+                            ${errorMsg}
+                        </div>
+                    </div>
+                `;
+            }
+            
+            const ctvRow = data.find(d => d.TRAFFIC_SOURCE === 'Paramount CTV');
+            const clickRows = data.filter(d => d.SOURCE_TYPE === 'click' && d.TRAFFIC_SOURCE !== 'Other Referral');
+            const ctvAvg = ctvRow ? parseFloat(ctvRow.AVG_PAGEVIEWS) || 0 : 0;
+            
+            // Build insight
+            let insightHtml = '';
+            if (ctvRow && clickRows.length > 0) {
+                const beatsCount = clickRows.filter(r => ctvAvg > (r.AVG_PAGEVIEWS || 0) && r.TRAFFIC_SOURCE !== 'Direct').length;
+                const clickSources = clickRows.filter(r => r.TRAFFIC_SOURCE !== 'Direct');
+                const topOverlap = clickRows.filter(r => r.CTV_OVERLAP_PCT > 0).sort((a,b) => b.CTV_OVERLAP_PCT - a.CTV_OVERLAP_PCT)[0];
+                
+                // Find biggest CTV engagement lift
+                const withLift = clickRows.filter(r => r.AVG_PAGES_CTV && r.AVG_PAGES_NON_CTV && r.CTV_OVERLAP >= 100);
+                const bestLift = withLift.length > 0 ? withLift.reduce((a, b) => {
+                    const liftA = (a.AVG_PAGES_CTV - a.AVG_PAGES_NON_CTV) / a.AVG_PAGES_NON_CTV;
+                    const liftB = (b.AVG_PAGES_CTV - b.AVG_PAGES_NON_CTV) / b.AVG_PAGES_NON_CTV;
+                    return liftA > liftB ? a : b;
+                }) : null;
+                
+                insightHtml = `
+                    <div style="background: #1e2732; border-left: 3px solid #00ba7c; padding: 12px 16px; margin-bottom: 16px; border-radius: 0 8px 8px 0; font-size: 13px; line-height: 1.6;">
+                        <strong>📺 CTV View-Through Engagement:</strong> 
+                        Paramount CTV visitors average <strong style="color: #00ba7c;">${ctvAvg.toFixed(2)} pages/visit</strong>${beatsCount > 0 ? `, outperforming ${beatsCount} of ${clickSources.length} click-based sources` : ''}.
+                        ${topOverlap ? `<br><strong>🔗 Highest CTV Overlap:</strong> <strong>${topOverlap.TRAFFIC_SOURCE}</strong> at ${topOverlap.CTV_OVERLAP_PCT}% — ${fmt(topOverlap.CTV_OVERLAP)} visits also had CTV exposure.` : ''}
+                        ${bestLift ? `<br><strong>📈 CTV Engagement Lift:</strong> Among <strong>${bestLift.TRAFFIC_SOURCE}</strong> visitors, CTV-exposed average <strong style="color: #00ba7c;">${parseFloat(bestLift.AVG_PAGES_CTV).toFixed(2)}</strong> vs non-exposed <strong>${parseFloat(bestLift.AVG_PAGES_NON_CTV).toFixed(2)}</strong> pages/visit (+${((parseFloat(bestLift.AVG_PAGES_CTV) / parseFloat(bestLift.AVG_PAGES_NON_CTV) - 1) * 100).toFixed(1)}% lift).` : ''}
+                    </div>
+                `;
+            }
+            
+            // Engagement bar (visual comparison)
+            const maxAvg = Math.max(...data.map(d => d.AVG_PAGEVIEWS || 0), 1);
+            
+            const pvClass = (pv) => pv >= 2.0 ? 'text-green' : pv >= 1.3 ? 'text-yellow' : 'text-muted';
+            const bounceClass = (br) => br <= 40 ? 'text-green' : br >= 60 ? 'text-red' : 'text-yellow';
+            
+            const tableRows = data.map(d => {
+                const isCTV = d.SOURCE_TYPE === 'ctv';
+                const rowStyle = isCTV ? 'background: #0d2b1a;' : '';
+                const barWidth = Math.max(5, ((d.AVG_PAGEVIEWS || 0) / maxAvg) * 100);
+                const barColor = isCTV ? '#00ba7c' : '#1d9bf0';
+                
+                // CTV lift calculation
+                let liftHtml = '—';
+                if (!isCTV && d.AVG_PAGES_CTV && d.AVG_PAGES_NON_CTV && d.CTV_OVERLAP >= 50) {
+                    const lift = ((d.AVG_PAGES_CTV / d.AVG_PAGES_NON_CTV) - 1) * 100;
+                    const liftColor = lift > 0 ? '#00ba7c' : lift < 0 ? '#f4212e' : '#8b98a5';
+                    liftHtml = `<span style="color: ${liftColor};">${lift > 0 ? '+' : ''}${lift.toFixed(1)}%</span>`;
+                } else if (!isCTV) {
+                    liftHtml = '<span class="text-muted" style="font-size: 10px;">low n</span>';
+                }
+                
+                // CTV vs Non-CTV pages
+                let ctvPagesHtml = '—';
+                let nonCtvPagesHtml = '—';
+                if (!isCTV && d.AVG_PAGES_CTV != null) {
+                    ctvPagesHtml = `<span class="${pvClass(d.AVG_PAGES_CTV)}">${d.AVG_PAGES_CTV.toFixed(2)}</span>`;
+                }
+                if (!isCTV && d.AVG_PAGES_NON_CTV != null) {
+                    nonCtvPagesHtml = `<span class="${pvClass(d.AVG_PAGES_NON_CTV)}">${d.AVG_PAGES_NON_CTV.toFixed(2)}</span>`;
+                }
+                
+                return `
+                    <tr style="${rowStyle}">
+                        <td>${isCTV ? '📺 ' : ''}<strong>${d.TRAFFIC_SOURCE}</strong></td>
+                        <td class="text-right">${fmt(d.UNIQUE_VISITORS)}</td>
+                        <td class="text-right">${fmt(d.VISITOR_DAYS)}</td>
+                        <td class="text-right">
+                            <div style="display: flex; align-items: center; justify-content: flex-end; gap: 8px;">
+                                <div style="width: 60px; height: 6px; background: #2f3942; border-radius: 3px; overflow: hidden;">
+                                    <div style="width: ${barWidth}%; height: 100%; background: ${barColor}; border-radius: 3px;"></div>
+                                </div>
+                                <span class="${pvClass(d.AVG_PAGEVIEWS)}" style="min-width: 36px; text-align: right;">${(d.AVG_PAGEVIEWS || 0).toFixed(2)}</span>
+                            </div>
+                        </td>
+                        <td class="text-right"><span class="${bounceClass(d.BOUNCE_RATE)}">${d.BOUNCE_RATE.toFixed(1)}%</span></td>
+                        <td class="text-right">${ctvPagesHtml}</td>
+                        <td class="text-right">${nonCtvPagesHtml}</td>
+                        <td class="text-right">${liftHtml}</td>
+                        <td class="text-right ${isCTV ? 'text-muted' : (d.CTV_OVERLAP_PCT >= 5 ? 'text-yellow' : 'text-muted')}">${isCTV ? '—' : (d.CTV_OVERLAP_PCT || 0).toFixed(1) + '%'}</td>
+                    </tr>
+                `;
+            }).join('');
+            
+            return `
+                ${insightHtml}
+                <div class="table-container">
+                    <div class="table-title">
+                        Traffic Source Engagement Comparison
+                        <span class="table-note">Click-based channels vs CTV view-through (non-click) attribution</span>
+                    </div>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Traffic Source</th>
+                                <th class="text-right">Households</th>
+                                <th class="text-right">HH-Days</th>
+                                <th class="text-right">Avg Pages</th>
+                                <th class="text-right">Bounce Rate</th>
+                                <th class="text-right">CTV Exposed</th>
+                                <th class="text-right">Non-CTV</th>
+                                <th class="text-right">CTV Lift</th>
+                                <th class="text-right">CTV Overlap</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${tableRows}
+                        </tbody>
+                    </table>
+                    <div style="font-size: 12px; color: #8b98a5; padding: 12px 16px; border-top: 1px solid #2f3942;">
+                        <strong>📺 Paramount CTV:</strong> Households exposed to CTV ads who later visited the site (view-through, no click).<br>
+                        <strong>HH-Days:</strong> Unique household-days (IP per day). Click sources counted via referrer URL; CTV counted via view-through attribution.<br>
+                        <strong>Bounce Rate:</strong> % of household-days with only 1 page viewed. Lower is better.<br>
+                        <strong>CTV Exposed / Non-CTV:</strong> Avg pages/visit for visitors within each channel who were also exposed to CTV ads vs those who were not.<br>
+                        <strong>CTV Lift:</strong> Engagement increase for CTV-exposed visitors within each click channel.<br>
+                        <strong>CTV Overlap:</strong> % of each source's visits where the visitor was also exposed to CTV ads.
+                    </div>
+                </div>
+            `;
+        }
+        
+        function renderOptimize(data) {
+            // Parse dimension data
+            const baseline = data.find(d => d.DIM_TYPE === 'baseline');
+            const campaigns = data.filter(d => d.DIM_TYPE === 'campaign').sort((a,b) => b.IMPS - a.IMPS);
+            const lineitems = data.filter(d => d.DIM_TYPE === 'lineitem').sort((a,b) => b.IMPS - a.IMPS);
+            const creatives = data.filter(d => d.DIM_TYPE === 'creative').sort((a,b) => b.IMPS - a.IMPS);
+            const dmas = data.filter(d => d.DIM_TYPE === 'dma').sort((a,b) => b.IMPS - a.IMPS);
+            const sites = data.filter(d => d.DIM_TYPE === 'site').sort((a,b) => b.IMPS - a.IMPS);
+            const zips = data.filter(d => d.DIM_TYPE === 'zip').sort((a,b) => b.IMPS - a.IMPS);
+            const dows = data.filter(d => d.DIM_TYPE === 'dow').sort((a,b) => parseInt(a.DIM_KEY) - parseInt(b.DIM_KEY));
+            
+            if (!baseline) return '<div class="error-box">No baseline data available for this advertiser.</div>';
+            
+            const hasWeb = parseFloat(baseline.WEB_VR) > 0;
+            const hasStore = parseFloat(baseline.STORE_VR) > 0;
+            const vrField = hasStore ? 'STORE_VR' : 'WEB_VR';
+            const visitField = hasStore ? 'STORE_VISITS' : 'WEB_VISITS';
+            const vrLabel = hasStore ? 'Store Visit Rate' : 'Web Visit Rate';
+            const visitLabel = hasStore ? 'Store Visits' : 'Web Visits';
+            const baseVR = parseFloat(baseline[vrField]);
+            const baseImps = parseInt(baseline.IMPS);
+            const baseVisits = parseInt(baseline[visitField]);
+            
+            const dayNames = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+            const dayAbbr = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+            
+            function calcIndex(vr) { return baseVR > 0 ? Math.round((vr / baseVR) * 100) : 0; }
+            function calcAction(idx) { return idx >= 120 ? 'Increase' : idx >= 80 ? 'Keep' : 'Remove'; }
+            
+            // ---- ANALYSIS ENGINE ----
+            const recs = [];
+            const soundbites = [];
+            let projectedLiftPct = 0;
+            
+            // 1. DAY OF WEEK
+            if (dows.length > 0) {
+                const dowData = dows.map(d => ({ day: parseInt(d.DIM_KEY), name: dayNames[parseInt(d.DIM_KEY)], abbr: dayAbbr[parseInt(d.DIM_KEY)], vr: parseFloat(d[vrField]), imps: parseInt(d.IMPS), visits: parseInt(d[visitField]) }));
+                const avgVR = dowData.reduce((s,d) => s + d.vr, 0) / dowData.length;
+                const topDays = dowData.filter(d => d.vr > avgVR * 1.1).sort((a,b) => b.vr - a.vr);
+                const weakDays = dowData.filter(d => d.vr < avgVR * 0.9).sort((a,b) => a.vr - b.vr);
+                if (topDays.length > 0 && weakDays.length > 0) {
+                    const topStr = topDays.map(d => `${d.abbr} (${d.vr.toFixed(2)}%)`).join(', ');
+                    const weakStr = weakDays.map(d => `${d.abbr} (${d.vr.toFixed(2)}%)`).join(', ');
+                    const weakImps = weakDays.reduce((s,d) => s + d.imps, 0);
+                    const shiftPct = Math.min(50, Math.round(weakImps / baseImps * 60));
+                    const spreadRatio = topDays[0].vr / Math.max(0.001, weakDays[0].vr);
+                    const liftEst = Math.max(3, Math.round((spreadRatio - 1) * shiftPct * 0.5));
+                    projectedLiftPct += Math.min(20, liftEst);
+                    recs.push({ category: '\u{1f4c5} Day-of-Week', action: `Shift ~${shiftPct}% of budget from weak days (${weakStr}) toward peak days (${topStr}).`, impact: `+${Math.min(20, liftEst)}%`, detail: `Avg VR: ${avgVR.toFixed(2)}%. Best-to-worst day: ${spreadRatio.toFixed(1)}x spread.` });
+                    soundbites.push(`Audiences convert at ${topDays[0].vr.toFixed(2)}% on ${topDays[0].name}s vs ${weakDays[0].vr.toFixed(2)}% on ${weakDays[0].name}s \u2014 a ${spreadRatio.toFixed(1)}x difference.`);
+                }
+            }
+            
+            // 2. PUBLISHER/SITE — separate zero-VR waste from underperformers
+            if (sites.length >= 2) {
+                const siteData = sites.map(s => ({ id: s.DIM_KEY, vr: parseFloat(s[vrField]), imps: parseInt(s.IMPS), visits: parseInt(s[visitField]) }));
+                const totalImps = siteData.reduce((s,d) => s + d.imps, 0);
+                
+                // Zero-VR sites = pure waste
+                const zeroSites = siteData.filter(s => s.vr === 0);
+                const zeroImps = zeroSites.reduce((s,d) => s + d.imps, 0);
+                const zeroPct = zeroImps / totalImps * 100;
+                
+                // Below-half-baseline sites = underperformers
+                const weakSites = siteData.filter(s => s.vr > 0 && s.vr < baseVR * 0.5);
+                const weakImps = weakSites.reduce((s,d) => s + d.imps, 0);
+                const weakPct = weakImps / totalImps * 100;
+                
+                // Top performers
+                const topSites = siteData.filter(s => s.vr > baseVR * 1.3).sort((a,b) => b.vr - a.vr).slice(0, 5);
+                
+                const totalWastePct = zeroPct + weakPct;
+                const totalWasteImps = zeroImps + weakImps;
+                const totalWasteCount = zeroSites.length + weakSites.length;
+                
+                if (topSites.length > 0) {
+                    const topAvgVR = topSites.reduce((s,d) => s + d.vr, 0) / topSites.length;
+                    const topPct = (topSites.reduce((s,d) => s + d.imps, 0) / totalImps * 100).toFixed(1);
+                    recs.push({ category: '\u{1f4fa} Top Publishers', action: `Scale ${topSites.length} high-performing placements (${topPct}% of budget, ${topAvgVR.toFixed(2)}% VR).`, impact: 'Scale', detail: `${(topAvgVR / baseVR).toFixed(1)}x above baseline. Reallocate waste budget here for maximum impact.` });
+                }
+                
+                if (totalWasteCount > 0) {
+                    // Recovery estimate: reallocating waste to avg performers recovers ~70% of potential
+                    const liftEst = Math.max(2, Math.round(totalWastePct * 0.7));
+                    projectedLiftPct += liftEst;
+                    const detail = [];
+                    if (zeroSites.length > 0) detail.push(`${zeroSites.length} sites with 0% VR (${formatNumber(zeroImps)} imps, ${zeroPct.toFixed(1)}% of budget)`);
+                    if (weakSites.length > 0) detail.push(`${weakSites.length} sites below half baseline (${formatNumber(weakImps)} imps)`);
+                    recs.push({ category: '\u{1f4fa} Weak Publishers', action: `Exclude or reduce ${totalWasteCount} underperforming placements wasting ${totalWastePct.toFixed(1)}% of budget.`, impact: `+${liftEst}%`, detail: detail.join('. ') + '.' });
+                    if (zeroPct > 3) soundbites.push(`${zeroPct.toFixed(0)}% of impressions are served on placements with zero visits \u2014 pure waste that can be immediately recovered.`);
+                }
+            }
+            
+            // 3. GEOGRAPHIC / DMA + ZIP
+            if (dmas.length >= 2) {
+                const dmaData = dmas.map(d => ({ code: d.DIM_KEY, name: d.DIM_NAME, vr: parseFloat(d[vrField]), imps: parseInt(d.IMPS) }));
+                const totalDmaImps = dmaData.reduce((s,d) => s + d.imps, 0);
+                const topDmas = dmaData.filter(d => d.vr > baseVR * 1.2).sort((a,b) => b.vr - a.vr).slice(0, 5);
+                const weakDmas = dmaData.filter(d => d.vr < baseVR * 0.5).sort((a,b) => a.vr - b.vr);
+                const weakDmaImps = weakDmas.reduce((s,d) => s + d.imps, 0);
+                const weakDmaPct = weakDmaImps / totalDmaImps * 100;
+                
+                if (topDmas.length > 0) {
+                    recs.push({ category: '\u{1f4cd} Strong DMAs', action: `Prioritize spend in ${topDmas.map(d => (d.name||'').split(' ')[0].split(',')[0]).join(', ')}.`, impact: 'Scale', detail: topDmas.map(d => `${(d.name||'').split(' - ')[0]}: ${d.vr.toFixed(2)}% (${formatNumber(d.imps)} imps)`).join('; ') });
+                }
+                if (weakDmas.length > 0) {
+                    const liftEst = Math.max(3, Math.round(weakDmaPct * 0.5));
+                    projectedLiftPct += Math.min(15, liftEst);
+                    recs.push({ category: '\u{1f4cd} Weak DMAs', action: `Reduce spend in ${weakDmas.length} underperforming DMAs consuming ${weakDmaPct.toFixed(1)}% of geo budget.`, impact: `+${Math.min(15, liftEst)}%`, detail: weakDmas.slice(0,5).map(d => `${(d.name||'').split(' - ')[0]}: ${d.vr.toFixed(2)}%`).join('; ') });
+                }
+            }
+            
+            // ZIP-level waste
+            if (zips.length >= 5) {
+                const zipData = zips.map(z => ({ code: z.DIM_KEY, vr: parseFloat(z[vrField]), imps: parseInt(z.IMPS) }));
+                const totalZipImps = zipData.reduce((s,d) => s + d.imps, 0);
+                const weakZips = zipData.filter(z => z.vr < baseVR * 0.3);
+                const weakZipImps = weakZips.reduce((s,d) => s + d.imps, 0);
+                const weakZipPct = weakZipImps / totalZipImps * 100;
+                if (weakZips.length > 0 && weakZipPct > 2) {
+                    const liftEst = Math.max(2, Math.round(weakZipPct * 0.4));
+                    projectedLiftPct += Math.min(10, liftEst);
+                    recs.push({ category: '\u{1f4cd} Weak ZIPs', action: `Suppress ${weakZips.length} low-performing postal codes (${weakZipPct.toFixed(1)}% of geo impressions).`, impact: `+${Math.min(10, liftEst)}%`, detail: `${formatNumber(weakZipImps)} impressions in ZIP codes with <30% of baseline VR.` });
+                }
+            }
+            
+            // 4. CREATIVE
+            if (creatives.length >= 2) {
+                const crData = creatives.map(c => ({ name: c.DIM_KEY, vr: parseFloat(c[vrField]), imps: parseInt(c.IMPS) }));
+                const bestCr = [...crData].sort((a,b) => b.vr - a.vr)[0];
+                const worstCr = [...crData].sort((a,b) => a.vr - b.vr)[0];
+                const crRatio = bestCr.vr / Math.max(0.001, worstCr.vr);
+                if (crRatio > 1.15 && bestCr.vr > 0) {
+                    // Lift from rotating worst toward best creative
+                    const worstShare = worstCr.imps / crData.reduce((s,d) => s + d.imps, 0);
+                    const liftEst = Math.max(3, Math.round((crRatio - 1) * worstShare * 100 * 0.6));
+                    projectedLiftPct += Math.min(20, liftEst);
+                    recs.push({ category: '\u{1f3a8} Creative', action: `Rotate toward "${bestCr.name.substring(0,45)}" (${bestCr.vr.toFixed(2)}%) and reduce "${worstCr.name.substring(0,45)}" (${worstCr.vr.toFixed(2)}%).`, impact: `+${Math.min(20, liftEst)}%`, detail: `${crData.length} creatives. Best-to-worst: ${crRatio.toFixed(1)}x spread.` });
+                    soundbites.push(`Top creative drives ${bestCr.vr.toFixed(2)}% VR \u2014 ${crRatio.toFixed(1)}x the weakest performer.`);
+                }
+            }
+            
+            // 5. LINE ITEM
+            if (lineitems.length >= 2) {
+                const liData = lineitems.map(l => ({ id: l.DIM_KEY, name: l.DIM_NAME, vr: parseFloat(l[vrField]), imps: parseInt(l.IMPS) }));
+                const sorted = [...liData].sort((a,b) => b.vr - a.vr);
+                const liRatio = sorted[0].vr / Math.max(0.001, sorted[sorted.length-1].vr);
+                if (liRatio > 1.3) {
+                    const liftEst = Math.max(2, Math.round((liRatio - 1) * 8));
+                    projectedLiftPct += Math.min(10, liftEst);
+                    recs.push({ category: '\u{1f4cb} Line Items', action: `Consolidate toward "${(sorted[0].name||sorted[0].id).substring(0,50)}" (${sorted[0].vr.toFixed(2)}%).`, impact: `+${Math.min(10, liftEst)}%`, detail: `${sorted.length} line items. Best: ${sorted[0].vr.toFixed(2)}%, Worst: ${sorted[sorted.length-1].vr.toFixed(2)}% (${liRatio.toFixed(1)}x spread).` });
+                }
+            }
+            
+            projectedLiftPct = Math.min(75, projectedLiftPct);
+            const projectedVR = baseVR * (1 + projectedLiftPct / 100);
+            const projectedAddlVisits = Math.round(baseVisits * projectedLiftPct / 100);
+
+            // Store for Excel export
+            window._optimizeExport = { baseline, campaigns, lineitems, creatives, dmas, sites, zips, dows, vrField, visitField, vrLabel, visitLabel, baseVR, calcIndex, calcAction, dayNames };
+            
+            return `
+                <div style="padding: 0;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px;">
+                        <div>
+                            <h2 style="margin: 0; font-size: 20px; color: #f1f5f9;">\u26a1 Optimization Recommendations</h2>
+                            <div style="color: #64748b; font-size: 13px; margin-top: 4px;">30-day baseline (offset 5 days for attribution lag) \u00b7 ${formatNumber(baseImps)} impressions \u00b7 ${baseVR.toFixed(3)}% ${vrLabel}</div>
+                        </div>
+                        <button onclick="downloadOptimizeXlsx()" style="background: linear-gradient(135deg, #059669, #10b981); color: white; border: none; padding: 10px 20px; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 13px;">
+                            \u{1f4e5} Download Excel Report
+                        </button>
+                    </div>
+                    
+                    ${projectedLiftPct > 0 ? `
+                    <div style="background: linear-gradient(135deg, #0f766e22, #14b8a622); border: 1px solid #14b8a644; border-radius: 10px; padding: 16px; margin-bottom: 16px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <div>
+                                <div style="font-size: 14px; font-weight: 600; color: #5eead4;">Projected Improvement</div>
+                                <div style="font-size: 12px; color: #64748b; margin-top: 2px;">If all recommendations implemented</div>
+                            </div>
+                            <div style="text-align: right;">
+                                <span style="font-size: 28px; font-weight: 800; color: #22c55e;">+${projectedLiftPct}%</span>
+                                <div style="font-size: 12px; color: #94a3b8;">${vrLabel}: ${baseVR.toFixed(3)}% \u2192 ${projectedVR.toFixed(3)}% \u00b7 +${formatNumber(projectedAddlVisits)} ${visitLabel.toLowerCase()}</div>
+                            </div>
+                        </div>
+                    </div>` : ''}
+                    
+                    ${soundbites.length > 0 ? `
+                    <div style="background: #1e293b; border-radius: 10px; padding: 14px; margin-bottom: 16px;">
+                        <div style="font-size: 11px; font-weight: 600; color: #94a3b8; text-transform: uppercase; margin-bottom: 8px;">Consumer Behavior Insights</div>
+                        ${soundbites.map(s => `<div style="color: #cbd5e1; font-size: 13px; margin-bottom: 6px;">\u2022 ${s}</div>`).join('')}
+                    </div>` : ''}
+                    
+                    <div style="background: #1e293b; border-radius: 10px; overflow: hidden; margin-bottom: 16px;">
+                        <table style="width: 100%; border-collapse: collapse;">
+                            <colgroup><col style="width: 160px;"><col><col style="width: 70px;"></colgroup>
+                            <thead><tr style="border-bottom: 1px solid #334155;">
+                                <th style="padding: 10px 16px; text-align: left; font-size: 11px; text-transform: uppercase; color: #94a3b8; letter-spacing: 0.5px;">Dimension</th>
+                                <th style="padding: 10px 16px; text-align: left; font-size: 11px; text-transform: uppercase; color: #94a3b8; letter-spacing: 0.5px;">Recommendation</th>
+                                <th style="padding: 10px 16px; text-align: right; font-size: 11px; text-transform: uppercase; color: #94a3b8; letter-spacing: 0.5px;">Impact</th>
+                            </tr></thead>
+                            <tbody>
+                                ${recs.length === 0 ? '<tr><td colspan="3" class="empty">Insufficient data variance for recommendations</td></tr>' :
+                                recs.map(r => `
+                                    <tr style="border-bottom: 1px solid #1a2332;">
+                                        <td style="padding: 12px 16px; white-space: nowrap; font-weight: 600; color: #e2e8f0; font-size: 13px; vertical-align: top;">${r.category}</td>
+                                        <td style="padding: 12px 16px;">
+                                            <div style="color: #e2e8f0; font-size: 13px; line-height: 1.45;">${r.action}</div>
+                                            <div style="color: #64748b; font-size: 11px; margin-top: 4px; line-height: 1.35;">${r.detail}</div>
+                                        </td>
+                                        <td style="padding: 12px 16px; text-align: right; font-weight: 700; font-size: 14px; vertical-align: top; white-space: nowrap; color: ${r.impact.startsWith('+') ? '#22c55e' : '#f59e0b'};">${r.impact}</td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                    
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; align-items: start;">
+                        <!-- LEFT COL: Publisher + Creative -->
+                        <div style="display: flex; flex-direction: column; gap: 12px;">
+                            <div style="background: #1e293b; border-radius: 10px; padding: 16px;">
+                                <div style="font-size: 13px; font-weight: 600; color: #cbd5e1; margin-bottom: 10px;">\u{1f4fa} Publisher Performance (Top 15)</div>
+                                <table class="opt-table" style="width: 100%;">
+                                    <thead><tr><th>Site</th><th class="text-right">Imps</th><th class="text-right">${visitLabel}</th><th class="text-right">${vrLabel}</th><th class="text-right">Index</th><th class="text-right">Action</th></tr></thead>
+                                    <tbody>${sites.sort((a,b) => parseFloat(b[vrField]) - parseFloat(a[vrField])).slice(0,15).map(s => {
+                                        const vr = parseFloat(s[vrField]);
+                                        const visits = parseInt(s[visitField]);
+                                        const idxVal = calcIndex(vr);
+                                        const action = calcAction(idxVal);
+                                        const actionColor = action === 'Increase' ? '#22c55e' : action === 'Keep' ? '#f59e0b' : '#ef4444';
+                                        return `<tr>
+                                            <td title="${s.DIM_KEY}" class="truncate" style="font-family: monospace; font-size: 12px;">${s.DIM_KEY}</td>
+                                            <td class="text-right">${formatNumber(s.IMPS)}</td>
+                                            <td class="text-right">${formatNumber(visits)}</td>
+                                            <td class="text-right" style="font-weight:600;">${vr.toFixed(3)}%</td>
+                                            <td class="text-right" style="color:${idxVal >= 100 ? '#22c55e' : '#ef4444'}">${idxVal}</td>
+                                            <td class="text-right" style="color:${actionColor}; font-weight:600;">${action}</td>
+                                        </tr>`;
+                                    }).join('')}</tbody>
+                                </table>
+                            </div>
+                            <div style="background: #1e293b; border-radius: 10px; padding: 16px;">
+                                <div style="font-size: 13px; font-weight: 600; color: #cbd5e1; margin-bottom: 10px;">\u{1f3a8} Creative Performance</div>
+                                <table class="opt-table" style="width: 100%;">
+                                    <thead><tr><th>Creative</th><th class="text-right">Imps</th><th class="text-right">${visitLabel}</th><th class="text-right">${vrLabel}</th><th class="text-right">Index</th><th class="text-right">Action</th></tr></thead>
+                                    <tbody>${creatives.map(c => {
+                                        const vr = parseFloat(c[vrField]);
+                                        const visits = parseInt(c[visitField]);
+                                        const idxVal = calcIndex(vr);
+                                        const action = calcAction(idxVal);
+                                        const actionColor = action === 'Increase' ? '#22c55e' : action === 'Keep' ? '#f59e0b' : '#ef4444';
+                                        const shortName = (c.DIM_KEY || '').substring(0, 50);
+                                        return `<tr>
+                                            <td title="${c.DIM_KEY}" class="truncate" style="font-size: 12px;">${shortName}${c.DIM_KEY.length > 50 ? '...' : ''}</td>
+                                            <td class="text-right">${formatNumber(c.IMPS)}</td>
+                                            <td class="text-right">${formatNumber(visits)}</td>
+                                            <td class="text-right" style="font-weight:600;">${vr.toFixed(3)}%</td>
+                                            <td class="text-right" style="color:${idxVal >= 100 ? '#22c55e' : '#ef4444'}">${idxVal}</td>
+                                            <td class="text-right" style="color:${actionColor}; font-weight:600;">${action}</td>
+                                        </tr>`;
+                                    }).join('')}</tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <!-- RIGHT COL: DMA + Day-of-Week -->
+                        <div style="display: flex; flex-direction: column; gap: 12px;">
+                            <div style="background: #1e293b; border-radius: 10px; padding: 16px;">
+                                <div style="font-size: 13px; font-weight: 600; color: #cbd5e1; margin-bottom: 10px;">\u{1f4cd} DMA Performance (Top 15)</div>
+                                <table class="opt-table" style="width: 100%;">
+                                    <thead><tr><th>DMA</th><th class="text-right">Imps</th><th class="text-right">${visitLabel}</th><th class="text-right">${vrLabel}</th><th class="text-right">Index</th><th class="text-right">Action</th></tr></thead>
+                                    <tbody>${dmas.sort((a,b) => parseFloat(b[vrField]) - parseFloat(a[vrField])).slice(0,15).map(d => {
+                                        const vr = parseFloat(d[vrField]);
+                                        const visits = parseInt(d[visitField]);
+                                        const idxVal = calcIndex(vr);
+                                        const action = calcAction(idxVal);
+                                        const actionColor = action === 'Increase' ? '#22c55e' : action === 'Keep' ? '#f59e0b' : '#ef4444';
+                                        const shortName = (d.DIM_NAME || '').split(' - ')[0].split('(')[0].trim();
+                                        return `<tr>
+                                            <td title="${d.DIM_NAME}">${shortName}</td>
+                                            <td class="text-right">${formatNumber(d.IMPS)}</td>
+                                            <td class="text-right">${formatNumber(visits)}</td>
+                                            <td class="text-right" style="font-weight:600;">${vr.toFixed(3)}%</td>
+                                            <td class="text-right" style="color:${idxVal >= 100 ? '#22c55e' : '#ef4444'}">${idxVal}</td>
+                                            <td class="text-right" style="color:${actionColor}; font-weight:600;">${action}</td>
+                                        </tr>`;
+                                    }).join('')}</tbody>
+                                </table>
+                            </div>
+                            <div style="background: #1e293b; border-radius: 10px; padding: 16px;">
+                                <div style="font-size: 13px; font-weight: 600; color: #cbd5e1; margin-bottom: 10px;">\u{1f4c5} Day-of-Week Performance</div>
+                                <table class="opt-table" style="width: 100%;">
+                                    <thead><tr><th>Day</th><th class="text-right">Imps</th><th class="text-right">${visitLabel}</th><th class="text-right">${vrLabel}</th><th class="text-right">Index</th><th class="text-right">Action</th></tr></thead>
+                                    <tbody>${dows.map(d => {
+                                        const vr = parseFloat(d[vrField]);
+                                        const visits = parseInt(d[visitField]);
+                                        const idxVal = calcIndex(vr);
+                                        const action = calcAction(idxVal);
+                                        const actionColor = action === 'Increase' ? '#22c55e' : action === 'Keep' ? '#f59e0b' : '#ef4444';
+                                        return `<tr>
+                                            <td>${dayAbbr[parseInt(d.DIM_KEY)]}</td>
+                                            <td class="text-right">${formatNumber(d.IMPS)}</td>
+                                            <td class="text-right">${formatNumber(visits)}</td>
+                                            <td class="text-right" style="font-weight:600;">${vr.toFixed(3)}%</td>
+                                            <td class="text-right" style="color:${idxVal >= 100 ? '#22c55e' : '#ef4444'}">${idxVal}</td>
+                                            <td class="text-right" style="color:${actionColor}; font-weight:600;">${action}</td>
+                                        </tr>`;
+                                    }).join('')}</tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div style="margin-top: 16px; padding: 12px; background: #1e293b; border-radius: 8px; font-size: 12px; color: #64748b;">
+                        <strong>Methodology:</strong> Analysis uses impression-level data from a 30-day baseline window (offset 5 days for attribution lag). ${vrLabel} = ${visitLabel} \u00f7 Impressions. Index = (Dimension VR \u00f7 Baseline VR) \u00d7 100. Action: Increase (\u2265120), Keep (80\u2013119), Remove (<80). Projected improvements assume conservative reallocation. Actual results may vary.
+                    </div>
+                </div>
+            `;
+        }
+        
+        function downloadOptimizeXlsx() {
+            const e = window._optimizeExport;
+            if (!e) return alert('No optimization data loaded.');
+            
+            const wb = XLSX.utils.book_new();
+            const dn = e.dayNames;
+            const vr = e.vrField;
+            const vis = e.visitField;
+            const bvr = e.baseVR;
+            const idx = (v) => bvr > 0 ? Math.round((v / bvr) * 100) : 0;
+            const act = (i) => i >= 120 ? 'Increase' : i >= 80 ? 'Keep' : 'Remove';
+            
+            // Tab 1: Campaign / Line Item
+            const cliRows = [];
+            (e.campaigns || []).forEach(c => {
+                const v = parseFloat(c[vr]); const i = idx(v);
+                cliRows.push({ Type: 'Campaign', ID: c.DIM_KEY, Name: c.DIM_NAME || '', Impressions: parseInt(c.IMPS), [e.visitLabel]: parseInt(c[vis]), [e.vrLabel+' %']: v, Index: i, Action: act(i) });
+            });
+            (e.lineitems || []).forEach(l => {
+                const v = parseFloat(l[vr]); const i = idx(v);
+                cliRows.push({ Type: 'Line Item', ID: l.DIM_KEY, Name: l.DIM_NAME || '', Impressions: parseInt(l.IMPS), [e.visitLabel]: parseInt(l[vis]), [e.vrLabel+' %']: v, Index: i, Action: act(i) });
+            });
+            cliRows.sort((a,b) => b.Index - a.Index);
+            XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(cliRows), 'Campaign - Line Item');
+            
+            // Tab 2: Creative
+            const crRows = (e.creatives || []).map(c => {
+                const v = parseFloat(c[vr]); const i = idx(v);
+                return { Creative: c.DIM_KEY, Impressions: parseInt(c.IMPS), [e.visitLabel]: parseInt(c[vis]), [e.vrLabel+' %']: v, Index: i, Action: act(i) };
+            }).sort((a,b) => b.Index - a.Index);
+            XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(crRows), 'Creative');
+            
+            // Tab 3: Publisher / Sites
+            const siteRows = (e.sites || []).map(s => {
+                const v = parseFloat(s[vr]); const i = idx(v);
+                return { Publisher: s.DIM_KEY, Impressions: parseInt(s.IMPS), [e.visitLabel]: parseInt(s[vis]), [e.vrLabel+' %']: v, Index: i, Action: act(i) };
+            }).sort((a,b) => b.Index - a.Index);
+            XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(siteRows), 'Publisher - Sites');
+            
+            // Tab 4: Geographic (DMA + ZIP nested)
+            const geoRows = [];
+            (e.dmas || []).sort((a,b) => parseFloat(b[vr]) - parseFloat(a[vr])).forEach(d => {
+                const v = parseFloat(d[vr]); const i = idx(v);
+                geoRows.push({ Type: 'DMA', DMA: d.DIM_NAME || d.DIM_KEY, ZIP: '', Impressions: parseInt(d.IMPS), [e.visitLabel]: parseInt(d[vis]), [e.vrLabel+' %']: v, Index: i, Action: act(i) });
+                (e.zips || []).filter(z => z.DIM_NAME === d.DIM_NAME).sort((a,b) => b.IMPS - a.IMPS).forEach(z => {
+                    const zv = parseFloat(z[vr]); const zi = idx(zv);
+                    geoRows.push({ Type: 'ZIP', DMA: z.DIM_NAME || '', ZIP: z.DIM_KEY, Impressions: parseInt(z.IMPS), [e.visitLabel]: parseInt(z[vis]), [e.vrLabel+' %']: zv, Index: zi, Action: act(zi) });
+                });
+            });
+            XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(geoRows), 'Geographic');
+            
+            // Tab 5: Day of Week
+            const dowRows = (e.dows || []).map(d => {
+                const v = parseFloat(d[vr]); const i = idx(v);
+                return { Day: dn[parseInt(d.DIM_KEY)] || d.DIM_KEY, Impressions: parseInt(d.IMPS), [e.visitLabel]: parseInt(d[vis]), [e.vrLabel+' %']: v, Index: i, Action: act(i) };
+            });
+            XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(dowRows), 'Day of Week');
+            
+            const advName = (state.advertiserName || 'Advertiser').replace(/[^a-zA-Z0-9 ]/g, '').trim();
+            XLSX.writeFile(wb, `Optimize_${advName}_${new Date().toISOString().split('T')[0]}.xlsx`);
+        }
+        
+        async function changeLiftGroup(groupBy) {
+            state.liftGroupBy = groupBy;
+            const content = document.getElementById('tabContent');
+            content.innerHTML = '<div class="loading"><div class="spinner"></div> Loading lift analysis...</div>';
+            const params = { 
+                agency_id: state.agencyId, 
+                advertiser_id: state.advertiserId, 
+                ...dates(),
+                group_by: groupBy
+            };
+            const result = await api('/api/v5/lift-analysis', params);
+            if (result.web_data !== undefined) {
+                window.tabData.webLift = result.web_data || [];
+                window.tabData.storeLift = result.store_data || [];
+                window.tabData.webBaseline = result.web_network_baseline || result.web_adv_baseline || result.web_baseline;
+                window.tabData.storeBaseline = result.store_network_baseline || result.store_baseline;
+                window.tabData.totalWebVisitors = result.total_web_visitors || 0;
+                window.tabData.totalStoreVisitors = result.total_store_visitors || 0;
+                window.tabData.liftMessage = result.message;
+                window.tabData.isDualLift = true;
+            } else {
+                window.tabData.lift = result.success ? result.data : [];
+                window.tabData.liftBaseline = result.baseline;
+                window.tabData.liftMessage = result.message;
+                window.tabData.liftVisitType = result.visit_type || 'store';
+                window.tabData.isDualLift = false;
+            }
+            content.innerHTML = renderLift();
+        }
+
+        function setDays(days) {
+            state.days = days;
+            // Refresh sidebar with new date range
+            refreshSidebar();
+            if (state.advertiserId) loadAdvertiserDetail();
+            else if (state.agencyId) loadAdvertiserOverview();
+            else loadAgencyOverview();
+        }
+        
+        async function refreshSidebar() {
+            const result = await api('/api/v5/agencies', dates());
+            if (!result.success) return;
+            const list = document.getElementById('agencyList');
+            list.innerHTML = result.data.map(a => `
+                <div class="agency-item ${state.agencyId == a.AGENCY_ID ? 'active' : ''}" onclick="selectAgency(${a.AGENCY_ID}, '${(a.AGENCY_NAME || '').replace(/'/g, "\\'")}')">
+                    <div class="agency-name" title="${a.AGENCY_NAME || 'Agency ' + a.AGENCY_ID}">${a.AGENCY_NAME || 'Agency ' + a.AGENCY_ID}</div>
+                    <div class="agency-meta">
+                        ${fmt(a.IMPRESSIONS)} imps · 
+                        <span class="highlight">${fmt(a.STORE_VISITS)}</span> visits
+                        ${a.WEB_VISITS > 0 ? ` · ${fmt(a.WEB_VISITS)} web` : ''}
+                    </div>
+                </div>
+            `).join('');
+        }
+        
+        // Pipeline Health Dashboard
+        async function loadPipelineHealth() {
+            state.agencyId = null;
+            state.advertiserId = null;
+            document.querySelectorAll('.agency-item').forEach(el => el.classList.remove('active'));
+
+            const main = document.getElementById('main');
+            main.innerHTML = '<div class="loading"><div class="spinner"></div> Loading ops console...</div>';
+
+            const result = await api('/api/v5/pipeline-health');
+            if (!result.success) {
+                main.innerHTML = `<div class="error-msg">Error: ${result.error || 'Failed to load ops console'}</div>`;
+                return;
+            }
+
+            const tables = result.tables || [];
+            const trends = result.volume_trends || {};
+            const alerts = result.alerts || [];
+            const tasks = result.tasks || [];
+            const transformLog = result.transform_log || [];
+            const procs = result.procedures || [];
+            const summary = result.summary || {};
+            const overallStatus = result.overall_status || 'green';
+
+            function statusDot(status) {
+                const colors = {green: '#00ba7c', yellow: '#f7931a', red: '#f4212e'};
+                return `<span style="display:inline-block; width:10px; height:10px; border-radius:50%; background:${colors[status] || '#555'};"></span>`;
+            }
+
+            function statusPill(status, label) {
+                const colors = {green: '#00ba7c', yellow: '#f7931a', red: '#f4212e'};
+                const bg = {green: '#0d2818', yellow: '#2d2010', red: '#3d1f1f'};
+                return `<span style="display:inline-block; padding:3px 10px; border-radius:12px; font-size:11px; font-weight:600; color:${colors[status] || '#aaa'}; background:${bg[status] || '#222'}; border:1px solid ${colors[status] || '#555'}30;">${label}</span>`;
+            }
+
+            function fmtBytes(bytes) {
+                if (!bytes || bytes === 0) return '—';
+                const gb = bytes / (1024*1024*1024);
+                if (gb >= 1) return gb.toFixed(1) + ' GB';
+                const mb = bytes / (1024*1024);
+                return mb.toFixed(0) + ' MB';
+            }
+
+            function miniBar(data, maxVal) {
+                if (!data || data.length === 0) return '';
+                const max = maxVal || Math.max(...data.map(d => d.count));
+                if (max === 0) return '';
+                return `<div style="display:flex; align-items:flex-end; gap:1px; height:32px;">` +
+                    data.slice(-14).map((d, i, arr) => {
+                        const h = Math.max(2, (d.count / max) * 30);
+                        const isRecent = i >= arr.length - 3;
+                        const color = isRecent ? (d.count < max * 0.3 ? '#f4212e' : '#00ba7c') : '#3d5466';
+                        return `<div title="${d.date}: ${fmt(d.count)}" style="width:6px; height:${h}px; background:${color}; border-radius:1px;"></div>`;
+                    }).join('') +
+                    `</div>`;
+            }
+
+            // Build alerts HTML
+            let alertsHtml = '';
+            if (alerts.length > 0) {
+                alertsHtml = alerts.map(a => {
+                    const isCritical = a.severity === 'critical';
+                    const bg = isCritical ? '#3d1f1f' : '#2d2010';
+                    const border = isCritical ? '#f4212e' : '#f7931a';
+                    const icon = isCritical ? '🔴' : '🟡';
+                    return `<div style="background:${bg}; border:1px solid ${border}40; border-radius:8px; padding:10px 14px; margin-bottom:8px; display:flex; align-items:center; gap:10px;">
+                        <span style="font-size:14px;">${icon}</span>
+                        <div style="font-size:13px; color:#e7e9ea;">${a.message}</div>
+                    </div>`;
+                }).join('');
+            }
+
+            const statusBanner = overallStatus === 'green' ?
+                '<div style="background:#0d2818; border:1px solid #00ba7c40; border-radius:8px; padding:10px 14px; margin-bottom:16px; color:#00ba7c; font-size:13px;">All systems operational</div>' : '';
+
+            main.innerHTML = `
+                <div class="header">
+                    <div>
+                        <div class="title">Ops Console</div>
+                        <div style="font-size:13px; color:#8b98a5; margin-top:4px;">Pipeline monitoring &middot; Updated ${new Date().toLocaleString()}</div>
+                    </div>
+                    <div style="display:flex; gap:8px; align-items:center;">
+                        ${statusPill(overallStatus, overallStatus === 'green' ? 'HEALTHY' : overallStatus === 'yellow' ? 'DEGRADED' : 'CRITICAL')}
+                    </div>
+                </div>
+
+                ${overallStatus === 'green' ? statusBanner : ''}
+                ${alertsHtml}
+
+                <div class="cards">
+                    <div class="card">
+                        <div class="card-label">Tables Monitored</div>
+                        <div class="card-value">${summary.total_tables_monitored || 0}</div>
+                    </div>
+                    <div class="card">
+                        <div class="card-label">Healthy</div>
+                        <div class="card-value green">${summary.tables_healthy || 0}</div>
+                    </div>
+                    <div class="card">
+                        <div class="card-label">Warning</div>
+                        <div class="card-value" style="color:#f7931a;">${summary.tables_warning || 0}</div>
+                    </div>
+                    <div class="card">
+                        <div class="card-label">Alerts</div>
+                        <div class="card-value" style="color:#f4212e;">${summary.critical_alerts || 0}</div>
+                    </div>
+                </div>
+
+                <div class="table-container" style="margin-bottom:20px;">
+                    <div class="table-title">
+                        Table Health
+                        <span class="table-note">Data freshness &middot; row counts from metadata</span>
+                    </div>
+                    <table>
+                        <thead><tr>
+                            <th style="width:24px;"></th>
+                            <th>Pipeline</th>
+                            <th>Description</th>
+                            <th class="text-right">Total Rows</th>
+                            <th class="text-right">Size</th>
+                            <th>Last Data</th>
+                            <th class="text-right">Stale</th>
+                        </tr></thead>
+                        <tbody>
+                            ${tables.map(t => `
+                                <tr>
+                                    <td>${statusDot(t.status)}</td>
+                                    <td><strong style="font-size:12px;">${t.label}</strong><br><span class="text-muted" style="font-size:10px; font-family:monospace;">${t.table}</span></td>
+                                    <td class="text-muted" style="font-size:12px;">${t.description || ''}</td>
+                                    <td class="text-right" style="font-size:12px;">${fmt(t.total_rows)}</td>
+                                    <td class="text-right" style="font-size:12px;">${fmtBytes(t.total_bytes)}</td>
+                                    <td style="font-size:12px;">${t.last_data || '<span class="text-red">never</span>'}</td>
+                                    <td class="text-right">${t.days_stale <= 1 ? '<span class="text-green">' + t.days_stale + 'd</span>' : t.days_stale <= 3 ? '<span style="color:#f7931a;">' + t.days_stale + 'd</span>' : '<span class="text-red">' + t.days_stale + 'd</span>'}</td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="table-container" style="margin-bottom:20px;">
+                    <div class="table-title">
+                        Scheduled Tasks
+                        <span class="table-note">${summary.tasks_running || 0} running &middot; ${summary.tasks_suspended || 0} suspended</span>
+                    </div>
+                    <table>
+                        <thead><tr>
+                            <th style="width:24px;"></th>
+                            <th>Task</th>
+                            <th>Schema</th>
+                            <th>Schedule</th>
+                            <th>State</th>
+                            <th>Reason</th>
+                        </tr></thead>
+                        <tbody>
+                            ${tasks.length === 0 ? '<tr><td colspan="6" class="text-muted">No tasks found</td></tr>' :
+                            tasks.map(t => `
+                                <tr>
+                                    <td>${statusDot(t.status)}</td>
+                                    <td><strong style="font-size:12px;">${t.name}</strong></td>
+                                    <td class="text-muted" style="font-size:12px;">${t.schema || ''}</td>
+                                    <td style="font-size:11px; font-family:monospace;">${t.schedule || ''}</td>
+                                    <td>${t.state === 'started' ? '<span class="text-green">RUNNING</span>' : '<span class="text-red">SUSPENDED</span>'}</td>
+                                    <td class="text-muted" style="font-size:11px; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${(t.suspend_reason || '').replace(/"/g, '&quot;')}">${t.suspend_reason || ''}</td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                </div>
+
+                ${transformLog.length > 0 ? `
+                <div class="table-container" style="margin-bottom:20px;">
+                    <div class="table-title">
+                        Web Pixel Transform Log
+                        <span class="table-note">Recent batch runs</span>
+                    </div>
+                    <table>
+                        <thead><tr>
+                            <th>Batch</th>
+                            <th>Status</th>
+                            <th>Started</th>
+                            <th class="text-right">Events</th>
+                            <th>Error</th>
+                        </tr></thead>
+                        <tbody>
+                            ${transformLog.map(l => `
+                                <tr>
+                                    <td style="font-size:12px; font-family:monospace;">${l.BATCH_ID || ''}</td>
+                                    <td>${l.STATUS === 'COMPLETED' ? '<span class="text-green">COMPLETED</span>' :
+                                         l.STATUS === 'RUNNING' ? '<span class="text-blue">RUNNING</span>' :
+                                         '<span class="text-red">' + (l.STATUS || 'UNKNOWN') + '</span>'}</td>
+                                    <td style="font-size:12px;">${l.STARTED_AT ? new Date(l.STARTED_AT).toLocaleString() : ''}</td>
+                                    <td class="text-right">${fmt(l.EVENTS_INSERTED || 0)}</td>
+                                    <td class="text-muted" style="font-size:11px; max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${(l.ERROR_MESSAGE || '').replace(/"/g, '&quot;')}">${l.ERROR_MESSAGE || ''}</td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                </div>` : ''}
+
+                ${procs.length > 0 ? `
+                <div class="table-container">
+                    <div class="table-title">
+                        Stored Procedures
+                        <span class="table-note">${procs.length} user procedures</span>
+                    </div>
+                    <table>
+                        <thead><tr>
+                            <th>Procedure</th>
+                            <th>Schema</th>
+                            <th>Description</th>
+                        </tr></thead>
+                        <tbody>
+                            ${procs.map(p => `
+                                <tr>
+                                    <td style="font-size:12px; font-family:monospace;">${p.name}</td>
+                                    <td class="text-muted" style="font-size:12px;">${p.schema || ''}</td>
+                                    <td class="text-muted" style="font-size:11px; max-width:400px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${p.description || ''}</td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                </div>` : ''}
+
+                <div id="tableAccessPanel" class="table-container">
+                    <div class="table-title">Table Access Tracking <span class="table-note">Loading...</span></div>
+                    <div style="padding:16px; color:#64748b; font-size:13px;"><div class="spinner" style="display:inline-block; width:16px; height:16px; margin-right:8px;"></div> Scanning query history (this may take a moment)...</div>
+                </div>
+            `;
+
+            // Lazy-load table access data (QUERY_HISTORY scan is slow)
+            api('/api/v5/table-access').then(taResult => {
+                const panel = document.getElementById('tableAccessPanel');
+                if (!panel) return;
+                if (!taResult.success) {
+                    panel.innerHTML = `
+                        <div class="table-title">Table Access Tracking <span class="table-note" style="color:#f7931a;">Grant needed</span></div>
+                        <div style="padding:16px; color:#94a3b8; font-size:13px;">
+                            Table access tracking requires IMPORTED PRIVILEGES on the SNOWFLAKE database.<br>
+                            <code style="font-size:11px; color:#f7931a; background:#2d2010; padding:4px 8px; border-radius:4px; margin-top:8px; display:inline-block;">${taResult.grant_needed || ''}</code>
+                        </div>`;
+                    return;
+                }
+                const tableAccess = taResult.data || [];
+                const anomalyColors = {normal:'#00ba7c', silent:'#f4212e', drop:'#f7931a', spike:'#1d9bf0'};
+                const anomalyLabels = {normal:'Normal', silent:'Gone Dark', drop:'Drop', spike:'Spike'};
+                const anomalyBg = {normal:'#0d2818', silent:'#3d1f1f', drop:'#2d2010', spike:'#0d2030'};
+                panel.innerHTML = `
+                    <div class="table-title">Table Access Tracking <span class="table-note">Last 7 days · ${tableAccess.length} tables monitored</span></div>
+                    <table>
+                        <thead><tr>
+                            <th>Status</th><th>Table</th><th class="text-right">Queries (7d)</th>
+                            <th class="text-right">Avg/Day</th><th class="text-right">Today</th>
+                            <th class="text-right">Yesterday</th><th class="text-right">Users</th>
+                            <th>Last Accessed</th><th>Signal</th>
+                        </tr></thead>
+                        <tbody>${tableAccess.map(a => {
+                            const dotColor = a.anomaly === 'normal' ? '#00ba7c' : (a.anomaly === 'silent' ? '#f4212e' : '#f7931a');
+                            return '<tr>' +
+                                '<td><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:' + dotColor + ';"></span></td>' +
+                                '<td style="font-size:12px;"><strong>' + a.label + '</strong><br><span class="text-muted" style="font-size:10px;font-family:monospace;">' + a.table_name + '</span></td>' +
+                                '<td class="text-right">' + (a.total_queries_7d || 0).toLocaleString() + '</td>' +
+                                '<td class="text-right">' + (a.avg_daily_queries || 0) + '</td>' +
+                                '<td class="text-right" style="color:' + (a.today_queries < (a.avg_daily_queries * 0.3) && a.avg_daily_queries > 10 ? '#f4212e' : '#e7e9ea') + ';font-weight:' + (a.anomaly !== 'normal' ? '600' : '400') + ';">' + (a.today_queries || 0) + '</td>' +
+                                '<td class="text-right">' + (a.yesterday_queries || 0) + '</td>' +
+                                '<td class="text-right">' + (a.max_daily_users || 0) + '</td>' +
+                                '<td class="text-muted" style="font-size:11px;">' + (a.last_accessed || 'never') + '</td>' +
+                                '<td><span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;color:' + (anomalyColors[a.anomaly]||'#aaa') + ';background:' + (anomalyBg[a.anomaly]||'#222') + ';border:1px solid ' + (anomalyColors[a.anomaly]||'#555') + '30;">' + (anomalyLabels[a.anomaly]||a.anomaly) + '</span></td>' +
+                                '</tr>';
+                        }).join('')}</tbody>
+                    </table>`;
+            }).catch(() => {
+                const panel = document.getElementById('tableAccessPanel');
+                if (panel) panel.innerHTML = '<div class="table-title">Table Access Tracking</div><div style="padding:16px; color:#64748b;">Failed to load — endpoint may have timed out.</div>';
+            });
+        }
+
+        // Known agency IDs for click-through navigation
+        const AGENCY_CONFIG_IDS = [1480, 1813, 2514, 1972, 2234, 2379, 1445, 1880, 2744, 2691, 2393, 1202, 1956, 1955, 2298, 2086, 1565, 1950, 1697, 2012];
+
+        // Search filter
+        document.getElementById('search').addEventListener('input', e => {
+            const q = e.target.value.toLowerCase();
+            document.querySelectorAll('.agency-item').forEach(el => {
+                el.style.display = el.textContent.toLowerCase().includes(q) ? 'block' : 'none';
+            });
+        });
+        
+        // Sidebar resize drag
+        (function() {
+            const sidebar = document.querySelector('.sidebar');
+            const handle = document.getElementById('sidebarResize');
+            const main = document.getElementById('main');
+            let dragging = false;
+            
+            function updatePositions() {
+                const w = sidebar.offsetWidth;
+                handle.style.left = w + 'px';
+                main.style.marginLeft = (w + 5) + 'px';
+            }
+            updatePositions();
+            
+            handle.addEventListener('mousedown', (e) => {
+                dragging = true;
+                handle.classList.add('dragging');
+                document.body.style.cursor = 'col-resize';
+                document.body.style.userSelect = 'none';
+                e.preventDefault();
+            });
+            document.addEventListener('mousemove', (e) => {
+                if (!dragging) return;
+                let newW = Math.min(400, Math.max(120, e.clientX));
+                sidebar.style.width = newW + 'px';
+                updatePositions();
+            });
+            document.addEventListener('mouseup', () => {
+                if (!dragging) return;
+                dragging = false;
+                handle.classList.remove('dragging');
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+            });
+        })();
+        
+        // Init
+        // Check API version on startup
+        fetch(API + '/health').then(r => r.json()).then(h => {
+            console.log('[API Health]', h);
+            const el = document.querySelector('.version');
+            if (el) el.textContent = `API: ${h.version || 'unknown'}`;
+        }).catch(() => {
+            const el = document.querySelector('.version');
+            if (el) el.textContent = 'API: offline';
+        });
+        loadAgencies();
+    </script>
+</body>
+</html>

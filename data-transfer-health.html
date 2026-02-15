@@ -1,0 +1,2020 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quorum Data Transfer Health Monitor</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg-primary: #0f1117;
+  --bg-secondary: #1a1d27;
+  --bg-card: #1e2130;
+  --bg-card-hover: #252840;
+  --border: #2a2d3e;
+  --text-primary: #e8eaed;
+  --text-secondary: #9aa0b2;
+  --text-muted: #6b7185;
+  --accent-blue: #4c8bf5;
+  --accent-green: #34d399;
+  --accent-yellow: #fbbf24;
+  --accent-red: #f87171;
+  --accent-orange: #fb923c;
+  --accent-purple: #a78bfa;
+  --accent-cyan: #22d3ee;
+  --healthy: #34d399;
+  --warning: #fbbf24;
+  --critical: #f87171;
+  --stale: #fb923c;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  min-height: 100vh;
+  line-height: 1.5;
+}
+
+.app-header {
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  padding: 16px 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.app-header h1 {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.3px;
+}
+
+.app-header h1 span {
+  color: var(--accent-blue);
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.last-updated {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.refresh-btn {
+  background: var(--accent-blue);
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: background 0.2s;
+}
+
+.refresh-btn:hover { background: #3a7ae0; }
+.refresh-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.refresh-btn .spinner {
+  display: none;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255,255,255,0.3);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.refresh-btn.loading .spinner { display: block; }
+.refresh-btn.loading .refresh-icon { display: none; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.main-content {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 24px 32px;
+}
+
+/* Overview cards */
+.overview-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 16px;
+  margin-bottom: 32px;
+}
+
+.overview-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  cursor: pointer;
+  transition: all 0.2s;
+  position: relative;
+  overflow: hidden;
+}
+
+.overview-card:hover {
+  background: var(--bg-card-hover);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+
+.overview-card.active {
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 1px var(--accent-blue);
+}
+
+.overview-card .status-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+}
+
+.overview-card .status-bar.healthy { background: var(--healthy); }
+.overview-card .status-bar.warning { background: var(--warning); }
+.overview-card .status-bar.critical { background: var(--critical); }
+.overview-card .status-bar.stale { background: var(--stale); }
+
+.overview-card .client-name {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  margin-top: 4px;
+}
+
+.overview-card .transfer-type {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 12px;
+}
+
+.overview-card .status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-dot.healthy { background: var(--healthy); box-shadow: 0 0 6px var(--healthy); }
+.status-dot.warning { background: var(--warning); box-shadow: 0 0 6px var(--warning); }
+.status-dot.critical { background: var(--critical); box-shadow: 0 0 6px var(--critical); }
+.status-dot.stale { background: var(--stale); box-shadow: 0 0 6px var(--stale); }
+
+.status-label {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.status-label.healthy { color: var(--healthy); }
+.status-label.warning { color: var(--warning); }
+.status-label.critical { color: var(--critical); }
+.status-label.stale { color: var(--stale); }
+
+.overview-card .freshness {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.overview-card .revenue {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+/* Detail panels */
+.detail-section {
+  margin-bottom: 32px;
+}
+
+.detail-section h2 {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.detail-section h2 .badge {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.badge-snowflake { background: rgba(76,139,245,0.15); color: var(--accent-blue); }
+.badge-s3 { background: rgba(251,146,60,0.15); color: var(--accent-orange); }
+.badge-xandr { background: rgba(167,139,250,0.15); color: var(--accent-purple); }
+.badge-weekly { background: rgba(34,211,238,0.15); color: var(--accent-cyan); }
+
+.tables-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+.table-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 20px;
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr 1fr 200px;
+  align-items: center;
+  gap: 16px;
+}
+
+.table-card .table-name {
+  font-size: 13px;
+  font-weight: 600;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.table-card .table-schema {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.table-card .metric {
+  text-align: right;
+}
+
+.table-card .metric-value {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.table-card .metric-label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.table-card .metric-value.healthy { color: var(--healthy); }
+.table-card .metric-value.warning { color: var(--warning); }
+.table-card .metric-value.critical { color: var(--critical); }
+
+/* Sparkline */
+.sparkline-container {
+  height: 40px;
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.spark-bar {
+  flex: 1;
+  min-width: 0;
+  background: var(--accent-blue);
+  border-radius: 2px 2px 0 0;
+  opacity: 0.7;
+  transition: opacity 0.2s;
+  position: relative;
+}
+
+.spark-bar:hover {
+  opacity: 1;
+}
+
+.spark-bar:last-child {
+  opacity: 1;
+}
+
+.spark-bar .tooltip {
+  display: none;
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: #333;
+  color: white;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  white-space: nowrap;
+  z-index: 10;
+}
+
+.spark-bar:hover .tooltip { display: block; }
+
+/* Client detail view */
+.client-detail {
+  display: none;
+  animation: fadeIn 0.3s ease;
+}
+
+.client-detail.active {
+  display: block;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.detail-header h2 {
+  margin-bottom: 0;
+}
+
+.detail-header .mechanism-info {
+  font-size: 13px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.detail-kpis {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.kpi-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.kpi-card .kpi-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+
+.kpi-card .kpi-value {
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.kpi-card .kpi-sub {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+
+/* Notes section */
+.notes-section {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 20px;
+  margin-top: 16px;
+}
+
+.notes-section h3 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.notes-section ul {
+  list-style: none;
+  padding: 0;
+}
+
+.notes-section li {
+  font-size: 13px;
+  color: var(--text-secondary);
+  padding: 4px 0;
+  padding-left: 16px;
+  position: relative;
+}
+
+.notes-section li::before {
+  content: '•';
+  position: absolute;
+  left: 0;
+  color: var(--text-muted);
+}
+
+/* Loading states */
+.loading-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(15,17,23,0.8);
+  z-index: 200;
+  align-items: center;
+  justify-content: center;
+}
+
+.loading-overlay.active { display: flex; }
+
+.loading-box {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 32px 48px;
+  text-align: center;
+}
+
+.loading-box .loader {
+  width: 40px;
+  height: 40px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent-blue);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin: 0 auto 16px;
+}
+
+.loading-box p {
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+/* Timestamp display */
+.data-timestamp {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: right;
+  margin-bottom: 16px;
+}
+
+/* Responsive */
+@media (max-width: 1200px) {
+  .overview-grid { grid-template-columns: repeat(3, 1fr); }
+  .table-card { grid-template-columns: 1.5fr 1fr 1fr 1fr 160px; }
+}
+
+@media (max-width: 768px) {
+  .overview-grid { grid-template-columns: repeat(2, 1fr); }
+  .detail-kpis { grid-template-columns: repeat(2, 1fr); }
+  .table-card { grid-template-columns: 1fr; }
+  .main-content { padding: 16px; }
+}
+
+/* All clients summary table */
+.summary-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 16px;
+}
+
+.summary-table th {
+  text-align: left;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 500;
+}
+
+.summary-table td {
+  padding: 10px 12px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+}
+
+.summary-table tr:hover td {
+  background: var(--bg-card-hover);
+}
+
+.summary-table .mono {
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 12px;
+}
+
+.alert-banner {
+  background: rgba(248,113,113,0.1);
+  border: 1px solid rgba(248,113,113,0.3);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 20px;
+  display: none;
+  font-size: 13px;
+  color: var(--accent-red);
+}
+
+.alert-banner.visible { display: flex; align-items: center; gap: 10px; }
+
+.alert-banner .alert-icon { font-size: 18px; }
+
+/* View tabs */
+.view-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 24px;
+  background: var(--bg-secondary);
+  padding: 4px;
+  border-radius: 8px;
+  width: fit-content;
+}
+
+.view-tab {
+  background: transparent;
+  color: var(--text-muted);
+  border: none;
+  padding: 8px 20px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.view-tab:hover { color: var(--text-primary); }
+
+.view-tab.active {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+
+/* Gap analysis cards */
+.gaps-section h2 {
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.gap-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px;
+  margin-bottom: 12px;
+  border-left: 3px solid var(--border);
+}
+
+.gap-card.critical { border-left-color: var(--critical); }
+.gap-card.warning { border-left-color: var(--warning); }
+.gap-card.info { border-left-color: var(--accent-blue); }
+.gap-card.blind-spot { border-left-color: var(--accent-cyan); }
+
+.gap-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.gap-severity {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 4px;
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+}
+
+.gap-severity.critical { background: rgba(248,113,113,0.15); color: var(--critical); }
+.gap-severity.warning { background: rgba(251,191,36,0.15); color: var(--warning); }
+.gap-severity.info { background: rgba(76,139,245,0.15); color: var(--accent-blue); }
+.gap-severity.blind-spot { background: rgba(34,211,238,0.15); color: var(--accent-cyan); }
+
+.gap-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.gap-body {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin-bottom: 12px;
+}
+
+.gap-body code {
+  background: rgba(76,139,245,0.1);
+  color: var(--accent-blue);
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 12px;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+}
+
+.gap-impact {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 8px 12px;
+  background: rgba(248,113,113,0.05);
+  border-radius: 6px;
+  border-left: 2px solid rgba(248,113,113,0.3);
+}
+
+.gap-actions {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-top: 12px;
+  padding: 12px 16px;
+  background: rgba(34,211,238,0.05);
+  border-radius: 6px;
+}
+
+.gap-actions strong {
+  color: var(--text-primary);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.gap-actions ol {
+  margin-top: 8px;
+  padding-left: 20px;
+}
+
+.gap-actions li {
+  margin-bottom: 6px;
+  line-height: 1.5;
+}
+
+/* Investigation guide */
+.guide-section {
+  margin-bottom: 32px;
+}
+
+.guide-section h2 {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 16px;
+  color: var(--text-primary);
+}
+
+.guide-section h3 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 20px 0 10px;
+}
+
+.guide-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+.guide-card h3 {
+  margin-top: 0;
+}
+
+.guide-card p, .guide-card li {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.guide-card table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0;
+  font-size: 12px;
+}
+
+.guide-card th {
+  text-align: left;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 500;
+}
+
+.guide-card td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+
+.guide-card td code, .guide-card p code {
+  background: rgba(76,139,245,0.1);
+  color: var(--accent-blue);
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 12px;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+}
+
+.guide-card td.wrong {
+  color: var(--accent-red);
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+
+.guide-card td.correct {
+  color: var(--accent-green);
+}
+
+.sql-block {
+  background: #151722;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px 16px;
+  margin: 10px 0;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.sql-block .comment { color: var(--text-muted); }
+.sql-block .keyword { color: var(--accent-blue); }
+
+.investigation-item {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px;
+  margin-bottom: 12px;
+  border-left: 3px solid var(--border);
+}
+
+.investigation-item.high { border-left-color: var(--critical); }
+.investigation-item.medium { border-left-color: var(--warning); }
+.investigation-item.low { border-left-color: var(--accent-blue); }
+
+.investigation-item .inv-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.investigation-item .inv-priority {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 4px;
+  letter-spacing: 0.5px;
+}
+
+.inv-priority.high { background: rgba(248,113,113,0.15); color: var(--critical); }
+.inv-priority.medium { background: rgba(251,191,36,0.15); color: var(--warning); }
+.inv-priority.low { background: rgba(76,139,245,0.15); color: var(--accent-blue); }
+
+.investigation-item .inv-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.investigation-item .inv-body {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+</style>
+</head>
+<body>
+
+<header class="app-header">
+  <h1><span>Quorum</span> Data Transfer Health Monitor</h1>
+  <div class="header-right">
+    <span class="last-updated" id="lastUpdated">Data as of: Loading...</span>
+    <button class="refresh-btn" id="refreshBtn" onclick="refreshAll()">
+      <span class="refresh-icon">&#x21bb;</span>
+      <span class="spinner"></span>
+      Refresh
+    </button>
+  </div>
+</header>
+
+<div class="main-content">
+
+  <!-- Alert banner for critical issues -->
+  <div class="alert-banner" id="alertBanner">
+    <span class="alert-icon">&#x26a0;</span>
+    <span id="alertMessage"></span>
+  </div>
+
+  <!-- Overview Cards -->
+  <div class="overview-grid" id="overviewGrid">
+    <!-- Populated by JS -->
+  </div>
+
+  <!-- View toggle -->
+  <div class="view-tabs" id="viewTabs">
+    <button class="view-tab active" onclick="switchView('clients')">Client Details</button>
+    <button class="view-tab" onclick="switchView('gaps')">Monitoring Gaps &amp; Recommendations</button>
+    <button class="view-tab" onclick="switchView('guide')">Investigation Guide</button>
+  </div>
+
+  <!-- Client Detail Views -->
+  <div id="detailContainer">
+    <!-- Populated by JS -->
+  </div>
+
+  <!-- Monitoring Gaps Panel -->
+  <div id="gapsContainer" style="display:none;">
+    <div class="gaps-section">
+      <h2 style="color: var(--accent-red); margin-bottom: 8px;">Critical Findings</h2>
+      <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 20px;">Issues discovered during audit of Snowflake data transfer infrastructure (Feb 13, 2026)</p>
+
+      <div class="gap-card critical">
+        <div class="gap-header">
+          <span class="gap-severity critical">CRITICAL</span>
+          <span class="gap-title">MNTN Publisher Attribution: 100% Null</span>
+        </div>
+        <div class="gap-body">
+          Every MNTN impression (PT=22) in XANDR_IMPRESSION_LOG has PUBLISHER_ID = null or 0. This was previously documented as ~20% but is actually 100%. Publisher-level attribution and reporting is completely unavailable for MNTN. By comparison, PT=8 has only 0.1% null, PT=9 has 0%, and PT=13 has 0.1% — confirming this is specific to how MNTN sends data, not a platform-wide issue.
+        </div>
+        <div class="gap-impact">Impact: Publisher optimization tab in Optimizer will show no data for MNTN campaigns. Clients cannot see which publishers are driving conversions.</div>
+      </div>
+
+      <div class="gap-card critical">
+        <div class="gap-header">
+          <span class="gap-severity critical">CRITICAL</span>
+          <span class="gap-title">No Snowpipes or Automated Ingestion</span>
+        </div>
+        <div class="gap-body">
+          Zero Snowpipes exist in QUORUMDB.SEGMENT_DATA. All S3-to-Snowflake data loads (LotLinx, Paramount, MNTN) rely on external orchestration — likely cron jobs, Lambda functions, or manual COPY INTO commands via the <code>COPY_FILES_TO_TABLE()</code> stored procedure. There is no event-driven, automatic ingestion when new files land in S3 buckets.
+        </div>
+        <div class="gap-impact">Impact: If the external orchestrator fails (server down, cron misconfigured, credentials expire), data stops flowing with no Snowflake-side alerting. Note: The apparent LotLinx volume decline was investigated and found to be a normal multi-load backfill pattern, not a pipeline failure — but a real failure would look identical at first glance, reinforcing the need for Snowpipe-based alerting.</div>
+      </div>
+
+      <div class="gap-card warning">
+        <div class="gap-header">
+          <span class="gap-severity warning">WARNING</span>
+          <span class="gap-title">Only 2 Snowflake Tasks — 1 Suspended with Errors</span>
+        </div>
+        <div class="gap-body">
+          Only two Snowflake tasks exist: <code>TASK_ATTAIN_SEGMENT_MAID_UPSERT</code> (active, Mon/Wed/Fri at 13:00 UTC) and <code>DAILY_QRM_V4_REFRESH</code> (suspended — SUSPENDED_DUE_TO_ERRORS). No scheduled tasks exist for LotLinx, Paramount, Causal IQ, or MNTN data loads.
+        </div>
+        <div class="gap-impact">Impact: DAILY_QRM_V4_REFRESH (which calls REFRESH_QRM_V4()) is not running. Additionally, client data loads have no Snowflake-native scheduling or error handling.</div>
+      </div>
+
+      <div class="gap-card warning">
+        <div class="gap-header">
+          <span class="gap-severity warning">WARNING</span>
+          <span class="gap-title">Attain Feed: Irregular Load Schedule</span>
+        </div>
+        <div class="gap-body">
+          The Attain MERGE task is scheduled for Mon/Wed/Fri, but load history shows: Feb 7 (Fri) was <strong>skipped entirely</strong>, then Feb 9 (Mon) loaded 356M rows (2.5x normal, catching up). Feb 12 (Thu — not a scheduled day) had a tiny 5M row load, possibly manual. Normal loads are 133-144M rows.
+        </div>
+        <div class="gap-impact">Impact: Attain receives data in inconsistent batches rather than predictable cadence. Skipped loads cause large catch-up batches that consume more warehouse resources.</div>
+      </div>
+
+      <div class="gap-card info">
+        <div class="gap-header">
+          <span class="gap-severity info">INFO</span>
+          <span class="gap-title">LotLinx Backfill Pattern Can Mimic Volume Decline</span>
+        </div>
+        <div class="gap-body">
+          RESOLVED: The apparent decline from 400-580K to 133K (Feb 10) and 56K (Feb 11) is NOT a real volume drop. The SEGMENT_DEVICES_CAPTURED_LOTLINX_BACKUP table backfills each date across ~3 load cycles spaced ~2 days apart. Recent dates have only completed 1-2 of their expected loads. Cross-validation against LOTLINX_QUORUMIMP_DATA confirms stable volumes at 478-507K/day. Future monitoring should account for this multi-load backfill pattern to avoid false alarms.
+        </div>
+        <div class="gap-impact">Note: When monitoring this table, always compare recent-date volumes against LOTLINX_QUORUMIMP_DATA as a cross-check before raising an alert. Only flag a true decline if BOTH tables show reduced volumes.</div>
+      </div>
+
+      <div class="gap-card info">
+        <div class="gap-header">
+          <span class="gap-severity info">INFO</span>
+          <span class="gap-title">Paramount Cross-Table Consistency</span>
+        </div>
+        <div class="gap-body">
+          For Feb 10-12: PARAMOUNT_MAPPED_IMPRESSIONS has 17.1M rows vs PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS at 16.5M rows. Mapped impressions slightly exceed total impressions, which could indicate different time-window boundaries or enrichment logic adding rows. Not necessarily a problem but worth understanding. Site visit to lead conversion rate is ~7.7% (2.5M leads from 33.2M site visits over 3 days), which appears reasonable.
+        </div>
+        <div class="gap-impact">Impact: Low — likely a boundary/enrichment difference, but worth documenting expected relationships between tables.</div>
+      </div>
+    </div>
+
+    <div class="gaps-section" style="margin-top: 32px;">
+      <h2 style="color: var(--accent-cyan); margin-bottom: 8px;">What This Dashboard Cannot Monitor</h2>
+      <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 20px;">This dashboard queries Snowflake directly. The following areas require separate monitoring tools.</p>
+
+      <div class="gap-card blind-spot">
+        <div class="gap-header">
+          <span class="gap-severity blind-spot">BLIND SPOT</span>
+          <span class="gap-title">S3 Bucket Health</span>
+        </div>
+        <div class="gap-body">
+          Four S3 buckets serve as intermediaries for client data delivery: <code>lotlinx-webpixeldata-filedrop</code>, <code>paramount-retargeting-files</code>, <code>quorum-paramount-data</code>, and <code>mntn-data-drop</code>. This dashboard cannot see whether files are arriving in these buckets, their sizes, or if uploads are failing.
+        </div>
+        <div class="gap-actions">
+          <strong>Recommended actions:</strong>
+          <ol>
+            <li>Enable S3 CloudWatch metrics on all four buckets (NumberOfObjects, BucketSizeBytes) and set alarms for stalled growth</li>
+            <li>Enable S3 Event Notifications to trigger a Lambda or SNS alert when new files arrive (or fail to arrive within expected windows)</li>
+            <li>Set up AWS CloudTrail logging for PutObject/DeleteObject on these buckets to maintain an audit trail</li>
+            <li>Consider adding Snowpipe on each bucket's stage to automate and monitor S3 → Snowflake ingestion natively</li>
+          </ol>
+        </div>
+      </div>
+
+      <div class="gap-card blind-spot">
+        <div class="gap-header">
+          <span class="gap-severity blind-spot">BLIND SPOT</span>
+          <span class="gap-title">External Orchestration Processes</span>
+        </div>
+        <div class="gap-body">
+          Data loading into Snowflake is handled by processes outside of Snowflake (likely cron jobs, AWS Lambda, or scripts calling COPY INTO / <code>COPY_FILES_TO_TABLE()</code>). If these processes crash, run into credential expiration, or silently fail, there is no Snowflake-side detection.
+        </div>
+        <div class="gap-actions">
+          <strong>Recommended actions:</strong>
+          <ol>
+            <li>Identify and document where each client's load process runs (which server/Lambda/cron)</li>
+            <li>Add health-check logging: each load job should write a success/failure record to a Snowflake audit table</li>
+            <li>Set up dead-man's-switch alerts: if no successful load record appears within the expected window, fire an alert</li>
+            <li>Migrate to Snowflake Tasks or Snowpipe where possible to bring orchestration into a monitored environment</li>
+          </ol>
+        </div>
+      </div>
+
+      <div class="gap-card blind-spot">
+        <div class="gap-header">
+          <span class="gap-severity blind-spot">BLIND SPOT</span>
+          <span class="gap-title">Snowflake Share Consumer Health (Attain)</span>
+        </div>
+        <div class="gap-body">
+          Attain accesses data via Snowflake outbound share (SHARE_TO_ATTAIN → account UK76987). This dashboard verifies data exists in the shared tables, but cannot confirm whether Attain can actually query the share, whether their account is active, or if they encounter permission/access errors.
+        </div>
+        <div class="gap-actions">
+          <strong>Recommended actions:</strong>
+          <ol>
+            <li>Set up a periodic check with Attain's team to confirm they can read the share (even a monthly "can you query this?" ping)</li>
+            <li>Use SHOW GRANTS ON SHARE to periodically verify share permissions haven't changed</li>
+            <li>Monitor SNOWFLAKE.ACCOUNT_USAGE.DATA_TRANSFER_HISTORY for share access patterns</li>
+          </ol>
+        </div>
+      </div>
+
+      <div class="gap-card blind-spot">
+        <div class="gap-header">
+          <span class="gap-severity blind-spot">BLIND SPOT</span>
+          <span class="gap-title">Automated Alerting</span>
+        </div>
+        <div class="gap-body">
+          This dashboard is a point-in-time snapshot. It requires a human to open it and check. There are no automated alerts when data becomes stale, volumes drop anomalously, or pipelines break.
+        </div>
+        <div class="gap-actions">
+          <strong>Recommended actions:</strong>
+          <ol>
+            <li>Create a Snowflake Task that runs daily, checks freshness/volume for each client table, and calls SYSTEM$SEND_EMAIL or posts to a Slack webhook when thresholds are breached</li>
+            <li>Define SLAs per client: e.g., Attain feed must load within 48 hours, LotLinx within 36 hours, Paramount within 24 hours</li>
+            <li>The existing /api/v5/pipeline-health endpoint on Railway could be extended to include these client-specific checks and trigger alerts</li>
+          </ol>
+        </div>
+      </div>
+
+      <div class="gap-card blind-spot">
+        <div class="gap-header">
+          <span class="gap-severity blind-spot">BLIND SPOT</span>
+          <span class="gap-title">Data Quality Beyond Freshness</span>
+        </div>
+        <div class="gap-body">
+          This dashboard monitors <em>freshness</em> (is data recent?) and <em>volume</em> (are row counts normal?). It does not monitor data <em>quality</em>: null rates on key fields, duplicate records, schema drift, value range violations, or referential integrity.
+        </div>
+        <div class="gap-actions">
+          <strong>Recommended actions:</strong>
+          <ol>
+            <li>Add null-rate checks for key identity fields (DEVICE_ID, IP_ADDRESS, MAID) per client table — the MNTN 100% null publisher issue would have been caught sooner with this</li>
+            <li>Track duplicate rates (same DEVICE_ID + TIMESTAMP within a table)</li>
+            <li>Monitor schema changes: create a baseline of expected columns per table and alert on additions/removals</li>
+            <li>Consider Snowflake's built-in data quality functions or a tool like dbt tests for automated quality checks</li>
+          </ol>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Investigation Guide -->
+  <div id="guideContainer" style="display:none;">
+
+    <div class="guide-section">
+      <h2>Investigation Guide</h2>
+      <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 24px;">Reference for investigating warnings, updating this dashboard, and avoiding known pitfalls. Created Feb 13, 2026.</p>
+    </div>
+
+    <!-- Client Data Paths -->
+    <div class="guide-section">
+      <h2>Client Data Paths</h2>
+
+      <div class="guide-card">
+        <h3>1. Attain &mdash; Snowflake Share</h3>
+        <p>Outbound share <code>SHARE_TO_ATTAIN</code> &rarr; account <code>UK76987</code>. Primary table: <code>QUORUM_CROSS_CLOUD.ATTAIN_FEED.SEGMENT_MAID_WITH_IP</code>.</p>
+        <p>Snowflake Task <code>TASK_ATTAIN_SEGMENT_MAID_UPSERT</code> runs Mon/Wed/Fri at 13:00 UTC on <code>X_LARGE_WH</code>. It MERGEs from <code>SEGMENT_DEVICES_CAPTURED</code> (last 30 days) into the Attain feed.</p>
+        <p>Other shared tables: <code>MAID_CENTROID_ASSOCIATION</code> (544M rows), <code>HOUSE_HOLD_MAPPING</code> (9B rows, stale since Nov 2025, manual refresh), <code>SEGMENT_META_DATA</code> (740K rows).</p>
+      </div>
+
+      <div class="guide-card">
+        <h3>2. LotLinx &mdash; S3 + Snowflake</h3>
+        <p>S3 bucket <code>lotlinx-webpixeldata-filedrop</code> &rarr; <code>QUORUMDB.SEGMENT_DATA.SEGMENT_DEVICES_CAPTURED_LOTLINX_BACKUP</code>.</p>
+        <p>No Snowflake Task or Snowpipe. Load process is external. Typical weekday: 400-580K rows. Weekend: 250-330K rows.</p>
+      </div>
+
+      <div class="guide-card">
+        <h3>3. Paramount &mdash; S3 + Snowflake</h3>
+        <p>S3 buckets <code>paramount-retargeting-files</code> and <code>quorum-paramount-data</code> &rarr; 5 Snowflake tables.</p>
+        <p>No Snowflake Task or Snowpipe. Agency ID 1480 in Optimizer (Class W &mdash; web visits). Revenue: $43-55K/mo (highest).</p>
+      </div>
+
+      <div class="guide-card">
+        <h3>4. Causal IQ &mdash; Weekly Stats</h3>
+        <p><code>CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS</code> filtered by <code>AGENCY_ID = 1813</code>. Weekly cadence &mdash; <code>LOG_DATE</code> = Sunday (week-end date). 18 active advertisers. Revenue: $18-30K/mo.</p>
+      </div>
+
+      <div class="guide-card">
+        <h3>5. MNTN &mdash; XANDR + Weekly Stats + S3</h3>
+        <p>Three sources: <code>XANDR_IMPRESSION_LOG</code> (filter <code>PT = 22</code>), <code>CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS</code> (filter <code>AGENCY_ID = 2514</code>), and S3 bucket <code>mntn-data-drop</code>.</p>
+        <p><strong>Critical:</strong> 100% of PT=22 rows have <code>PUBLISHER_ID</code> = null/0. This is MNTN-specific (other PTs are &lt;1% null).</p>
+        <p>XANDR queries must always include <code>AND CAST(TIMESTAMP AS DATE) &lt;= CURRENT_DATE()</code> to filter out garbage future dates.</p>
+      </div>
+    </div>
+
+    <!-- Column Name Gotchas -->
+    <div class="guide-section">
+      <h2>Column Name Gotchas</h2>
+      <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 12px;">These caused query failures in previous sessions. Always verify columns via <code style="background: rgba(76,139,245,0.1); color: #4c8bf5; padding: 2px 6px; border-radius: 3px; font-size: 12px;">INFORMATION_SCHEMA.COLUMNS</code> before querying an unfamiliar table.</p>
+      <div class="guide-card">
+        <table>
+          <thead>
+            <tr><th>Table</th><th>Wrong Column</th><th>Correct Column</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>SEGMENT_MAID_WITH_IP</code></td><td class="wrong">CREATED_DATE</td><td class="correct">CREATED_AT</td></tr>
+            <tr><td><code>LOTLINX_BACKUP</code></td><td class="wrong">DRIVEBYDATE</td><td class="correct">DRIVE_BY_DATE</td></tr>
+            <tr><td><code>PARAMOUNT_SITEVISITS</code></td><td class="wrong">EVENT_DATE</td><td class="correct">SITE_VISIT_TIMESTAMP</td></tr>
+            <tr><td><code>PARAMOUNT_LEADS</code></td><td class="wrong">SITE_VISIT_TIMESTAMP</td><td class="correct">LEAD_TIMESTAMP</td></tr>
+            <tr><td><code>PARAMOUNT_CUSTOM_AUDIENCE</code></td><td class="wrong">DELIVERY_DATE</td><td class="correct">LAST_IMPRESSION_PIXEL_FIRED</td></tr>
+            <tr><td><code>WEEKLY_STATS</code></td><td class="wrong">REPORT_END_DATE</td><td class="correct">LOG_DATE</td></tr>
+            <tr><td><code>XANDR_IMPRESSION_LOG</code></td><td class="wrong">MAID</td><td class="correct">DEVICE_UNIQUE_ID</td></tr>
+            <tr><td><code>SEGMENT_DELIVERY_DETAILS</code></td><td class="wrong">AGENCY_NAME</td><td class="correct">AGENCY_ID</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- SQL Gotchas -->
+    <div class="guide-section">
+      <h2>SQL Gotchas</h2>
+      <div class="guide-card">
+        <p><strong>1. XANDR future dates:</strong> <code>MAX(CAST(TIMESTAMP AS DATE))</code> on XANDR returns "58082-12-23" without a bound. Always add: <code>AND CAST(TIMESTAMP AS DATE) &lt;= CURRENT_DATE()</code></p>
+        <p style="margin-top:8px"><strong>2. Reserved word "rows":</strong> <code>COUNT(*) as rows</code> will fail. Use <code>row_count</code> instead.</p>
+        <p style="margin-top:8px"><strong>3. No AGENCY_NAME:</strong> <code>SEGMENT_DELIVERY_DETAILS</code> only has <code>AGENCY_ID</code>. Name lookup requires a separate table.</p>
+      </div>
+    </div>
+
+    <!-- Snowflake Infrastructure -->
+    <div class="guide-section">
+      <h2>Snowflake Infrastructure (as of Feb 13, 2026)</h2>
+      <div class="guide-card">
+        <h3>Snowflake Tasks (only 2 exist)</h3>
+        <table>
+          <thead><tr><th>Task</th><th>Status</th><th>Schedule</th><th>Warehouse</th></tr></thead>
+          <tbody>
+            <tr><td><code>TASK_ATTAIN_SEGMENT_MAID_UPSERT</code></td><td class="correct">started</td><td>Mon/Wed/Fri 13:00 UTC</td><td>X_LARGE_WH</td></tr>
+            <tr><td><code>DAILY_QRM_V4_REFRESH</code></td><td class="wrong">SUSPENDED_DUE_TO_ERRORS</td><td>Daily 06:00 America/Denver</td><td>COMPUTE_WH</td></tr>
+          </tbody>
+        </table>
+        <p style="margin-top:12px"><strong>Snowpipes:</strong> Zero. None exist. All S3 ingestion is external.</p>
+        <p style="margin-top:8px"><strong>Key Stored Procedure:</strong> <code>COPY_FILES_TO_TABLE()</code> &mdash; likely the main mechanism for S3 &rarr; Snowflake loads.</p>
+      </div>
+    </div>
+
+    <!-- Open Investigations -->
+    <div class="guide-section">
+      <h2>Open Warnings &mdash; Investigation Steps</h2>
+
+      <div class="investigation-item" style="border-left-color: var(--accent-green);">
+        <div class="inv-header">
+          <span class="inv-priority" style="background: var(--accent-green); color: #000;">RESOLVED</span>
+          <span class="inv-title">LotLinx Volume Decline — False Alarm (Backfill Pattern)</span>
+        </div>
+        <div class="inv-body">
+          <p><strong>Finding:</strong> The apparent decline from ~500K to 56K was caused by the table's multi-batch backfill loading pattern, not a pipeline failure. Each DRIVE_BY_DATE receives rows across ~3 load cycles spaced ~2 days apart. Recent dates (Feb 10-11) had only completed 1 of ~3 expected loads.</p>
+          <p style="margin-top:8px"><strong>Cross-validation:</strong> LOTLINX_QUORUMIMP_DATA (separate pipeline) showed stable daily volumes of 478-507K for the same period, confirming no actual decline.</p>
+          <p style="margin-top:8px"><strong>89-day trend analysis:</strong> Monthly averages are actually trending <em>upward</em>: Nov 438K &rarr; Dec 457K &rarr; Jan 467K &rarr; Feb 502K. Recent week z-score of +0.66 vs baseline — well within normal range.</p>
+          <div class="sql-block"><span class="comment">-- MONITORING QUERY: Detect actual LotLinx issues vs backfill lag
+-- Compare the two tables. If QUORUMIMP_DATA is healthy but BACKUP looks low,
+-- it's just backfill lag. If BOTH are low, investigate for real.</span>
+SELECT 'BACKUP' AS source, DATE(DRIVE_BY_DATE) AS dt, COUNT(*) AS vol
+FROM QUORUMDB.SEGMENT_DATA.SEGMENT_DEVICES_CAPTURED_LOTLINX_BACKUP
+WHERE DRIVE_BY_DATE >= DATEADD('day', -7, CURRENT_DATE())
+GROUP BY dt
+UNION ALL
+SELECT 'QUORUMIMP' AS source, DATE(IMPRESSION_TIMESTAMP) AS dt, COUNT(*) AS vol
+FROM QUORUMDB.LOTLINX.LOTLINX_QUORUMIMP_DATA
+WHERE IMPRESSION_TIMESTAMP >= DATEADD('day', -7, CURRENT_DATE())
+GROUP BY dt
+ORDER BY dt, source;
+
+<span class="comment">-- Check backfill completion: how many load cycles per recent date?</span>
+SELECT DRIVE_BY_DATE, CREATED_AT, COUNT(*) AS rows_loaded
+FROM QUORUMDB.SEGMENT_DATA.SEGMENT_DEVICES_CAPTURED_LOTLINX_BACKUP
+WHERE DRIVE_BY_DATE >= DATEADD('day', -7, CURRENT_DATE())
+GROUP BY DRIVE_BY_DATE, CREATED_AT
+ORDER BY DRIVE_BY_DATE, CREATED_AT;</div>
+        </div>
+      </div>
+
+      <div class="investigation-item medium">
+        <div class="inv-header">
+          <span class="inv-priority medium">MEDIUM PRIORITY</span>
+          <span class="inv-title">Attain HOUSE_HOLD_MAPPING Stale</span>
+        </div>
+        <div class="inv-body">
+          <p>9B-row table hasn't been refreshed since Nov 2025. Manual-only process. Household-level attribution depends on this mapping. MAID_CENTROID_ASSOCIATION match rate degraded 28% &rarr; 16% in the same period, which may be related.</p>
+          <p style="margin-top:8px"><strong>Actions:</strong> Identify who last refreshed this, document the procedure, and determine if the match rate degradation is caused by stale household data.</p>
+        </div>
+      </div>
+
+      <div class="investigation-item medium">
+        <div class="inv-header">
+          <span class="inv-priority medium">MEDIUM PRIORITY</span>
+          <span class="inv-title">MNTN Publisher Data 100% Null</span>
+        </div>
+        <div class="inv-body">
+          <p>Every PT=22 row has PUBLISHER_ID = null/0. Publisher optimization is impossible for MNTN campaigns.</p>
+          <div class="sql-block"><span class="comment">-- Verify current state</span>
+SELECT CAST(TIMESTAMP AS DATE) as dt, COUNT(*) as total,
+  SUM(CASE WHEN PUBLISHER_ID IS NULL OR PUBLISHER_ID = 0
+      THEN 1 ELSE 0 END) as null_pub
+FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG
+WHERE PT = 22
+  AND CAST(TIMESTAMP AS DATE)
+      BETWEEN DATEADD('day', -3, CURRENT_DATE()) AND CURRENT_DATE()
+GROUP BY dt ORDER BY dt;
+
+<span class="comment">-- Compare with other PTs to confirm MNTN-specific</span>
+SELECT PT, COUNT(*) as total,
+  ROUND(SUM(CASE WHEN PUBLISHER_ID IS NULL OR PUBLISHER_ID = 0
+      THEN 1 ELSE 0 END)*100.0/COUNT(*),1) as null_pct
+FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG
+WHERE CAST(TIMESTAMP AS DATE) = CURRENT_DATE()
+  AND CAST(TIMESTAMP AS DATE) &lt;= CURRENT_DATE()
+GROUP BY PT ORDER BY total DESC;</div>
+          <p style="margin-top:8px"><strong>Root cause:</strong> Likely MNTN doesn't pass publisher data in their XANDR feed. Needs escalation to MNTN's technical team.</p>
+        </div>
+      </div>
+
+      <div class="investigation-item low">
+        <div class="inv-header">
+          <span class="inv-priority low">LOW-MEDIUM</span>
+          <span class="inv-title">Suspended Snowflake Task: DAILY_QRM_V4_REFRESH</span>
+        </div>
+        <div class="inv-body">
+          <p>Task calls <code>REFRESH_QRM_V4()</code> but is suspended due to errors.</p>
+          <div class="sql-block"><span class="comment">-- Check task error history (may need ACCOUNTADMIN)</span>
+SELECT *
+FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY(
+  TASK_NAME =&gt; 'DAILY_QRM_V4_REFRESH',
+  SCHEDULED_TIME_RANGE_START =&gt;
+    DATEADD('day', -30, CURRENT_TIMESTAMP())
+)) ORDER BY SCHEDULED_TIME DESC LIMIT 10;
+
+<span class="comment">-- Check what the stored procedure does</span>
+SELECT GET_DDL('PROCEDURE',
+  'QUORUMDB.SEGMENT_DATA.REFRESH_QRM_V4()');</div>
+        </div>
+      </div>
+
+      <div class="investigation-item low">
+        <div class="inv-header">
+          <span class="inv-priority low">LOW</span>
+          <span class="inv-title">Attain Irregular Load Schedule</span>
+        </div>
+        <div class="inv-body">
+          <p>Task is Mon/Wed/Fri but Feb 7 was skipped, Feb 12 (Thu) had a tiny 5M-row manual load. Inconsistent cadence.</p>
+          <div class="sql-block"><span class="comment">-- Check load pattern over 30 days</span>
+SELECT CREATED_AT::DATE as load_date,
+       DAYNAME(CREATED_AT::DATE) as dow,
+       COUNT(*) as row_count
+FROM QUORUM_CROSS_CLOUD.ATTAIN_FEED.SEGMENT_MAID_WITH_IP
+WHERE CREATED_AT >= DATEADD('day', -30, CURRENT_DATE())
+GROUP BY load_date, dow ORDER BY load_date;</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Quick Health Check Queries -->
+    <div class="guide-section">
+      <h2>Quick Health Check Queries (Copy-Paste Ready)</h2>
+
+      <div class="guide-card">
+        <h3>Attain</h3>
+        <div class="sql-block">SELECT MAX(CREATED_AT)::DATE as latest, COUNT(*) as today_rows
+FROM QUORUM_CROSS_CLOUD.ATTAIN_FEED.SEGMENT_MAID_WITH_IP
+WHERE CREATED_AT >= CURRENT_DATE();</div>
+      </div>
+
+      <div class="guide-card">
+        <h3>LotLinx</h3>
+        <div class="sql-block">SELECT DRIVE_BY_DATE::DATE as dt, COUNT(*) as row_count
+FROM QUORUMDB.SEGMENT_DATA.SEGMENT_DEVICES_CAPTURED_LOTLINX_BACKUP
+WHERE DRIVE_BY_DATE >= DATEADD('day', -7, CURRENT_DATE())
+GROUP BY dt ORDER BY dt;</div>
+      </div>
+
+      <div class="guide-card">
+        <h3>Paramount (all 5 tables)</h3>
+        <div class="sql-block">SELECT 'IMPRESSIONS' as tbl, MAX(IMP_DATE)::DATE as latest
+  FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
+UNION ALL
+SELECT 'MAPPED', MAX(IMP_DATE)::DATE
+  FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_MAPPED_IMPRESSIONS
+UNION ALL
+SELECT 'SITEVISITS', MAX(SITE_VISIT_TIMESTAMP)::DATE
+  FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_SITEVISITS
+UNION ALL
+SELECT 'LEADS', MAX(LEAD_TIMESTAMP)::DATE
+  FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_LEADS
+UNION ALL
+SELECT 'AUDIENCE', MAX(LAST_IMPRESSION_PIXEL_FIRED)::DATE
+  FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_CUSTOM_AUDIENCE_DELIVERY;</div>
+      </div>
+
+      <div class="guide-card">
+        <h3>Causal IQ</h3>
+        <div class="sql-block">SELECT MAX(LOG_DATE)::DATE as latest, COUNT(*) as row_count,
+       COUNT(DISTINCT ADVERTISER_ID) as advertisers
+FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
+WHERE AGENCY_ID = 1813;</div>
+      </div>
+
+      <div class="guide-card">
+        <h3>MNTN &mdash; XANDR</h3>
+        <div class="sql-block">SELECT MAX(CAST(TIMESTAMP AS DATE)) as latest
+FROM QUORUMDB.SEGMENT_DATA.XANDR_IMPRESSION_LOG
+WHERE PT = 22
+  AND CAST(TIMESTAMP AS DATE) &lt;= CURRENT_DATE();</div>
+      </div>
+
+      <div class="guide-card">
+        <h3>MNTN &mdash; Weekly Stats</h3>
+        <div class="sql-block">SELECT MAX(LOG_DATE)::DATE as latest, COUNT(*) as row_count
+FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
+WHERE AGENCY_ID = 2514;</div>
+      </div>
+    </div>
+
+    <!-- How to Update the Dashboard -->
+    <div class="guide-section">
+      <h2>How to Update This Dashboard</h2>
+      <div class="guide-card">
+        <p>This dashboard uses a static data snapshot in the <code>CLIENT_DATA</code> JavaScript object. To update it with fresh data:</p>
+        <p style="margin-top:8px"><strong>1.</strong> Run the health check queries above to get current values.</p>
+        <p><strong>2.</strong> In the HTML source, find the <code>CLIENT_DATA</code> object and update: <code>latestDate</code>, <code>totalRows</code>, <code>recentRows</code>, and the <code>dailyVolumes</code> arrays.</p>
+        <p><strong>3.</strong> Update the <code>SNAPSHOT_TIME</code> constant and the timestamp in the <code>init()</code> function.</p>
+        <p><strong>4.</strong> Health status auto-calculates from staleness thresholds:</p>
+        <table>
+          <thead><tr><th>Cadence</th><th>Healthy</th><th>Warning</th><th>Critical</th></tr></thead>
+          <tbody>
+            <tr><td>Daily</td><td class="correct">&le; 1 day</td><td style="color: var(--warning)">2&ndash;3 days</td><td class="wrong">&gt; 3 days</td></tr>
+            <tr><td>Weekly</td><td class="correct">&le; 8 days</td><td style="color: var(--warning)">9&ndash;14 days</td><td class="wrong">&gt; 14 days</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Related Systems -->
+    <div class="guide-section">
+      <h2>Related Systems &amp; Files</h2>
+      <div class="guide-card">
+        <table>
+          <thead><tr><th>System</th><th>Details</th></tr></thead>
+          <tbody>
+            <tr><td>Quorum Optimizer API</td><td>Flask on Railway, v5.13-pipeline-health. Existing <code>/api/v5/pipeline-health</code> monitors base tables but NOT client transfers.</td></tr>
+            <tr><td>GitHub</td><td><code>ezrakd/quorum-optimizer</code></td></tr>
+            <tr><td>Project Index</td><td><code>/mnt/Claude/quorum-project/COWORK_PROJECT_INDEX.md</code></td></tr>
+            <tr><td>S3 Architecture</td><td><code>AWS_S3_AND_DELIVERY_ARCHITECTURE.md</code> in the Quorum Rewrite zip</td></tr>
+            <tr><td>Revenue Data</td><td><code>/mnt/Claude/Weekly Revenue Forecast 2-12-26.xlsx</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+
+</div>
+
+<div class="loading-overlay" id="loadingOverlay">
+  <div class="loading-box">
+    <div class="loader"></div>
+    <p id="loadingMessage">Querying Snowflake...</p>
+  </div>
+</div>
+
+<script>
+// ============================================================
+// DATA MODEL — Snapshot from Snowflake queries (Feb 13, 2026)
+// This is the initial static data. The refresh button will
+// re-query live data via the Snowflake MCP if available,
+// otherwise it recalculates staleness from the snapshot.
+// ============================================================
+
+const SNAPSHOT_TIME = '2026-02-13T16:00:00Z';
+
+const CLIENT_DATA = {
+  attain: {
+    name: 'Attain',
+    mechanism: 'Snowflake Share',
+    mechanismDetail: 'Outbound share SHARE_TO_ATTAIN → account UK76987',
+    badges: ['snowflake'],
+    revenue: '$6,000/mo (pilot)',
+    tables: [
+      {
+        name: 'SEGMENT_MAID_WITH_IP',
+        schema: 'QUORUM_CROSS_CLOUD.ATTAIN_FEED',
+        totalRows: 31700000000,
+        latestDate: '2026-02-13',
+        dateColumn: 'CREATED_AT',
+        recentRows: 139000000,
+        recentPeriod: 'today',
+        cadence: 'daily',
+        dailyVolumes: null,
+        status: 'healthy'
+      },
+      {
+        name: 'MAID_CENTROID_ASSOCIATION',
+        schema: 'QUORUM_CROSS_CLOUD.ATTAIN_FEED',
+        totalRows: 544000000,
+        latestDate: null,
+        dateColumn: null,
+        recentRows: null,
+        recentPeriod: null,
+        cadence: 'refresh',
+        dailyVolumes: null,
+        status: 'healthy',
+        note: 'Reference table — match rate degraded (28% → 16%) since Nov 2025'
+      },
+      {
+        name: 'HOUSE_HOLD_MAPPING',
+        schema: 'QUORUM_CROSS_CLOUD.ATTAIN_FEED',
+        totalRows: 9000000000,
+        latestDate: null,
+        dateColumn: null,
+        recentRows: null,
+        recentPeriod: null,
+        cadence: 'refresh',
+        dailyVolumes: null,
+        status: 'warning',
+        note: 'Household data stale since Nov 2025 — manual refresh process'
+      },
+      {
+        name: 'SEGMENT_META_DATA',
+        schema: 'QUORUM_CROSS_CLOUD.ATTAIN_FEED',
+        totalRows: 740000,
+        latestDate: null,
+        dateColumn: null,
+        recentRows: null,
+        recentPeriod: null,
+        cadence: 'refresh',
+        dailyVolumes: null,
+        status: 'healthy'
+      }
+    ],
+    notes: [
+      'Attain receives data via Snowflake outbound share (not S3)',
+      'SEGMENT_MAID_WITH_IP is the primary feed — 139M rows today alone, healthy daily flow',
+      'MAID_CENTROID_ASSOCIATION match rate degraded from 28% to 16% since Nov 2025',
+      'WARNING: HOUSE_HOLD_MAPPING has not been refreshed since Nov 2025 — this is a manual process that has no automated schedule, so the 9B-row dataset may be growing stale',
+      'Documenting the HOUSE_HOLD_MAPPING refresh procedure is recommended to reduce single-point-of-failure risk'
+    ]
+  },
+
+  lotlinx: {
+    name: 'LotLinx',
+    mechanism: 'S3 + Snowflake',
+    mechanismDetail: 'S3 bucket: lotlinx-webpixeldata-filedrop → Snowflake tables',
+    badges: ['s3', 'snowflake'],
+    revenue: '$24,000/mo',
+    tables: [
+      {
+        name: 'SEGMENT_DEVICES_CAPTURED_LOTLINX_BACKUP',
+        schema: 'QUORUMDB.SEGMENT_DATA',
+        totalRows: null,
+        latestDate: '2026-02-11',
+        dateColumn: 'DRIVE_BY_DATE',
+        recentRows: 189231,
+        recentPeriod: '3d',
+        cadence: 'daily',
+        dailyVolumes: [
+          { date: '2026-01-30', count: 579166 },
+          { date: '2026-01-31', count: 424780 },
+          { date: '2026-02-01', count: 369644 },
+          { date: '2026-02-02', count: 326881 },
+          { date: '2026-02-03', count: 245720 },
+          { date: '2026-02-04', count: 541211 },
+          { date: '2026-02-05', count: 487390 },
+          { date: '2026-02-06', count: 566509 },
+          { date: '2026-02-07', count: 519517 },
+          { date: '2026-02-08', count: 317913 },
+          { date: '2026-02-09', count: 288641 },
+          { date: '2026-02-10', count: 133203 },
+          { date: '2026-02-11', count: 56028 }
+        ],
+        status: 'healthy',
+        note: 'Latest DRIVE_BY_DATE is Feb 11. Recent dates appear low because this table backfills in ~3 batch loads over 4-6 days. Feb 10-11 have only had 1 of ~3 expected loads — they will reach normal ~500K levels once backfill completes. Cross-checked against LOTLINX_QUORUMIMP_DATA which shows stable 478-507K daily volumes.'
+      }
+    ],
+    notes: [
+      'Data flows via S3 bucket (lotlinx-webpixeldata-filedrop) into Snowflake',
+      'DRIVE_BY_DATE typically trails by ~1-2 days due to normal processing pipeline lag',
+      'BACKFILL PATTERN: This table loads each date\'s data across ~3 batch cycles spaced ~2 days apart. Recent dates (Feb 8-11) appear low because they have not completed all load cycles yet — this is normal, not a pipeline issue.',
+      'CROSS-VALIDATION: LOTLINX_QUORUMIMP_DATA (separate table, different pipeline) shows Feb 5-11 volumes at a stable 478-507K/day — above the 89-day baseline average of 463K. Monthly averages are trending upward: Nov 438K → Dec 457K → Jan 467K → Feb 502K.'
+    ]
+  },
+
+  paramount: {
+    name: 'Paramount',
+    mechanism: 'S3 + Snowflake',
+    mechanismDetail: 'S3 buckets: paramount-retargeting-files, quorum-paramount-data',
+    badges: ['s3', 'snowflake'],
+    revenue: '$43,000–$55,000/mo',
+    tables: [
+      {
+        name: 'PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS',
+        schema: 'QUORUMDB.SEGMENT_DATA',
+        totalRows: null,
+        latestDate: '2026-02-12',
+        dateColumn: 'IMP_DATE',
+        recentRows: null,
+        recentPeriod: null,
+        cadence: 'daily',
+        dailyVolumes: [
+          { date: '2026-01-30', count: 3000656 },
+          { date: '2026-01-31', count: 3313952 },
+          { date: '2026-02-01', count: 3393573 },
+          { date: '2026-02-02', count: 2171261 },
+          { date: '2026-02-03', count: 2011319 },
+          { date: '2026-02-04', count: 2155753 },
+          { date: '2026-02-05', count: 2466675 },
+          { date: '2026-02-06', count: 3351385 },
+          { date: '2026-02-07', count: 3200952 },
+          { date: '2026-02-08', count: 3823737 },
+          { date: '2026-02-09', count: 3444663 },
+          { date: '2026-02-10', count: 5161623 },
+          { date: '2026-02-11', count: 7230333 },
+          { date: '2026-02-12', count: 4131655 }
+        ],
+        status: 'healthy'
+      },
+      {
+        name: 'PARAMOUNT_MAPPED_IMPRESSIONS',
+        schema: 'QUORUMDB.SEGMENT_DATA',
+        totalRows: 320000000,
+        latestDate: '2026-02-12',
+        dateColumn: 'IMP_DATE',
+        recentRows: null,
+        recentPeriod: null,
+        cadence: 'daily',
+        dailyVolumes: null,
+        status: 'healthy'
+      },
+      {
+        name: 'PARAMOUNT_SITEVISITS',
+        schema: 'QUORUMDB.SEGMENT_DATA',
+        totalRows: null,
+        latestDate: '2026-02-12',
+        dateColumn: 'SITE_VISIT_TIMESTAMP',
+        recentRows: null,
+        recentPeriod: null,
+        cadence: 'daily',
+        dailyVolumes: null,
+        status: 'healthy'
+      },
+      {
+        name: 'PARAMOUNT_LEADS',
+        schema: 'QUORUMDB.SEGMENT_DATA',
+        totalRows: null,
+        latestDate: '2026-02-12',
+        dateColumn: 'SITE_VISIT_TIMESTAMP',
+        recentRows: null,
+        recentPeriod: null,
+        cadence: 'daily',
+        dailyVolumes: null,
+        status: 'healthy'
+      },
+      {
+        name: 'PARAMOUNT_CUSTOM_AUDIENCE_DELIVERY',
+        schema: 'QUORUMDB.SEGMENT_DATA',
+        totalRows: 46400000,
+        latestDate: '2026-02-12',
+        dateColumn: 'LAST_IMPRESSION_PIXEL_FIRED',
+        recentRows: null,
+        recentPeriod: null,
+        cadence: 'daily',
+        dailyVolumes: null,
+        status: 'healthy'
+      }
+    ],
+    notes: [
+      'Paramount is the highest-revenue client ($43-55K/mo) with the most complex data architecture',
+      'Agency ID 1480 in the Optimizer — uses special "Class W" web-visit path',
+      'All 5 tables showing data through Feb 12 — healthy pipeline',
+      'Impressions spiked to 7.2M on Feb 11, then 4.1M on Feb 12 — normal variation',
+      'PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS is the primary table queried by the Optimizer API',
+      'Traffic Sources tab in Optimizer is Paramount-exclusive (scans ~310M rows)'
+    ]
+  },
+
+  causal: {
+    name: 'Causal IQ',
+    mechanism: 'Weekly Stats',
+    mechanismDetail: 'Agency 1813 → CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS',
+    badges: ['weekly', 'snowflake'],
+    revenue: '$18,000–$30,000/mo',
+    tables: [
+      {
+        name: 'CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS',
+        schema: 'QUORUMDB.SEGMENT_DATA',
+        totalRows: 4138992,
+        latestDate: '2026-02-09',
+        dateColumn: 'LOG_DATE',
+        recentRows: null,
+        recentPeriod: null,
+        cadence: 'weekly',
+        dailyVolumes: [
+          { date: '2026-01-05', count: 3093191 },
+          { date: '2026-01-12', count: 3819540 },
+          { date: '2026-01-19', count: 6054739 },
+          { date: '2026-01-26', count: 4441606 },
+          { date: '2026-02-02', count: 4902941 },
+          { date: '2026-02-09', count: 4138992 }
+        ],
+        status: 'healthy',
+        note: 'Agency 1813 — 18 advertisers. Weekly cadence (Sun–Sat), LOG_DATE = week-end date',
+        advertisers: 18
+      }
+    ],
+    notes: [
+      'Data is weekly cadence — LOG_DATE of Feb 9 (Sunday) is the most recent week end',
+      'Agency ID 1813 in the Optimizer — uses Class B path',
+      '18 active advertisers under Causal IQ (47 total across all agencies in this table)',
+      '4.1M rows for week of Feb 9, consistent with recent weeks (3-6M range)',
+      'Next data expected: Feb 16 (following Sunday)'
+    ]
+  },
+
+  mntn: {
+    name: 'MNTN',
+    mechanism: 'XANDR + Weekly Stats + S3',
+    mechanismDetail: 'PT=22 in XANDR_IMPRESSION_LOG + Agency 2514 weekly stats + S3 mntn-data-drop',
+    badges: ['xandr', 'weekly', 's3'],
+    revenue: '$3,000–$18,000/mo',
+    tables: [
+      {
+        name: 'XANDR_IMPRESSION_LOG (PT=22)',
+        schema: 'QUORUMDB.SEGMENT_DATA',
+        totalRows: null,
+        latestDate: '2026-02-13',
+        dateColumn: 'TIMESTAMP',
+        recentRows: 584979,
+        recentPeriod: 'today so far',
+        cadence: 'daily',
+        dailyVolumes: [
+          { date: '2026-01-30', count: 450314 },
+          { date: '2026-01-31', count: 454805 },
+          { date: '2026-02-01', count: 342763 },
+          { date: '2026-02-02', count: 787914 },
+          { date: '2026-02-03', count: 893497 },
+          { date: '2026-02-04', count: 935510 },
+          { date: '2026-02-05', count: 973481 },
+          { date: '2026-02-06', count: 1068250 },
+          { date: '2026-02-07', count: 1073420 },
+          { date: '2026-02-08', count: 1054209 },
+          { date: '2026-02-09', count: 1097390 },
+          { date: '2026-02-10', count: 1054598 },
+          { date: '2026-02-11', count: 1083702 },
+          { date: '2026-02-12', count: 1114987 },
+          { date: '2026-02-13', count: 584979 }
+        ],
+        status: 'healthy',
+        note: '100% of MNTN (PT=22) impressions have null/0 publisher — known platform-level data gap'
+      },
+      {
+        name: 'CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS',
+        schema: 'QUORUMDB.SEGMENT_DATA',
+        totalRows: 1298194,
+        latestDate: '2026-02-09',
+        dateColumn: 'LOG_DATE',
+        recentRows: null,
+        recentPeriod: null,
+        cadence: 'weekly',
+        dailyVolumes: [
+          { date: '2026-01-05', count: 1041726 },
+          { date: '2026-01-12', count: 1533999 },
+          { date: '2026-01-19', count: 1736656 },
+          { date: '2026-01-26', count: 1161100 },
+          { date: '2026-02-02', count: 2720995 },
+          { date: '2026-02-09', count: 1298194 }
+        ],
+        status: 'healthy',
+        note: 'Agency 2514 — 18 advertisers. Weekly cadence.',
+        advertisers: 18
+      }
+    ],
+    notes: [
+      'MNTN has the most complex data path — 3 different sources',
+      'XANDR_IMPRESSION_LOG (PT=22) is the real-time impression feed — current through today (585K so far)',
+      'Daily XANDR volumes stable at ~1M/day, ramping up from ~450K in late Jan',
+      'Weekly stats (Agency 2514) latest is Feb 9 — 1.3M rows, 18 advertisers',
+      '100% of MNTN (PT=22) impressions have null/0 publisher — this is a known MNTN platform-level data gap',
+      'S3 bucket mntn-data-drop is active for raw data delivery',
+      'Next weekly stats expected: Feb 16'
+    ]
+  }
+};
+
+// ============================================================
+// HEALTH LOGIC
+// ============================================================
+
+function calculateStaleness(dateStr) {
+  if (!dateStr) return null;
+  const latest = new Date(dateStr + 'T00:00:00Z');
+  const now = new Date();
+  const diffMs = now - latest;
+  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+  return diffDays;
+}
+
+function getStatus(table) {
+  if (table.status && table.status !== 'auto') return table.status;
+  const staleDays = calculateStaleness(table.latestDate);
+  if (staleDays === null) return 'healthy';
+  if (table.cadence === 'weekly') {
+    if (staleDays <= 8) return 'healthy';
+    if (staleDays <= 14) return 'warning';
+    return 'critical';
+  }
+  // daily
+  if (staleDays <= 1) return 'healthy';
+  if (staleDays <= 3) return 'warning';
+  return 'critical';
+}
+
+function getClientOverallStatus(clientKey) {
+  const client = CLIENT_DATA[clientKey];
+  const statuses = client.tables.map(t => getStatus(t));
+  if (statuses.includes('critical')) return 'critical';
+  if (statuses.includes('warning')) return 'warning';
+  if (statuses.includes('stale')) return 'stale';
+  return 'healthy';
+}
+
+function getStatusText(status) {
+  switch(status) {
+    case 'healthy': return 'Healthy';
+    case 'warning': return 'Warning';
+    case 'critical': return 'Critical';
+    case 'stale': return 'Stale';
+    default: return 'Unknown';
+  }
+}
+
+function formatNumber(n) {
+  if (n === null || n === undefined) return '—';
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return n.toLocaleString();
+}
+
+function formatDate(dateStr) {
+  if (!dateStr) return '—';
+  const d = new Date(dateStr + 'T00:00:00Z');
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return `${months[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
+}
+
+function getLatestDate(client) {
+  let latest = null;
+  for (const t of client.tables) {
+    if (t.latestDate && (!latest || t.latestDate > latest)) {
+      latest = t.latestDate;
+    }
+  }
+  return latest;
+}
+
+function staleDaysText(dateStr) {
+  const days = calculateStaleness(dateStr);
+  if (days === null) return '';
+  if (days === 0) return 'Today';
+  if (days === 1) return '1 day ago';
+  return `${days} days ago`;
+}
+
+// ============================================================
+// RENDER FUNCTIONS
+// ============================================================
+
+let activeClient = null;
+
+function renderOverviewCards() {
+  const grid = document.getElementById('overviewGrid');
+  grid.innerHTML = '';
+
+  const clientKeys = ['attain', 'lotlinx', 'paramount', 'causal', 'mntn'];
+  let alerts = [];
+
+  clientKeys.forEach(key => {
+    const client = CLIENT_DATA[key];
+    const status = getClientOverallStatus(key);
+    const latestDate = getLatestDate(client);
+    const staleText = staleDaysText(latestDate);
+
+    if (status === 'critical') {
+      alerts.push(`${client.name}: data critically stale (${staleText})`);
+    }
+
+    const card = document.createElement('div');
+    card.className = `overview-card ${activeClient === key ? 'active' : ''}`;
+    card.onclick = () => selectClient(key);
+
+    card.innerHTML = `
+      <div class="status-bar ${status}"></div>
+      <div class="client-name">${client.name}</div>
+      <div class="transfer-type">${client.mechanism}</div>
+      <div class="status-row">
+        <span class="status-dot ${status}"></span>
+        <span class="status-label ${status}">${getStatusText(status)}</span>
+      </div>
+      <div class="freshness">Latest: ${formatDate(latestDate)} ${staleText ? '(' + staleText + ')' : ''}</div>
+      <div class="revenue">${client.revenue}</div>
+    `;
+
+    grid.appendChild(card);
+  });
+
+  // Alert banner
+  const banner = document.getElementById('alertBanner');
+  if (alerts.length > 0) {
+    document.getElementById('alertMessage').textContent = alerts.join(' | ');
+    banner.classList.add('visible');
+  } else {
+    banner.classList.remove('visible');
+  }
+}
+
+function renderSparkline(volumes, color) {
+  if (!volumes || volumes.length === 0) return '<span style="color: var(--text-muted); font-size: 12px;">No daily data</span>';
+
+  const maxVal = Math.max(...volumes.map(v => v.count));
+  const bars = volumes.map((v, i) => {
+    const height = Math.max(4, (v.count / maxVal) * 36);
+    const barColor = color || 'var(--accent-blue)';
+    return `<div class="spark-bar" style="height: ${height}px; background: ${barColor};">
+      <div class="tooltip">${v.date}: ${formatNumber(v.count)}</div>
+    </div>`;
+  }).join('');
+
+  return `<div class="sparkline-container">${bars}</div>`;
+}
+
+function renderClientDetail(key) {
+  const client = CLIENT_DATA[key];
+  const container = document.getElementById('detailContainer');
+
+  const badgeHtml = client.badges.map(b => {
+    const labels = { snowflake: 'Snowflake Share', s3: 'S3', xandr: 'XANDR', weekly: 'Weekly Stats' };
+    return `<span class="badge badge-${b}">${labels[b]}</span>`;
+  }).join('');
+
+  // KPIs
+  const totalRows = client.tables.reduce((sum, t) => sum + (t.totalRows || 0), 0);
+  const latestDate = getLatestDate(client);
+  const tableCount = client.tables.length;
+  const status = getClientOverallStatus(key);
+
+  const colors = {
+    attain: 'var(--accent-blue)',
+    lotlinx: 'var(--accent-orange)',
+    paramount: 'var(--accent-purple)',
+    causal: 'var(--accent-cyan)',
+    mntn: 'var(--accent-green)'
+  };
+
+  // Table rows
+  const tableRows = client.tables.map(t => {
+    const tStatus = getStatus(t);
+    const stale = staleDaysText(t.latestDate);
+    return `
+      <div class="table-card">
+        <div>
+          <div class="table-name">${t.name}</div>
+          <div class="table-schema">${t.schema}${t.note ? ' — ' + t.note : ''}</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value">${formatNumber(t.totalRows)}</div>
+          <div class="metric-label">Total Rows</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value ${tStatus}">${formatDate(t.latestDate)}</div>
+          <div class="metric-label">${stale || t.cadence}</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value">${t.recentRows ? formatNumber(t.recentRows) + ' / ' + t.recentPeriod : t.cadence}</div>
+          <div class="metric-label">${t.recentRows ? 'Recent Volume' : 'Cadence'}</div>
+        </div>
+        <div>${renderSparkline(t.dailyVolumes, colors[key])}</div>
+      </div>
+    `;
+  }).join('');
+
+  // Notes
+  const notesHtml = client.notes.map(n => `<li>${n}</li>`).join('');
+
+  container.innerHTML = `
+    <div class="client-detail active">
+      <div class="detail-header">
+        <h2>${client.name} ${badgeHtml}</h2>
+        <div class="mechanism-info">${client.mechanismDetail}</div>
+      </div>
+
+      <div class="detail-kpis">
+        <div class="kpi-card">
+          <div class="kpi-label">Overall Status</div>
+          <div class="kpi-value" style="color: var(--${status})">${getStatusText(status)}</div>
+          <div class="kpi-sub">${tableCount} table${tableCount > 1 ? 's' : ''} monitored</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Latest Data</div>
+          <div class="kpi-value">${formatDate(latestDate)}</div>
+          <div class="kpi-sub">${staleDaysText(latestDate)}</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Total Rows</div>
+          <div class="kpi-value">${formatNumber(totalRows)}</div>
+          <div class="kpi-sub">Across all tables</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Revenue</div>
+          <div class="kpi-value" style="font-size: 18px;">${client.revenue}</div>
+          <div class="kpi-sub">Monthly</div>
+        </div>
+      </div>
+
+      <div class="tables-grid">
+        ${tableRows}
+      </div>
+
+      <div class="notes-section">
+        <h3>Notes & Known Issues</h3>
+        <ul>${notesHtml}</ul>
+      </div>
+    </div>
+  `;
+}
+
+function selectClient(key) {
+  activeClient = key;
+  renderOverviewCards();
+  renderClientDetail(key);
+}
+
+async function refreshAll() {
+  const btn = document.getElementById('refreshBtn');
+  btn.classList.add('loading');
+  btn.disabled = true;
+  document.getElementById('loadingMessage').textContent = 'Querying Snowflake for live data...';
+  document.getElementById('loadingOverlay').classList.add('active');
+
+  try {
+    const resp = await fetch('/api/client-health');
+    const result = await resp.json();
+
+    if (result.success && result.data) {
+      // Merge live data into CLIENT_DATA
+      Object.keys(result.data).forEach(key => {
+        const live = result.data[key];
+        if (CLIENT_DATA[key]) {
+          // Update each table with live data
+          live.tables.forEach((liveTable, i) => {
+            if (CLIENT_DATA[key].tables[i]) {
+              const t = CLIENT_DATA[key].tables[i];
+              if (liveTable.latestDate) t.latestDate = liveTable.latestDate;
+              if (liveTable.totalRows !== null) t.totalRows = liveTable.totalRows;
+              if (liveTable.recentRows !== null) {
+                t.recentRows = liveTable.recentRows;
+                t.recentPeriod = 'today';
+              }
+              if (liveTable.dailyVolumes && liveTable.dailyVolumes.length > 0) {
+                t.dailyVolumes = liveTable.dailyVolumes;
+              }
+              if (liveTable.advertisers !== null) t.advertisers = liveTable.advertisers;
+              t.status = liveTable.status || t.status;
+            }
+          });
+        }
+      });
+
+      renderOverviewCards();
+      if (activeClient) renderClientDetail(activeClient);
+
+      const now = new Date();
+      const cachedLabel = result.cached ? ' (cached)' : '';
+      document.getElementById('lastUpdated').textContent =
+        `Data as of: ${now.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} ${now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })} (live Snowflake${cachedLabel})`;
+    } else {
+      // Fallback: recalculate from static snapshot
+      refreshFromSnapshot();
+    }
+  } catch (err) {
+    console.warn('Live refresh failed, using snapshot:', err);
+    refreshFromSnapshot();
+  }
+
+  document.getElementById('loadingOverlay').classList.remove('active');
+  btn.classList.remove('loading');
+  btn.disabled = false;
+}
+
+function refreshFromSnapshot() {
+  // Fallback: recalculate statuses from static data
+  Object.keys(CLIENT_DATA).forEach(key => {
+    CLIENT_DATA[key].tables.forEach(t => {
+      if (t.status !== 'warning' || !t.note) {
+        const days = calculateStaleness(t.latestDate);
+        if (days !== null) {
+          if (t.cadence === 'weekly') {
+            t.status = days <= 8 ? 'healthy' : days <= 14 ? 'warning' : 'critical';
+          } else {
+            t.status = days <= 1 ? 'healthy' : days <= 3 ? 'warning' : 'critical';
+          }
+        }
+      }
+    });
+  });
+  renderOverviewCards();
+  if (activeClient) renderClientDetail(activeClient);
+  const now = new Date();
+  document.getElementById('lastUpdated').textContent =
+    `Data as of: ${now.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} ${now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })} (snapshot — API unavailable)`;
+}
+
+// ============================================================
+// INIT
+// ============================================================
+
+function switchView(view) {
+  const tabs = document.querySelectorAll('.view-tab');
+  const viewMap = ['clients', 'gaps', 'guide'];
+  tabs.forEach((t, i) => {
+    t.classList.toggle('active', view === viewMap[i]);
+  });
+
+  document.getElementById('detailContainer').style.display = view === 'clients' ? 'block' : 'none';
+  document.getElementById('gapsContainer').style.display = view === 'gaps' ? 'block' : 'none';
+  document.getElementById('guideContainer').style.display = view === 'guide' ? 'block' : 'none';
+}
+
+function init() {
+  renderOverviewCards();
+  selectClient('attain'); // Default to first client
+
+  document.getElementById('lastUpdated').textContent =
+    `Data as of: Loading live data...`;
+
+  // Auto-refresh from API on page load
+  refreshAll();
+}
+
+init();
+</script>
+</body>
+</html>
