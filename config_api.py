@@ -235,6 +235,107 @@ def get_unmapped_webpixels():
 
 
 # =============================================================================
+# WEB PIXEL PREVIEW (for configure modal)
+# =============================================================================
+@config_bp.route('/pixel-preview', methods=['GET'])
+def get_pixel_preview():
+    """
+    Returns sample events and event type breakdown for a domain,
+    plus detected tag type. Used in the configure modal.
+    """
+    try:
+        agency_id = request.args.get('agency_id')
+        domain = request.args.get('domain', '').lower().strip()
+
+        if not agency_id or not domain:
+            return jsonify({'success': False, 'error': 'agency_id and domain required'}), 400
+
+        agency_id = int(agency_id)
+        conn = get_config_connection()
+        cursor = conn.cursor()
+
+        # Event type breakdown
+        cursor.execute("""
+            SELECT
+                COALESCE(EVENT_TYPE, 'unknown') as EVENT_TYPE,
+                COUNT(*) as CNT,
+                COUNT(DISTINCT CLIENT_IP) as UNIQUE_IPS
+            FROM QUORUMDB.DERIVED_TABLES.WEBPIXEL_EVENTS
+            WHERE AGENCY_ID = %s
+              AND EVENT_TIMESTAMP >= DATEADD(day, -7, CURRENT_TIMESTAMP())
+              AND LOWER(SPLIT_PART(SPLIT_PART(PAGE_URL, '://', 2), '/', 1)) = %s
+            GROUP BY EVENT_TYPE
+            ORDER BY CNT DESC
+        """, (agency_id, domain))
+        event_types = [{'event_type': r[0], 'count': r[1], 'unique_ips': r[2]}
+                       for r in cursor.fetchall()]
+
+        # Sample recent events (5 rows)
+        cursor.execute("""
+            SELECT
+                EVENT_TIMESTAMP,
+                PAGE_URL,
+                EVENT_TYPE,
+                UTM_SOURCE,
+                UTM_MEDIUM,
+                UTM_CAMPAIGN,
+                TRAFFIC_SOURCE,
+                CONVERSION_VALUE,
+                ALL_PARAMETERS::STRING as PARAMS
+            FROM QUORUMDB.DERIVED_TABLES.WEBPIXEL_EVENTS
+            WHERE AGENCY_ID = %s
+              AND EVENT_TIMESTAMP >= DATEADD(day, -3, CURRENT_TIMESTAMP())
+              AND LOWER(SPLIT_PART(SPLIT_PART(PAGE_URL, '://', 2), '/', 1)) = %s
+            ORDER BY EVENT_TIMESTAMP DESC
+            LIMIT 5
+        """, (agency_id, domain))
+
+        columns = [desc[0] for desc in cursor.description]
+        samples = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        # Detect tag type from sample params
+        detected_tag = 'STANDARD'
+        for s in samples:
+            params = (s.get('PARAMS') or '').lower()
+            page = (s.get('PAGE_URL') or '').lower()
+            if 'shopify' in params or 'checkout_completed' in params:
+                detected_tag = 'SHOPIFY'; break
+            elif 'demandware' in params or 'demandware' in page:
+                detected_tag = 'SFCC'; break
+            elif 'woocommerce' in params or 'wc-' in params:
+                detected_tag = 'WOOCOMMERCE'; break
+            elif 'squarespace' in params:
+                detected_tag = 'SQUARESPACE'; break
+            elif 'ticketmaster' in params:
+                detected_tag = 'TICKETMASTER'; break
+            elif 'wix' in params:
+                detected_tag = 'WIX'; break
+            elif 'gtm' in params or 'google_tag' in params:
+                detected_tag = 'GTM'; break
+
+        # Clean up sample params to keep payload small
+        for s in samples:
+            p = s.get('PARAMS', '')
+            if p and len(p) > 200:
+                s['PARAMS'] = p[:200] + '...'
+
+        cursor.close()
+        conn.close()
+
+        return jsonify({
+            'success': True,
+            'domain': domain,
+            'event_types': event_types,
+            'samples': samples,
+            'detected_tag': detected_tag,
+            'total_events_7d': sum(e['count'] for e in event_types)
+        })
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# =============================================================================
 # PANEL 2: POI BRAND SEARCH
 # =============================================================================
 @config_bp.route('/poi-brands', methods=['GET'])

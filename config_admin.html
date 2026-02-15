@@ -328,35 +328,9 @@
                                         <option value="PENDING">PENDING</option>
                                     </select>
                                 </div>
-                                <div class="form-group">
-                                    <div class="form-label">Exposure Source <span style="font-weight:normal; color:#8b98a5; font-size:11px;" title="What type of exposure data drives attribution for this advertiser">(?)</span></div>
-                                    <select class="form-input" id="cfgEditExposureSource">
-                                        <option value="">— not set —</option>
-                                        <option value="IMPRESSION">IMPRESSION — Ad impression log (V2)</option>
-                                        <option value="WEB">WEB — Web pixel events</option>
-                                        <option value="OOH">OOH — Out-of-home exposure</option>
-                                    </select>
-                                </div>
-                                <div class="form-group">
-                                    <div class="form-label">Web Pixel Integration Type</div>
-                                    <select class="form-input" id="cfgEditWebPixelType">
-                                        <option value="">— not set —</option>
-                                        <option value="JAVASCRIPT">JAVASCRIPT</option>
-                                        <option value="IMAGE">IMAGE</option>
-                                        <option value="SERVER_SIDE">SERVER_SIDE</option>
-                                    </select>
-                                </div>
                             </div>
-                            <div style="display:flex; gap:6px; align-items:center; margin-top:12px;">
-                                <label style="font-size:12px; color:#8b98a5; display:flex; align-items:center; gap:4px;">
-                                    <input type="checkbox" id="cfgEditStoreVisit"> Store Visit Attribution
-                                </label>
-                                <label style="font-size:12px; color:#8b98a5; display:flex; align-items:center; gap:4px; margin-left:12px;">
-                                    <input type="checkbox" id="cfgEditWebVisit"> Web Visit Attribution
-                                </label>
-                                <label style="font-size:12px; color:#8b98a5; display:flex; align-items:center; gap:4px; margin-left:12px;">
-                                    <input type="checkbox" id="cfgEditImprTracking"> Impression Tracking
-                                </label>
+                            <div style="margin-top:12px; padding:10px 12px; background:#16202a; border-radius:6px; font-size:11px; color:#8b98a5;">
+                                <strong style="color:#e7e9ea;">Auto-derived from assignments:</strong> Exposure source, attribution flags, and pixel type are set automatically based on campaign mappings, POI segments, and web pixel URLs configured for this advertiser.
                             </div>
                             <div style="margin-top:16px; display:flex; gap:8px; justify-content:flex-end;">
                                 <button class="btn btn-secondary" onclick="toggleConfigEdit()">Cancel</button>
@@ -418,23 +392,31 @@
                 <button class="modal-close" onclick="closeModal('modalConfigDomain')">&times;</button>
             </div>
             <div class="modal-body">
-                <div class="form-group">
-                    <div class="form-label">Agency</div>
-                    <div class="form-value" id="cdAgency"></div>
+                <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-bottom:16px;">
+                    <div class="form-group">
+                        <div class="form-label">Domain</div>
+                        <div class="form-value" id="cdDomain" style="font-weight:600;font-size:15px"></div>
+                    </div>
+                    <div class="form-group">
+                        <div class="form-label">7-day Events</div>
+                        <div class="form-value" id="cdEvents"></div>
+                    </div>
                 </div>
-                <div class="form-group">
-                    <div class="form-label">Domain</div>
-                    <div class="form-value" id="cdDomain"></div>
+
+                <!-- Event preview -->
+                <div id="cdPreview" style="margin-bottom:16px;">
+                    <div class="form-label" style="margin-bottom:6px">Event Activity</div>
+                    <div id="cdPreviewBody" style="background:#0f1419; border:1px solid #2f3942; border-radius:6px; padding:10px; font-size:12px; max-height:180px; overflow-y:auto;">
+                        <div class="loading"><div class="spinner"></div> Loading preview...</div>
+                    </div>
                 </div>
+
                 <div class="form-group">
-                    <div class="form-label">7-day Events</div>
-                    <div class="form-value" id="cdEvents"></div>
+                    <div class="form-label">Detected Tag Type</div>
+                    <div class="form-value" id="cdTagType" style="font-size:13px"></div>
                 </div>
-                <div class="form-group">
-                    <div class="form-label">Status</div>
-                    <div class="form-value" id="cdStatus"></div>
-                </div>
-                <div class="form-group">
+
+                <div class="form-group" style="margin-top:12px; padding-top:12px; border-top:1px solid #2f3942;">
                     <div class="form-label">Map to Quorum Advertiser</div>
                     <div class="autocomplete-wrap">
                         <input type="text" class="form-input" id="cdAdvertiserSearch" placeholder="Search advertiser name..." oninput="searchAdvertisers('cd')">
@@ -892,15 +874,54 @@
         // =====================================================
         function openConfigDomainModal(row) {
             configDomainData = row;
-            document.getElementById('cdAgency').textContent = (row.AGENCY_NAME || row.AGENCY_ID || '—');
-            document.getElementById('cdDomain').textContent = row.BASE_DOMAIN || row.DOMAIN || row.URL || '';
-            document.getElementById('cdEvents').textContent = fmt(row.EVENT_COUNT_7D || row.EVENTS_30D);
-            document.getElementById('cdStatus').textContent = row.DETECTED_PLATFORM ? `${row.DETECTED_PLATFORM} — Unmapped` : 'Unmapped';
+            const domain = row.BASE_DOMAIN || row.DOMAIN || row.URL || '';
+            document.getElementById('cdDomain').textContent = domain;
+            document.getElementById('cdEvents').textContent = fmt(row.EVENT_COUNT_7D || row.EVENTS_30D) + ' events / ' + fmt(row.UNIQUE_DEVICES_7D || 0) + ' unique IPs';
+            document.getElementById('cdTagType').innerHTML = '<span style="color:#8b98a5">Loading...</span>';
+            document.getElementById('cdPreviewBody').innerHTML = '<div class="loading"><div class="spinner"></div> Loading preview...</div>';
             document.getElementById('cdAdvertiserSearch').value = '';
             document.getElementById('cdAdvertiserId').value = '';
             document.getElementById('cdSelectedAdvertiser').style.display = 'none';
             document.getElementById('cdAutocomplete').classList.remove('show');
             openModal('modalConfigDomain');
+
+            // Fetch preview data
+            const agencyId = row.AGENCY_ID || document.getElementById('pixelAgencyFilter').value;
+            fetch(`${API}/api/config/pixel-preview?agency_id=${agencyId}&domain=${encodeURIComponent(domain)}`)
+                .then(r => r.json())
+                .then(json => {
+                    if (!json.success) { document.getElementById('cdPreviewBody').innerHTML = `<div style="color:#b45309">${json.error}</div>`; return; }
+
+                    // Tag type badge
+                    const tagColors = { SHOPIFY:'#96bf48', SFCC:'#00a1e0', GTM:'#4285f4', WOOCOMMERCE:'#7f54b3', SQUARESPACE:'#222', WIX:'#0C6EFC', TICKETMASTER:'#026CDF', STANDARD:'#3d5466' };
+                    const tag = json.detected_tag || 'STANDARD';
+                    document.getElementById('cdTagType').innerHTML = `<span style="background:${tagColors[tag]||tagColors.STANDARD};color:#fff;padding:3px 8px;border-radius:4px;font-size:11px;font-weight:600">${tag}</span>`;
+
+                    // Event type breakdown
+                    let html = '<div style="margin-bottom:8px">';
+                    json.event_types.forEach(e => {
+                        const pct = json.total_events_7d > 0 ? Math.round(e.count * 100 / json.total_events_7d) : 0;
+                        html += `<span style="display:inline-block;margin-right:12px;margin-bottom:4px"><span style="color:#1d9bf0;font-weight:600">${e.event_type}</span> <span style="color:#8b98a5">${fmt(e.count)} (${pct}%)</span></span>`;
+                    });
+                    html += '</div>';
+
+                    // Sample rows
+                    if (json.samples.length > 0) {
+                        html += '<table style="width:100%;font-size:11px"><thead><tr><th style="text-align:left;color:#8b98a5;padding:2px 4px">Time</th><th style="text-align:left;color:#8b98a5;padding:2px 4px">Page</th><th style="text-align:left;color:#8b98a5;padding:2px 4px">Event</th><th style="text-align:left;color:#8b98a5;padding:2px 4px">UTM Source</th></tr></thead><tbody>';
+                        json.samples.forEach(s => {
+                            const time = s.EVENT_TIMESTAMP ? new Date(s.EVENT_TIMESTAMP).toLocaleString() : '—';
+                            const page = (s.PAGE_URL || '').replace(/^https?:\/\/[^/]+/, '').substring(0, 60) || '/';
+                            html += `<tr><td style="padding:2px 4px;color:#8b98a5;white-space:nowrap">${time}</td><td style="padding:2px 4px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(s.PAGE_URL || '')}">${esc(page)}</td><td style="padding:2px 4px;color:#1d9bf0">${esc(s.EVENT_TYPE || '—')}</td><td style="padding:2px 4px">${esc(s.UTM_SOURCE || '—')}</td></tr>`;
+                        });
+                        html += '</tbody></table>';
+                    }
+
+                    document.getElementById('cdPreviewBody').innerHTML = html;
+                })
+                .catch(e => {
+                    document.getElementById('cdPreviewBody').innerHTML = `<div style="color:#b45309">Preview unavailable</div>`;
+                    document.getElementById('cdTagType').innerHTML = '<span style="color:#8b98a5">Unknown</span>';
+                });
         }
 
         async function submitConfigDomain() {
@@ -940,6 +961,22 @@
             const input = document.getElementById(prefix + 'AdvertiserSearch');
             const dropdown = document.getElementById(prefix + 'Autocomplete');
             const q = input.value.trim();
+
+            // Clear stale selection when user starts typing a new search
+            const hiddenId = document.getElementById(prefix + 'AdvertiserId');
+            if (hiddenId && hiddenId.value) {
+                hiddenId.value = '';
+                const selDiv = document.getElementById(prefix + 'SelectedAdvertiser');
+                if (selDiv) { selDiv.style.display = 'none'; selDiv.textContent = ''; }
+                // Config-specific: clear detail panel and cached data
+                if (prefix === 'cfg') {
+                    cfgCurrentData = null;
+                    const detail = document.getElementById('cfgDetailSection');
+                    if (detail) detail.style.display = 'none';
+                    const results = document.getElementById('cfgResults');
+                    if (results) results.innerHTML = '<div class="empty">Search for an advertiser to view and edit their configuration.</div>';
+                }
+            }
 
             if (q.length < 2) { dropdown.classList.remove('show'); return; }
 
@@ -1127,11 +1164,6 @@
                     document.getElementById('cfgEditMatchStrategy').value = cfgCurrentData.MATCH_STRATEGY || 'HOUSEHOLD';
                     document.getElementById('cfgEditImprStrategy').value = cfgCurrentData.IMPRESSION_JOIN_STRATEGY || 'ADM_PREFIX';
                     document.getElementById('cfgEditStatus').value = cfgCurrentData.CONFIG_STATUS || 'ACTIVE';
-                    document.getElementById('cfgEditExposureSource').value = cfgCurrentData.EXPOSURE_SOURCE || '';
-                    document.getElementById('cfgEditWebPixelType').value = cfgCurrentData.WEB_PIXEL_INTEGRATION_TYPE || '';
-                    document.getElementById('cfgEditStoreVisit').checked = !!cfgCurrentData.HAS_STORE_VISIT_ATTRIBUTION;
-                    document.getElementById('cfgEditWebVisit').checked = !!cfgCurrentData.HAS_WEB_VISIT_ATTRIBUTION;
-                    document.getElementById('cfgEditImprTracking').checked = !!cfgCurrentData.HAS_IMPRESSION_TRACKING;
                 }
                 form.style.display = 'block';
             } else {
@@ -1149,11 +1181,6 @@
                 match_strategy: document.getElementById('cfgEditMatchStrategy').value,
                 impression_join_strategy: document.getElementById('cfgEditImprStrategy').value,
                 config_status: document.getElementById('cfgEditStatus').value,
-                exposure_source: document.getElementById('cfgEditExposureSource').value || null,
-                web_pixel_integration_type: document.getElementById('cfgEditWebPixelType').value || null,
-                has_store_visit_attribution: document.getElementById('cfgEditStoreVisit').checked,
-                has_web_visit_attribution: document.getElementById('cfgEditWebVisit').checked,
-                has_impression_tracking: document.getElementById('cfgEditImprTracking').checked,
             };
 
             try {
