@@ -216,21 +216,34 @@ def get_advertisers():
         strategy = get_impression_strategy(agency_id, conn)
 
         if strategy == STRATEGY_ADM_PREFIX:
-            # Row-level: use PARAMOUNT_DASHBOARD_SUMMARY_STATS for names + counts
+            # Row-level: join V2 impressions to PCM campaign mapping at query time
             cursor.execute("""
                 SELECT
-                    QUORUM_ADVERTISER_ID as ADVERTISER_ID,
-                    MAX(ADVERTISER_NAME) as ADVERTISER_NAME,
-                    SUM(IMPRESSIONS) as IMPRESSIONS,
-                    SUM(STORE_VISITS) as STORE_VISITS,
-                    SUM(SITE_VISITS) as WEB_VISITS,
-                    MIN(DATE) as MIN_DATE, MAX(DATE) as MAX_DATE
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_DASHBOARD_SUMMARY_STATS
-                WHERE DATE BETWEEN %(start_date)s AND %(end_date)s
-                GROUP BY QUORUM_ADVERTISER_ID
-                HAVING SUM(IMPRESSIONS) > 0
+                    m.QUORUM_ADVERTISER_ID as ADVERTISER_ID,
+                    COALESCE(MAX(aa.COMP_NAME), 'Advertiser ' || m.QUORUM_ADVERTISER_ID) as ADVERTISER_NAME,
+                    COUNT(*) as IMPRESSIONS,
+                    0 as STORE_VISITS,
+                    0 as WEB_VISITS,
+                    MIN(v.AUCTION_TIMESTAMP::DATE) as MIN_DATE,
+                    MAX(v.AUCTION_TIMESTAMP::DATE) as MAX_DATE
+                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+                JOIN (
+                    SELECT DSP_ADVERTISER_ID, AGENCY_ID,
+                           MAX(QUORUM_ADVERTISER_ID) as QUORUM_ADVERTISER_ID
+                    FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
+                    WHERE AGENCY_ID = %(agency_id)s
+                      AND QUORUM_ADVERTISER_ID IS NOT NULL AND QUORUM_ADVERTISER_ID != 0
+                    GROUP BY DSP_ADVERTISER_ID, AGENCY_ID
+                ) m ON v.DSP_ADVERTISER_ID = m.DSP_ADVERTISER_ID
+                   AND v.AGENCY_ID = m.AGENCY_ID
+                LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa
+                    ON m.QUORUM_ADVERTISER_ID = aa.ID
+                WHERE v.AGENCY_ID = %(agency_id)s
+                  AND v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
+                GROUP BY m.QUORUM_ADVERTISER_ID
+                HAVING COUNT(*) > 0
                 ORDER BY 3 DESC
-            """, {'start_date': start_date, 'end_date': end_date})
+            """, {'agency_id': agency_id, 'start_date': start_date, 'end_date': end_date})
         else:
             # Pre-aggregated path
             cursor.execute("""
@@ -1311,11 +1324,20 @@ def get_agency_timeseries():
 
         rows_p_daily = []
         if row_level_agencies:
-            cursor.execute("""
-                SELECT DATE::DATE as DT, 1480 as AGENCY_ID, SUM(IMPRESSIONS) as TOTAL_IMPRESSIONS
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_DASHBOARD_SUMMARY_STATS
-                WHERE DATE BETWEEN %(start_date)s AND %(end_date)s
-                GROUP BY DATE::DATE HAVING TOTAL_IMPRESSIONS > 0
+            rl_ids = ','.join(str(int(a)) for a in row_level_agencies)
+            cursor.execute(f"""
+                SELECT v.AUCTION_TIMESTAMP::DATE as DT, v.AGENCY_ID, COUNT(*) as TOTAL_IMPRESSIONS
+                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+                JOIN (
+                    SELECT DISTINCT DSP_ADVERTISER_ID, AGENCY_ID
+                    FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
+                    WHERE AGENCY_ID IN ({rl_ids})
+                      AND QUORUM_ADVERTISER_ID IS NOT NULL AND QUORUM_ADVERTISER_ID != 0
+                ) m ON v.DSP_ADVERTISER_ID = m.DSP_ADVERTISER_ID
+                   AND v.AGENCY_ID = m.AGENCY_ID
+                WHERE v.AGENCY_ID IN ({rl_ids})
+                  AND v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
+                GROUP BY v.AUCTION_TIMESTAMP::DATE, v.AGENCY_ID HAVING COUNT(*) > 0
             """, {'start_date': start_date, 'end_date': end_date})
             rows_p_daily = cursor.fetchall()
 
@@ -1390,11 +1412,25 @@ def get_advertiser_timeseries():
         if strategy == STRATEGY_ADM_PREFIX:
             cursor.execute("""
                 WITH daily AS (
-                    SELECT DATE::DATE as DT, QUORUM_ADVERTISER_ID as AID,
-                           MAX(ADVERTISER_NAME) as ANAME, SUM(IMPRESSIONS) as IMPS
-                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_DASHBOARD_SUMMARY_STATS
-                    WHERE DATE BETWEEN %(start_date)s AND %(end_date)s
-                    GROUP BY DATE::DATE, QUORUM_ADVERTISER_ID HAVING SUM(IMPRESSIONS) > 0
+                    SELECT v.AUCTION_TIMESTAMP::DATE as DT,
+                           m.QUORUM_ADVERTISER_ID as AID,
+                           COALESCE(MAX(aa.COMP_NAME), 'Advertiser ' || m.QUORUM_ADVERTISER_ID) as ANAME,
+                           COUNT(*) as IMPS
+                    FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+                    JOIN (
+                        SELECT DSP_ADVERTISER_ID, AGENCY_ID,
+                               MAX(QUORUM_ADVERTISER_ID) as QUORUM_ADVERTISER_ID
+                        FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
+                        WHERE AGENCY_ID = %(agency_id)s
+                          AND QUORUM_ADVERTISER_ID IS NOT NULL AND QUORUM_ADVERTISER_ID != 0
+                        GROUP BY DSP_ADVERTISER_ID, AGENCY_ID
+                    ) m ON v.DSP_ADVERTISER_ID = m.DSP_ADVERTISER_ID
+                       AND v.AGENCY_ID = m.AGENCY_ID
+                    LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa
+                        ON m.QUORUM_ADVERTISER_ID = aa.ID
+                    WHERE v.AGENCY_ID = %(agency_id)s
+                      AND v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
+                    GROUP BY v.AUCTION_TIMESTAMP::DATE, m.QUORUM_ADVERTISER_ID HAVING COUNT(*) > 0
                 ),
                 ranked AS (
                     SELECT AID, SUM(IMPS) as TOTAL_IMPS
@@ -1411,7 +1447,7 @@ def get_advertiser_timeseries():
                 GROUP BY d.DT,
                          CASE WHEN r.AID IS NOT NULL THEN d.AID ELSE -1 END,
                          CASE WHEN r.AID IS NOT NULL THEN d.ANAME ELSE 'Other' END
-            """, {'start_date': start_date, 'end_date': end_date})
+            """, {'agency_id': agency_id, 'start_date': start_date, 'end_date': end_date})
         else:
             cursor.execute("""
                 SELECT LOG_DATE::DATE as DT, w.ADVERTISER_ID,
