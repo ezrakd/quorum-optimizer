@@ -121,8 +121,8 @@ def get_unmapped_webpixels():
         conn = get_config_connection()
         cursor = conn.cursor()
 
-        # Set query timeout to 30s — this view can be slow
-        cursor.execute("ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = 30")
+        # Set aggressive timeout — this view has expensive LIKE pattern matching
+        cursor.execute("ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = 15")
 
         query = """
             SELECT *
@@ -135,10 +135,23 @@ def get_unmapped_webpixels():
             query += " AND AGENCY_ID = %(agency_id)s"
             params['agency_id'] = int(agency_id)
 
-        query += " ORDER BY EVENTS_30D DESC LIMIT 100"
+        query += " ORDER BY EVENTS_30D DESC LIMIT 50"
 
-        cursor.execute(query, params)
-        results = rows_to_dicts(cursor)
+        try:
+            cursor.execute(query, params)
+            results = rows_to_dicts(cursor)
+        except Exception as timeout_err:
+            err_str = str(timeout_err).lower()
+            if 'timeout' in err_str or 'cancel' in err_str:
+                cursor.close()
+                conn.close()
+                return jsonify({
+                    'success': True,
+                    'count': 0,
+                    'data': [],
+                    'warning': 'Web pixel view timed out. This view needs to be materialized for performance. Try filtering by agency_id.'
+                })
+            raise
 
         cursor.close()
         conn.close()
@@ -581,12 +594,15 @@ def get_advertiser_config():
                 c.LAST_IMPRESSION_AT, c.LAST_STORE_VISIT_AT, c.LAST_WEB_VISIT_AT,
                 c.CREATED_AT, c.UPDATED_AT,
                 a.COMP_NAME as ADVERTISER_NAME,
-                ag.COMP_NAME as AGENCY_NAME
+                ag.AGENCY_NAME
             FROM QUORUMDB.BASE_TABLES.REF_ADVERTISER_CONFIG c
             LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER a
-                ON c.ADVERTISER_ID = a.ID
-            LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER ag
-                ON c.AGENCY_ID = ag.ID AND ag.AG_ID = c.AGENCY_ID
+                ON c.ADVERTISER_ID = a.ID AND c.AGENCY_ID = a.ADVERTISER_ID
+            LEFT JOIN (
+                SELECT DISTINCT ADVERTISER_ID as AG_ID, AGENCY_NAME
+                FROM QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER
+                WHERE AGENCY_NAME IS NOT NULL
+            ) ag ON c.AGENCY_ID = ag.AG_ID
             WHERE 1=1
         """
         params = {}
@@ -640,7 +656,7 @@ def search_advertisers():
         query = """
             SELECT DISTINCT
                 aa.ID as ADVERTISER_ID,
-                aa.AG_ID as AGENCY_ID,
+                aa.ADVERTISER_ID as AGENCY_ID,
                 aa.COMP_NAME as ADVERTISER_NAME,
                 c.CONFIG_STATUS,
                 c.HAS_STORE_VISIT_ATTRIBUTION,
@@ -648,13 +664,13 @@ def search_advertisers():
                 c.HAS_IMPRESSION_TRACKING
             FROM QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa
             LEFT JOIN QUORUMDB.BASE_TABLES.REF_ADVERTISER_CONFIG c
-                ON aa.ID = c.ADVERTISER_ID AND aa.AG_ID = c.AGENCY_ID
+                ON aa.ID = c.ADVERTISER_ID AND aa.ADVERTISER_ID = c.AGENCY_ID
             WHERE aa.COMP_NAME ILIKE %(search)s
         """
         params = {'search': f'%{q}%'}
 
         if agency_id:
-            query += " AND aa.AG_ID = %(agency_id)s"
+            query += " AND aa.ADVERTISER_ID = %(agency_id)s"
             params['agency_id'] = int(agency_id)
 
         query += " ORDER BY aa.COMP_NAME LIMIT 25"
@@ -687,7 +703,7 @@ def get_scorecard():
         cursor.execute("""
             SELECT
                 COUNT(*) as TOTAL_ADVERTISERS,
-                SUM(CASE WHEN HAS_STORE_VISIT_ATTRIBUTION AND SEGMENT_COUNT > 0 THEN 1 ELSE 0 END) as STORE_VISIT_CONFIGURED,
+                SUM(CASE WHEN HAS_STORE_VISIT_ATTRIBUTION AND SEGMENT_COUNT > 0 AND CAMPAIGN_MAPPING_COUNT > 0 THEN 1 ELSE 0 END) as STORE_VISIT_CONFIGURED,
                 SUM(CASE WHEN HAS_WEB_VISIT_ATTRIBUTION AND WEB_PIXEL_URL_COUNT > 0 THEN 1 ELSE 0 END) as WEB_VISIT_CONFIGURED,
                 SUM(CASE WHEN HAS_IMPRESSION_TRACKING AND CAMPAIGN_MAPPING_COUNT > 0 THEN 1 ELSE 0 END) as IMPRESSION_CONFIGURED,
                 SUM(CASE WHEN CONFIG_STATUS = 'ACTIVE'
