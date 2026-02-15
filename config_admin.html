@@ -427,7 +427,7 @@
                     <div class="form-value" id="cdDomain"></div>
                 </div>
                 <div class="form-group">
-                    <div class="form-label">30-day Events</div>
+                    <div class="form-label">7-day Events</div>
                     <div class="form-value" id="cdEvents"></div>
                 </div>
                 <div class="form-group">
@@ -666,14 +666,17 @@
                 const agencies = [...new Set(json.data.filter(r => r.AGENCY_ID).map(r => JSON.stringify({ id: r.AGENCY_ID, name: r.AGENCY_NAME || r.AGENCY_ID })))].map(s => JSON.parse(s));
                 populateAgencyFilter('pixelAgencyFilter', agencies);
 
-                let html = '<table><thead><tr><th>Agency</th><th>Domain</th><th class="text-right">Events (7d)</th><th class="text-right">Devices (7d)</th><th>Last Seen</th><th></th></tr></thead><tbody>';
+                const platformColors = { SHOPIFY: '#96bf48', SQUARESPACE: '#222', WIX: '#0C6EFC', TICKETMASTER: '#026CDF', WOOCOMMERCE: '#7f54b3', STANDARD: '#3d5466' };
+                let html = '<table><thead><tr><th>Base Domain</th><th class="text-right">Events (7d)</th><th class="text-right">Unique IPs</th><th>Platform</th><th>Last Seen</th><th></th></tr></thead><tbody>';
                 json.data.forEach(r => {
                     const lastSeen = r.LAST_SEEN ? new Date(r.LAST_SEEN).toLocaleDateString() : '—';
+                    const platform = r.DETECTED_PLATFORM || 'STANDARD';
+                    const pColor = platformColors[platform] || platformColors.STANDARD;
                     html += `<tr class="clickable" onclick='openConfigDomainModal(${JSON.stringify(r).replace(/'/g, "&#39;")})'>
-                        <td>${esc(r.AGENCY_NAME || r.AGENCY_ID || '—')}</td>
-                        <td><span class="truncate">${esc(r.DOMAIN || '')}</span></td>
+                        <td><span class="truncate">${esc(r.BASE_DOMAIN || '')}</span></td>
                         <td class="text-right text-blue">${fmt(r.EVENT_COUNT_7D)}</td>
                         <td class="text-right">${fmt(r.UNIQUE_DEVICES_7D)}</td>
+                        <td><span class="status-badge" style="background:${pColor};color:#fff;font-size:10px;padding:2px 6px;border-radius:3px">${platform}</span></td>
                         <td>${lastSeen}</td>
                         <td><button class="btn btn-sm btn-primary">Configure</button></td>
                     </tr>`;
@@ -890,9 +893,9 @@
         function openConfigDomainModal(row) {
             configDomainData = row;
             document.getElementById('cdAgency').textContent = (row.AGENCY_NAME || row.AGENCY_ID || '—');
-            document.getElementById('cdDomain').textContent = row.DOMAIN || row.URL || '';
-            document.getElementById('cdEvents').textContent = fmt(row.EVENTS_30D);
-            document.getElementById('cdStatus').textContent = row.STATUS || row.ACTION_REQUIRED || 'Unmapped';
+            document.getElementById('cdDomain').textContent = row.BASE_DOMAIN || row.DOMAIN || row.URL || '';
+            document.getElementById('cdEvents').textContent = fmt(row.EVENT_COUNT_7D || row.EVENTS_30D);
+            document.getElementById('cdStatus').textContent = row.DETECTED_PLATFORM ? `${row.DETECTED_PLATFORM} — Unmapped` : 'Unmapped';
             document.getElementById('cdAdvertiserSearch').value = '';
             document.getElementById('cdAdvertiserId').value = '';
             document.getElementById('cdSelectedAdvertiser').style.display = 'none';
@@ -911,7 +914,7 @@
                     body: JSON.stringify({
                         agency_id: configDomainData.AGENCY_ID,
                         advertiser_id: parseInt(advertiserId),
-                        url: configDomainData.DOMAIN || configDomainData.URL,
+                        url: configDomainData.BASE_DOMAIN || configDomainData.DOMAIN || configDomainData.URL,
                         is_poi: false
                     })
                 });
