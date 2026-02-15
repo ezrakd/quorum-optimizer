@@ -543,26 +543,26 @@
                 const json = await res.json();
                 if (!json.success) return;
                 const d = json.data;
-                const total = d.TOTAL_ADVERTISERS || 1;
+                const active = d.ACTIVE_CONFIGS || 1;
 
-                const svPct = ((d.STORE_VISIT_CONFIGURED / total) * 100).toFixed(1);
-                const wvPct = ((d.WEB_VISIT_CONFIGURED / total) * 100).toFixed(1);
-                const imPct = ((d.IMPRESSION_CONFIGURED / total) * 100).toFixed(1);
+                const svPct = ((d.STORE_VISIT_CONFIGURED / active) * 100).toFixed(1);
+                const wvPct = ((d.WEB_VISIT_CONFIGURED / active) * 100).toFixed(1);
+                const imPct = ((d.IMPRESSION_CONFIGURED / active) * 100).toFixed(1);
 
                 document.getElementById('scStoreVisit').textContent = fmt(d.STORE_VISIT_CONFIGURED);
-                document.getElementById('scStoreVisitSub').textContent = `${svPct}% of ${fmt(total)} advertisers`;
+                document.getElementById('scStoreVisitSub').textContent = `${svPct}% of ${fmt(active)} active | ${fmt(d.POI_ASSIGNED || 0)} POI total`;
                 document.getElementById('scStoreVisitBar').style.width = svPct + '%';
 
                 document.getElementById('scWebVisit').textContent = fmt(d.WEB_VISIT_CONFIGURED);
-                document.getElementById('scWebVisitSub').textContent = `${wvPct}% of ${fmt(total)} advertisers`;
+                document.getElementById('scWebVisitSub').textContent = `${wvPct}% of ${fmt(active)} active`;
                 document.getElementById('scWebVisitBar').style.width = wvPct + '%';
 
                 document.getElementById('scImpression').textContent = fmt(d.IMPRESSION_CONFIGURED);
-                document.getElementById('scImpressionSub').textContent = `${imPct}% of ${fmt(total)} advertisers`;
+                document.getElementById('scImpressionSub').textContent = `${imPct}% of ${fmt(active)} active`;
                 document.getElementById('scImpressionBar').style.width = imPct + '%';
 
                 document.getElementById('scActive').textContent = fmt(d.ACTIVE_CONFIGS);
-                document.getElementById('scActiveSub').textContent = `across ${fmt(d.AGENCY_COUNT)} agencies`;
+                document.getElementById('scActiveSub').textContent = `across ${fmt(d.AGENCY_COUNT)} agencies (w/ campaigns or web pixels)`;
 
                 document.getElementById('scUnmapped').textContent = fmt(d.UNMAPPED_IMPRESSIONS);
 
@@ -1005,17 +1005,53 @@
 
         async function loadAdvertiserConfig() {
             const advId = document.getElementById('cfgAdvertiserId').value;
-            if (!advId) { showToast('Select an advertiser first', 'error'); return; }
+            const searchText = document.getElementById('cfgAdvertiserSearch').value.trim();
+            const agencyFilter = document.getElementById('cfgAgencyFilter').value;
+
+            if (!advId && !searchText) { showToast('Enter an advertiser name or select from autocomplete', 'error'); return; }
 
             const resultsDiv = document.getElementById('cfgResults');
             resultsDiv.innerHTML = '<div class="empty">Loading...</div>';
 
             try {
-                const res = await fetch(`${API}/api/config/advertiser-config?advertiser_id=${advId}`);
+                // If no advertiser selected yet, search by name first
+                if (!advId && searchText) {
+                    let searchUrl = `${API}/api/config/search-advertisers?q=${encodeURIComponent(searchText)}`;
+                    if (agencyFilter) searchUrl += `&agency_id=${agencyFilter}`;
+                    const searchRes = await fetch(searchUrl);
+                    const searchJson = await searchRes.json();
+                    if (!searchJson.success || searchJson.count === 0) {
+                        resultsDiv.innerHTML = '<div class="empty">No advertisers found matching that name.</div>';
+                        return;
+                    }
+                    // If exactly one result, use it; otherwise show matches
+                    if (searchJson.count === 1) {
+                        const match = searchJson.data[0];
+                        document.getElementById('cfgAdvertiserId').value = match.ADVERTISER_ID;
+                        document.getElementById('cfgAgencyId').value = match.AGENCY_ID || '';
+                        document.getElementById('cfgSelectedAdvertiser').textContent = `✓ ${match.ADVERTISER_NAME} (ID: ${match.ADVERTISER_ID})`;
+                        document.getElementById('cfgSelectedAdvertiser').style.display = 'block';
+                    } else {
+                        // Multiple matches — show list for user to pick
+                        resultsDiv.innerHTML = searchJson.data.map(r => `
+                            <div style="padding:10px 14px; border-bottom:1px solid #1e2732; cursor:pointer; transition:background 0.2s;"
+                                 onmouseover="this.style.background='#1e2732'" onmouseout="this.style.background=''"
+                                 onclick="selectAdvertiser('cfg', ${r.ADVERTISER_ID}, ${r.AGENCY_ID || 0}, '${esc(r.ADVERTISER_NAME || '')}')">
+                                <div style="font-weight:500;">${esc(r.ADVERTISER_NAME || '')} <span class="text-muted">(ID: ${r.ADVERTISER_ID})</span></div>
+                                <div style="font-size:11px; color:#8b98a5;">Agency: ${r.AGENCY_ID || '—'} | ${r.CONFIG_STATUS || 'No config'}</div>
+                            </div>
+                        `).join('');
+                        return;
+                    }
+                }
+
+                const finalAdvId = document.getElementById('cfgAdvertiserId').value;
+                const res = await fetch(`${API}/api/config/advertiser-config?advertiser_id=${finalAdvId}&active_only=false`);
                 const json = await res.json();
                 if (!json.success) { resultsDiv.innerHTML = `<div class="empty error">${json.error || 'Not found'}</div>`; return; }
 
-                cfgCurrentData = json.data;
+                cfgCurrentData = Array.isArray(json.data) ? json.data[0] : json.data;
+                if (!cfgCurrentData) { resultsDiv.innerHTML = '<div class="empty">No config found for this advertiser.</div>'; return; }
                 resultsDiv.innerHTML = '';
                 document.getElementById('cfgDetailSection').style.display = 'block';
                 document.getElementById('cfgDetailTitle').textContent = `Config: ${cfgCurrentData.ADVERTISER_NAME || ''} (ID: ${cfgCurrentData.ADVERTISER_ID})`;
@@ -1079,6 +1115,7 @@
 
             const payload = {
                 advertiser_id: cfgCurrentData.ADVERTISER_ID,
+                agency_id: cfgCurrentData.AGENCY_ID,
                 attribution_window_days: parseInt(document.getElementById('cfgEditAttrWindow').value) || 30,
                 match_strategy: document.getElementById('cfgEditMatchStrategy').value,
                 impression_join_strategy: document.getElementById('cfgEditImprStrategy').value,

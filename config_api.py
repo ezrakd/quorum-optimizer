@@ -121,6 +121,9 @@ def get_unmapped_webpixels():
         conn = get_config_connection()
         cursor = conn.cursor()
 
+        # Set query timeout to 30s — this view can be slow
+        cursor.execute("ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = 30")
+
         query = """
             SELECT *
             FROM QUORUMDB.BASE_TABLES.V_UNMAPPED_WEB_PIXELS
@@ -132,7 +135,7 @@ def get_unmapped_webpixels():
             query += " AND AGENCY_ID = %(agency_id)s"
             params['agency_id'] = int(agency_id)
 
-        query += " ORDER BY EVENTS_30D DESC LIMIT 200"
+        query += " ORDER BY EVENTS_30D DESC LIMIT 100"
 
         cursor.execute(query, params)
         results = rows_to_dicts(cursor)
@@ -178,11 +181,11 @@ def get_poi_brands():
         params = {}
 
         if search:
-            query += " AND BRAND_NAME ILIKE %(search)s"
+            query += " AND BRAND ILIKE %(search)s"
             params['search'] = f'%{search}%'
 
         if dma:
-            query += " AND DMA ILIKE %(dma)s"
+            query += " AND DMA_NAME ILIKE %(dma)s"
             params['dma'] = f'%{dma}%'
 
         query += f" LIMIT {limit}"
@@ -572,6 +575,8 @@ def get_advertiser_config():
                 c.SEGMENT_COUNT, c.POI_URL_COUNT, c.WEB_PIXEL_URL_COUNT,
                 c.CAMPAIGN_MAPPING_COUNT, c.PLATFORM_TYPE_IDS, c.PLATFORM_COUNT,
                 c.ATTRIBUTION_WINDOW_DAYS, c.MATCH_STRATEGY,
+                c.IMPRESSION_JOIN_STRATEGY, c.EXPOSURE_SOURCE,
+                c.WEB_PIXEL_INTEGRATION_TYPE,
                 c.CONFIG_STATUS,
                 c.LAST_IMPRESSION_AT, c.LAST_STORE_VISIT_AT, c.LAST_WEB_VISIT_AT,
                 c.CREATED_AT, c.UPDATED_AT,
@@ -682,13 +687,19 @@ def get_scorecard():
         cursor.execute("""
             SELECT
                 COUNT(*) as TOTAL_ADVERTISERS,
-                SUM(CASE WHEN HAS_STORE_VISIT_ATTRIBUTION THEN 1 ELSE 0 END) as STORE_VISIT_CONFIGURED,
-                SUM(CASE WHEN HAS_WEB_VISIT_ATTRIBUTION THEN 1 ELSE 0 END) as WEB_VISIT_CONFIGURED,
-                SUM(CASE WHEN HAS_IMPRESSION_TRACKING THEN 1 ELSE 0 END) as IMPRESSION_CONFIGURED,
-                SUM(CASE WHEN CONFIG_STATUS = 'ACTIVE' THEN 1 ELSE 0 END) as ACTIVE_CONFIGS,
-                COUNT(DISTINCT AGENCY_ID) as AGENCY_COUNT,
-                MAX(UPDATED_AT) as LAST_CONFIG_UPDATE
+                SUM(CASE WHEN HAS_STORE_VISIT_ATTRIBUTION AND SEGMENT_COUNT > 0 THEN 1 ELSE 0 END) as STORE_VISIT_CONFIGURED,
+                SUM(CASE WHEN HAS_WEB_VISIT_ATTRIBUTION AND WEB_PIXEL_URL_COUNT > 0 THEN 1 ELSE 0 END) as WEB_VISIT_CONFIGURED,
+                SUM(CASE WHEN HAS_IMPRESSION_TRACKING AND CAMPAIGN_MAPPING_COUNT > 0 THEN 1 ELSE 0 END) as IMPRESSION_CONFIGURED,
+                SUM(CASE WHEN CONFIG_STATUS = 'ACTIVE'
+                     AND (CAMPAIGN_MAPPING_COUNT > 0 OR WEB_PIXEL_URL_COUNT > 0)
+                     THEN 1 ELSE 0 END) as ACTIVE_CONFIGS,
+                COUNT(DISTINCT CASE WHEN CONFIG_STATUS = 'ACTIVE'
+                     AND (CAMPAIGN_MAPPING_COUNT > 0 OR WEB_PIXEL_URL_COUNT > 0)
+                     THEN AGENCY_ID END) as AGENCY_COUNT,
+                MAX(UPDATED_AT) as LAST_CONFIG_UPDATE,
+                SUM(CASE WHEN SEGMENT_COUNT > 0 THEN 1 ELSE 0 END) as POI_ASSIGNED
             FROM QUORUMDB.BASE_TABLES.REF_ADVERTISER_CONFIG
+            WHERE CONFIG_STATUS = 'ACTIVE'
         """)
         row = cursor.fetchone()
         columns = [desc[0] for desc in cursor.description]
