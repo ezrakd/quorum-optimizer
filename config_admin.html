@@ -1,0 +1,901 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quorum Config Admin</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f1419; color: #e7e9ea; }
+
+        /* Layout */
+        .app { display: flex; flex-direction: column; min-height: 100vh; }
+        .top-bar { background: #16202a; border-bottom: 1px solid #2f3942; padding: 12px 24px; display: flex; justify-content: space-between; align-items: center; }
+        .top-bar-left { display: flex; align-items: center; gap: 16px; }
+        .top-bar-title { font-size: 18px; font-weight: 700; }
+        .top-bar-title span { color: #1d9bf0; }
+        .back-link { color: #8b98a5; text-decoration: none; font-size: 13px; padding: 6px 12px; border: 1px solid #3d5466; border-radius: 6px; transition: all 0.2s; }
+        .back-link:hover { color: #e7e9ea; border-color: #1d9bf0; }
+        .top-bar-right { display: flex; align-items: center; gap: 12px; }
+        .refresh-btn { background: #273340; border: 1px solid #3d5466; color: #e7e9ea; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; transition: all 0.2s; }
+        .refresh-btn:hover { border-color: #1d9bf0; background: #1d3a4d; }
+        .last-update { font-size: 11px; color: #8b98a5; }
+
+        /* Scorecard */
+        .scorecard { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; padding: 16px 24px; background: #16202a; border-bottom: 1px solid #2f3942; }
+        .score-card { background: #1e2732; border-radius: 10px; padding: 14px 16px; }
+        .score-label { font-size: 11px; color: #8b98a5; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+        .score-value { font-size: 22px; font-weight: 700; }
+        .score-value.green { color: #00ba7c; }
+        .score-value.blue { color: #1d9bf0; }
+        .score-value.yellow { color: #f7931a; }
+        .score-sub { font-size: 11px; color: #8b98a5; margin-top: 4px; }
+        .score-bar { height: 4px; background: #273340; border-radius: 2px; margin-top: 8px; overflow: hidden; }
+        .score-bar-fill { height: 100%; border-radius: 2px; transition: width 0.6s ease; }
+        .score-bar-fill.green { background: #00ba7c; }
+        .score-bar-fill.blue { background: #1d9bf0; }
+        .score-bar-fill.yellow { background: #f7931a; }
+
+        /* Tabs */
+        .tab-bar { display: flex; gap: 0; padding: 0 24px; background: #16202a; border-bottom: 1px solid #2f3942; }
+        .tab { padding: 14px 24px; background: transparent; border: none; color: #8b98a5; cursor: pointer; font-size: 14px; font-weight: 500; border-bottom: 2px solid transparent; transition: all 0.2s; position: relative; }
+        .tab:hover { color: #e7e9ea; }
+        .tab.active { color: #1d9bf0; border-bottom-color: #1d9bf0; }
+        .tab .badge { background: #f7931a; color: #000; font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 10px; margin-left: 8px; }
+
+        /* Main content */
+        .content { flex: 1; padding: 20px 24px; overflow-y: auto; }
+        .panel { display: none; }
+        .panel.active { display: block; }
+
+        /* Tables */
+        .table-section { background: #1e2732; border-radius: 10px; overflow: hidden; margin-bottom: 16px; }
+        .table-header { padding: 14px 18px; font-weight: 600; font-size: 14px; border-bottom: 1px solid #2f3942; display: flex; justify-content: space-between; align-items: center; }
+        .table-header .count { font-size: 12px; color: #8b98a5; font-weight: normal; }
+        .table-filters { padding: 10px 18px; display: flex; gap: 8px; align-items: center; border-bottom: 1px solid #2f3942; background: #1a2530; }
+        .filter-input { padding: 6px 10px; background: #273340; border: 1px solid #3d5466; border-radius: 6px; color: #e7e9ea; font-size: 12px; min-width: 160px; }
+        .filter-input:focus { outline: none; border-color: #1d9bf0; }
+        .filter-select { padding: 6px 10px; background: #273340; border: 1px solid #3d5466; border-radius: 6px; color: #e7e9ea; font-size: 12px; }
+        table { width: 100%; border-collapse: collapse; }
+        th { text-align: left; padding: 10px 16px; font-size: 11px; color: #8b98a5; text-transform: uppercase; background: #16202a; font-weight: 600; letter-spacing: 0.3px; }
+        td { padding: 11px 16px; border-bottom: 1px solid #2f3942; font-size: 13px; }
+        tr:last-child td { border-bottom: none; }
+        tr:hover { background: #252e38; }
+        tr.clickable { cursor: pointer; }
+        tr.clickable:hover { background: #1d3a4d; }
+        .text-right { text-align: right; }
+        .text-green { color: #00ba7c; }
+        .text-blue { color: #1d9bf0; }
+        .text-yellow { color: #f7931a; }
+        .text-red { color: #f4212e; }
+        .text-muted { color: #8b98a5; }
+        .truncate { max-width: 220px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: inline-block; vertical-align: middle; }
+        .status-badge { font-size: 11px; padding: 3px 8px; border-radius: 4px; font-weight: 500; }
+        .status-badge.warning { background: rgba(247,147,26,0.15); color: #f7931a; }
+        .status-badge.success { background: rgba(0,186,124,0.15); color: #00ba7c; }
+        .status-badge.new { background: rgba(29,155,240,0.15); color: #1d9bf0; }
+
+        /* Buttons */
+        .btn { padding: 7px 14px; border-radius: 6px; border: none; cursor: pointer; font-size: 12px; font-weight: 500; transition: all 0.2s; }
+        .btn-primary { background: #1d9bf0; color: #fff; }
+        .btn-primary:hover { background: #1a8cd8; }
+        .btn-secondary { background: #273340; color: #e7e9ea; border: 1px solid #3d5466; }
+        .btn-secondary:hover { border-color: #1d9bf0; }
+        .btn-success { background: #00ba7c; color: #fff; }
+        .btn-success:hover { background: #00a66d; }
+        .btn-sm { padding: 4px 10px; font-size: 11px; }
+        .btn-group { display: flex; gap: 6px; }
+
+        /* Loading/Empty */
+        .loading { display: flex; justify-content: center; align-items: center; padding: 40px; color: #8b98a5; font-size: 13px; }
+        .spinner { width: 20px; height: 20px; border: 2px solid #2f3942; border-top-color: #1d9bf0; border-radius: 50%; animation: spin 1s linear infinite; margin-right: 10px; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .empty { text-align: center; padding: 40px; color: #8b98a5; font-size: 13px; }
+
+        /* Modal */
+        .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); z-index: 1000; justify-content: center; align-items: center; }
+        .modal-overlay.active { display: flex; }
+        .modal { background: #1e2732; border-radius: 12px; border: 1px solid #3d5466; width: 520px; max-width: 90vw; max-height: 80vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
+        .modal-header { padding: 18px 20px; border-bottom: 1px solid #2f3942; display: flex; justify-content: space-between; align-items: center; }
+        .modal-title { font-size: 16px; font-weight: 600; }
+        .modal-close { background: none; border: none; color: #8b98a5; font-size: 20px; cursor: pointer; padding: 4px; }
+        .modal-close:hover { color: #e7e9ea; }
+        .modal-body { padding: 20px; }
+        .modal-footer { padding: 14px 20px; border-top: 1px solid #2f3942; display: flex; justify-content: flex-end; gap: 8px; }
+        .form-group { margin-bottom: 16px; }
+        .form-label { display: block; font-size: 12px; color: #8b98a5; margin-bottom: 6px; font-weight: 500; }
+        .form-value { font-size: 14px; color: #e7e9ea; padding: 8px 0; }
+        .form-input { width: 100%; padding: 9px 12px; background: #273340; border: 1px solid #3d5466; border-radius: 6px; color: #e7e9ea; font-size: 13px; }
+        .form-input:focus { outline: none; border-color: #1d9bf0; }
+
+        /* Autocomplete */
+        .autocomplete-wrap { position: relative; }
+        .autocomplete-results { position: absolute; top: 100%; left: 0; right: 0; background: #273340; border: 1px solid #3d5466; border-top: none; border-radius: 0 0 6px 6px; max-height: 200px; overflow-y: auto; z-index: 10; display: none; }
+        .autocomplete-results.show { display: block; }
+        .autocomplete-item { padding: 8px 12px; cursor: pointer; font-size: 13px; border-bottom: 1px solid #2f3942; }
+        .autocomplete-item:hover { background: #1d3a4d; }
+        .autocomplete-item:last-child { border-bottom: none; }
+        .autocomplete-item .sub { font-size: 11px; color: #8b98a5; }
+
+        /* Toast */
+        .toast { position: fixed; bottom: 24px; right: 24px; padding: 12px 20px; border-radius: 8px; font-size: 13px; font-weight: 500; z-index: 2000; transform: translateY(80px); opacity: 0; transition: all 0.3s ease; }
+        .toast.show { transform: translateY(0); opacity: 1; }
+        .toast.success { background: #00ba7c; color: #fff; }
+        .toast.error { background: #f4212e; color: #fff; }
+
+        /* POI Search */
+        .poi-search-bar { display: flex; gap: 8px; margin-bottom: 16px; }
+        .poi-search-bar input { flex: 1; }
+        .poi-results { margin-top: 16px; }
+    </style>
+</head>
+<body>
+    <div class="app">
+        <!-- Top Bar -->
+        <div class="top-bar">
+            <div class="top-bar-left">
+                <a href="/" class="back-link">← Optimizer</a>
+                <div class="top-bar-title"><span>Config</span> Admin</div>
+            </div>
+            <div class="top-bar-right">
+                <span class="last-update" id="lastUpdate"></span>
+                <button class="refresh-btn" onclick="loadScorecard(); loadActivePanel();">↻ Refresh</button>
+            </div>
+        </div>
+
+        <!-- Scorecard -->
+        <div class="scorecard" id="scorecard">
+            <div class="score-card">
+                <div class="score-label">Store Visit Attribution</div>
+                <div class="score-value green" id="scStoreVisit">—</div>
+                <div class="score-sub" id="scStoreVisitSub"></div>
+                <div class="score-bar"><div class="score-bar-fill green" id="scStoreVisitBar" style="width:0%"></div></div>
+            </div>
+            <div class="score-card">
+                <div class="score-label">Web Visit Attribution</div>
+                <div class="score-value blue" id="scWebVisit">—</div>
+                <div class="score-sub" id="scWebVisitSub"></div>
+                <div class="score-bar"><div class="score-bar-fill blue" id="scWebVisitBar" style="width:0%"></div></div>
+            </div>
+            <div class="score-card">
+                <div class="score-label">Impression Tracking</div>
+                <div class="score-value yellow" id="scImpression">—</div>
+                <div class="score-sub" id="scImpressionSub"></div>
+                <div class="score-bar"><div class="score-bar-fill yellow" id="scImpressionBar" style="width:0%"></div></div>
+            </div>
+            <div class="score-card">
+                <div class="score-label">Active Configs</div>
+                <div class="score-value" id="scActive">—</div>
+                <div class="score-sub" id="scActiveSub"></div>
+            </div>
+            <div class="score-card">
+                <div class="score-label">Unmapped Impressions</div>
+                <div class="score-value yellow" id="scUnmapped">—</div>
+                <div class="score-sub">campaigns needing attention</div>
+            </div>
+        </div>
+
+        <!-- Tabs -->
+        <div class="tab-bar">
+            <button class="tab active" data-panel="unmapped" onclick="switchTab(this)">Unmapped Activity <span class="badge" id="unmappedBadge" style="display:none"></span></button>
+            <button class="tab" data-panel="poi" onclick="switchTab(this)">POI Assignment</button>
+            <button class="tab" data-panel="campaigns" onclick="switchTab(this)">Campaigns</button>
+        </div>
+
+        <!-- Content Panels -->
+        <div class="content">
+            <!-- Panel 1: Unmapped Activity -->
+            <div class="panel active" id="panel-unmapped">
+                <!-- Unmapped Ad Impressions -->
+                <div class="table-section" id="unmappedImpressions">
+                    <div class="table-header">
+                        Unmapped Ad Impressions (30-day)
+                        <span class="count" id="unmappedImprCount"></span>
+                    </div>
+                    <div class="table-filters">
+                        <select class="filter-select" id="imprAgencyFilter" onchange="loadUnmappedImpressions()">
+                            <option value="">All Agencies</option>
+                        </select>
+                        <input type="number" class="filter-input" id="imprMinFilter" placeholder="Min impressions" value="100" style="width:130px" onchange="loadUnmappedImpressions()">
+                    </div>
+                    <div id="unmappedImprBody">
+                        <div class="loading"><div class="spinner"></div> Loading unmapped impressions...</div>
+                    </div>
+                </div>
+
+                <!-- Unmapped Web Pixels -->
+                <div class="table-section" id="unmappedPixels">
+                    <div class="table-header">
+                        Unmapped Web Pixels (30-day)
+                        <span class="count" id="unmappedPixelCount"></span>
+                    </div>
+                    <div class="table-filters">
+                        <select class="filter-select" id="pixelAgencyFilter" onchange="loadUnmappedWebPixels()">
+                            <option value="">All Agencies</option>
+                        </select>
+                    </div>
+                    <div id="unmappedPixelBody">
+                        <div class="loading"><div class="spinner"></div> Loading unmapped web pixels...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Panel 2: POI Assignment -->
+            <div class="panel" id="panel-poi">
+                <div class="table-section">
+                    <div class="table-header">POI Brand Search</div>
+                    <div style="padding: 18px;">
+                        <div class="poi-search-bar">
+                            <input type="text" class="form-input" id="poiBrandSearch" placeholder="Search brand name (e.g. Starbucks, Target, Dunkin)..." onkeydown="if(event.key==='Enter') searchPOI()">
+                            <input type="text" class="form-input" id="poiDmaSearch" placeholder="DMA (optional)" style="max-width:200px" onkeydown="if(event.key==='Enter') searchPOI()">
+                            <button class="btn btn-primary" onclick="searchPOI()">Search</button>
+                        </div>
+                        <div id="poiResults" class="poi-results">
+                            <div class="empty">Search for a brand to find store locations for assignment.</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Panel 3: Campaigns -->
+            <div class="panel" id="panel-campaigns">
+                <div class="table-section">
+                    <div class="table-header">
+                        Campaign Mappings
+                        <span class="count" id="campaignCount"></span>
+                    </div>
+                    <div class="table-filters">
+                        <select class="filter-select" id="campAgencyFilter" onchange="loadCampaignMappings()">
+                            <option value="">All Agencies</option>
+                        </select>
+                        <label style="font-size:12px; color:#8b98a5; display:flex; align-items:center; gap:4px;">
+                            <input type="checkbox" id="campUnmappedOnly" onchange="loadCampaignMappings()"> Unmapped only
+                        </label>
+                    </div>
+                    <div id="campaignBody">
+                        <div class="loading"><div class="spinner"></div> Loading campaign mappings...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Map Campaign -->
+    <div class="modal-overlay" id="modalMapCampaign">
+        <div class="modal">
+            <div class="modal-header">
+                <div class="modal-title">Map Campaign to Advertiser</div>
+                <button class="modal-close" onclick="closeModal('modalMapCampaign')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <div class="form-label">Agency</div>
+                    <div class="form-value" id="mcAgency"></div>
+                </div>
+                <div class="form-group">
+                    <div class="form-label">Platform / PT Code</div>
+                    <div class="form-value" id="mcPlatform"></div>
+                </div>
+                <div class="form-group">
+                    <div class="form-label">DSP Advertiser</div>
+                    <div class="form-value" id="mcDspAdvertiser"></div>
+                </div>
+                <div class="form-group">
+                    <div class="form-label">30-day Impressions</div>
+                    <div class="form-value" id="mcImpressions"></div>
+                </div>
+                <div class="form-group">
+                    <div class="form-label">Map to Quorum Advertiser</div>
+                    <div class="autocomplete-wrap">
+                        <input type="text" class="form-input" id="mcAdvertiserSearch" placeholder="Search advertiser name..." oninput="searchAdvertisers('mc')">
+                        <div class="autocomplete-results" id="mcAutocomplete"></div>
+                    </div>
+                    <input type="hidden" id="mcAdvertiserId">
+                    <div id="mcSelectedAdvertiser" style="margin-top:8px; font-size:13px; color:#00ba7c; display:none;"></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('modalMapCampaign')">Cancel</button>
+                <button class="btn btn-success" id="mcSubmit" onclick="submitMapCampaign()">Map Campaign</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Configure Domain -->
+    <div class="modal-overlay" id="modalConfigDomain">
+        <div class="modal">
+            <div class="modal-header">
+                <div class="modal-title">Configure Web Pixel Domain</div>
+                <button class="modal-close" onclick="closeModal('modalConfigDomain')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <div class="form-label">Agency</div>
+                    <div class="form-value" id="cdAgency"></div>
+                </div>
+                <div class="form-group">
+                    <div class="form-label">Domain</div>
+                    <div class="form-value" id="cdDomain"></div>
+                </div>
+                <div class="form-group">
+                    <div class="form-label">30-day Events</div>
+                    <div class="form-value" id="cdEvents"></div>
+                </div>
+                <div class="form-group">
+                    <div class="form-label">Status</div>
+                    <div class="form-value" id="cdStatus"></div>
+                </div>
+                <div class="form-group">
+                    <div class="form-label">Map to Quorum Advertiser</div>
+                    <div class="autocomplete-wrap">
+                        <input type="text" class="form-input" id="cdAdvertiserSearch" placeholder="Search advertiser name..." oninput="searchAdvertisers('cd')">
+                        <div class="autocomplete-results" id="cdAutocomplete"></div>
+                    </div>
+                    <input type="hidden" id="cdAdvertiserId">
+                    <div id="cdSelectedAdvertiser" style="margin-top:8px; font-size:13px; color:#00ba7c; display:none;"></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('modalConfigDomain')">Cancel</button>
+                <button class="btn btn-success" id="cdSubmit" onclick="submitConfigDomain()">Configure Domain</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Assign POI -->
+    <div class="modal-overlay" id="modalAssignPoi">
+        <div class="modal">
+            <div class="modal-header">
+                <div class="modal-title">Assign POI Segments</div>
+                <button class="modal-close" onclick="closeModal('modalAssignPoi')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <div class="form-label">Brand</div>
+                    <div class="form-value" id="poiBrand"></div>
+                </div>
+                <div class="form-group">
+                    <div class="form-label">Selected Locations</div>
+                    <div class="form-value" id="poiLocationCount"></div>
+                </div>
+                <div class="form-group">
+                    <div class="form-label">Assign to Advertiser</div>
+                    <div class="autocomplete-wrap">
+                        <input type="text" class="form-input" id="poiAdvertiserSearch" placeholder="Search advertiser name..." oninput="searchAdvertisers('poi')">
+                        <div class="autocomplete-results" id="poiAutocomplete"></div>
+                    </div>
+                    <input type="hidden" id="poiAdvertiserId">
+                    <input type="hidden" id="poiAgencyId">
+                    <div id="poiSelectedAdvertiser" style="margin-top:8px; font-size:13px; color:#00ba7c; display:none;"></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('modalAssignPoi')">Cancel</button>
+                <button class="btn btn-success" onclick="submitAssignPoi()">Assign Segments</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast -->
+    <div class="toast" id="toast"></div>
+
+    <script>
+        // =====================================================
+        // CONFIG
+        // =====================================================
+        const API = window.location.origin;
+        const fmt = n => n != null ? Number(n).toLocaleString() : '0';
+
+        // State for modals
+        let mapCampaignData = {};
+        let configDomainData = {};
+        let poiSelectedMd5s = [];
+        let poiBrandName = '';
+        let poiDmaName = '';
+
+        // =====================================================
+        // TABS
+        // =====================================================
+        function switchTab(el) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+            el.classList.add('active');
+            const panelId = 'panel-' + el.dataset.panel;
+            document.getElementById(panelId).classList.add('active');
+            loadActivePanel();
+        }
+
+        function loadActivePanel() {
+            const active = document.querySelector('.tab.active');
+            if (!active) return;
+            const panel = active.dataset.panel;
+            if (panel === 'unmapped') { loadUnmappedImpressions(); loadUnmappedWebPixels(); }
+            else if (panel === 'poi') { /* POI loads on search */ }
+            else if (panel === 'campaigns') { loadCampaignMappings(); }
+        }
+
+        // =====================================================
+        // MODAL HELPERS
+        // =====================================================
+        function openModal(id) {
+            document.getElementById(id).classList.add('active');
+        }
+        function closeModal(id) {
+            document.getElementById(id).classList.remove('active');
+        }
+
+        function showToast(msg, type = 'success') {
+            const t = document.getElementById('toast');
+            t.textContent = msg;
+            t.className = 'toast ' + type + ' show';
+            setTimeout(() => t.classList.remove('show'), 4000);
+        }
+
+        // =====================================================
+        // SCORECARD
+        // =====================================================
+        async function loadScorecard() {
+            try {
+                const res = await fetch(`${API}/api/config/scorecard`);
+                const json = await res.json();
+                if (!json.success) return;
+                const d = json.data;
+                const total = d.TOTAL_ADVERTISERS || 1;
+
+                const svPct = ((d.STORE_VISIT_CONFIGURED / total) * 100).toFixed(1);
+                const wvPct = ((d.WEB_VISIT_CONFIGURED / total) * 100).toFixed(1);
+                const imPct = ((d.IMPRESSION_CONFIGURED / total) * 100).toFixed(1);
+
+                document.getElementById('scStoreVisit').textContent = fmt(d.STORE_VISIT_CONFIGURED);
+                document.getElementById('scStoreVisitSub').textContent = `${svPct}% of ${fmt(total)} advertisers`;
+                document.getElementById('scStoreVisitBar').style.width = svPct + '%';
+
+                document.getElementById('scWebVisit').textContent = fmt(d.WEB_VISIT_CONFIGURED);
+                document.getElementById('scWebVisitSub').textContent = `${wvPct}% of ${fmt(total)} advertisers`;
+                document.getElementById('scWebVisitBar').style.width = wvPct + '%';
+
+                document.getElementById('scImpression').textContent = fmt(d.IMPRESSION_CONFIGURED);
+                document.getElementById('scImpressionSub').textContent = `${imPct}% of ${fmt(total)} advertisers`;
+                document.getElementById('scImpressionBar').style.width = imPct + '%';
+
+                document.getElementById('scActive').textContent = fmt(d.ACTIVE_CONFIGS);
+                document.getElementById('scActiveSub').textContent = `across ${fmt(d.AGENCY_COUNT)} agencies`;
+
+                document.getElementById('scUnmapped').textContent = fmt(d.UNMAPPED_IMPRESSIONS);
+
+                if (d.UNMAPPED_IMPRESSIONS > 0) {
+                    const badge = document.getElementById('unmappedBadge');
+                    badge.textContent = d.UNMAPPED_IMPRESSIONS;
+                    badge.style.display = 'inline';
+                }
+
+                if (d.LAST_CONFIG_UPDATE) {
+                    document.getElementById('lastUpdate').textContent = 'Last update: ' + new Date(d.LAST_CONFIG_UPDATE).toLocaleString();
+                }
+            } catch (e) {
+                console.error('Scorecard error:', e);
+            }
+        }
+
+        // =====================================================
+        // PANEL 1a: UNMAPPED IMPRESSIONS
+        // =====================================================
+        async function loadUnmappedImpressions() {
+            const container = document.getElementById('unmappedImprBody');
+            container.innerHTML = '<div class="loading"><div class="spinner"></div> Loading...</div>';
+
+            try {
+                const agencyId = document.getElementById('imprAgencyFilter').value;
+                const minImpr = document.getElementById('imprMinFilter').value || 100;
+                let url = `${API}/api/config/unmapped-impressions?min_impressions=${minImpr}`;
+                if (agencyId) url += `&agency_id=${agencyId}`;
+
+                const res = await fetch(url);
+                const json = await res.json();
+                if (!json.success) { container.innerHTML = `<div class="empty">Error: ${json.error}</div>`; return; }
+
+                document.getElementById('unmappedImprCount').textContent = `${json.count} campaigns`;
+
+                if (json.count === 0) {
+                    container.innerHTML = '<div class="empty">No unmapped impressions found. All caught up!</div>';
+                    return;
+                }
+
+                // Collect agencies for filter dropdown
+                const agencies = [...new Set(json.data.map(r => JSON.stringify({ id: r.AGENCY_ID, name: r.AGENCY_NAME })))].map(s => JSON.parse(s));
+                populateAgencyFilter('imprAgencyFilter', agencies);
+
+                let html = '<table><thead><tr><th>Agency</th><th>Platform</th><th>DSP Advertiser</th><th class="text-right">Impressions</th><th>Active Days</th><th>Status</th><th></th></tr></thead><tbody>';
+                json.data.forEach(r => {
+                    html += `<tr class="clickable" onclick='openMapCampaignModal(${JSON.stringify(r).replace(/'/g, "&#39;")})'>
+                        <td>${esc(r.AGENCY_NAME || r.AGENCY_ID)}</td>
+                        <td>${esc(r.PLATFORM_NAME || '')} (${r.PLATFORM_TYPE_ID || ''})</td>
+                        <td><span class="truncate">${esc(r.DSP_ADVERTISER_NAME || 'Unknown')}</span></td>
+                        <td class="text-right text-yellow">${fmt(r.IMPRESSIONS_30D)}</td>
+                        <td>${r.ACTIVE_DAYS || ''}</td>
+                        <td><span class="status-badge warning">Unmapped</span></td>
+                        <td><button class="btn btn-sm btn-primary">Map</button></td>
+                    </tr>`;
+                });
+                html += '</tbody></table>';
+                container.innerHTML = html;
+            } catch (e) {
+                container.innerHTML = `<div class="empty">Failed to load: ${e.message}</div>`;
+            }
+        }
+
+        // =====================================================
+        // PANEL 1b: UNMAPPED WEB PIXELS
+        // =====================================================
+        async function loadUnmappedWebPixels() {
+            const container = document.getElementById('unmappedPixelBody');
+            container.innerHTML = '<div class="loading"><div class="spinner"></div> Loading...</div>';
+
+            try {
+                const agencyId = document.getElementById('pixelAgencyFilter').value;
+                let url = `${API}/api/config/unmapped-webpixels`;
+                if (agencyId) url += `?agency_id=${agencyId}`;
+
+                const res = await fetch(url);
+                const json = await res.json();
+                if (!json.success) { container.innerHTML = `<div class="empty">Error: ${json.error}</div>`; return; }
+
+                document.getElementById('unmappedPixelCount').textContent = `${json.count} domains`;
+
+                if (json.count === 0) {
+                    container.innerHTML = '<div class="empty">No unmapped web pixels found.</div>';
+                    return;
+                }
+
+                const agencies = [...new Set(json.data.filter(r => r.AGENCY_ID).map(r => JSON.stringify({ id: r.AGENCY_ID, name: r.AGENCY_NAME || r.AGENCY_ID })))].map(s => JSON.parse(s));
+                populateAgencyFilter('pixelAgencyFilter', agencies);
+
+                let html = '<table><thead><tr><th>Agency</th><th>Domain</th><th class="text-right">Events</th><th>Status</th><th></th></tr></thead><tbody>';
+                json.data.forEach(r => {
+                    const statusClass = (r.STATUS || '').includes('NEW_AGENCY') ? 'new' : 'warning';
+                    const statusText = r.STATUS || r.ACTION_REQUIRED || 'Unmapped';
+                    html += `<tr class="clickable" onclick='openConfigDomainModal(${JSON.stringify(r).replace(/'/g, "&#39;")})'>
+                        <td>${esc(r.AGENCY_NAME || r.AGENCY_ID || '—')}</td>
+                        <td><span class="truncate">${esc(r.DOMAIN || r.URL || '')}</span></td>
+                        <td class="text-right text-blue">${fmt(r.EVENTS_30D)}</td>
+                        <td><span class="status-badge ${statusClass}">${esc(statusText)}</span></td>
+                        <td><button class="btn btn-sm btn-primary">Configure</button></td>
+                    </tr>`;
+                });
+                html += '</tbody></table>';
+                container.innerHTML = html;
+            } catch (e) {
+                container.innerHTML = `<div class="empty">Failed to load: ${e.message}</div>`;
+            }
+        }
+
+        // =====================================================
+        // PANEL 2: POI SEARCH
+        // =====================================================
+        async function searchPOI() {
+            const brand = document.getElementById('poiBrandSearch').value.trim();
+            const dma = document.getElementById('poiDmaSearch').value.trim();
+            const container = document.getElementById('poiResults');
+
+            if (!brand && !dma) {
+                container.innerHTML = '<div class="empty">Enter a brand name or DMA to search.</div>';
+                return;
+            }
+
+            container.innerHTML = '<div class="loading"><div class="spinner"></div> Searching brand library...</div>';
+
+            try {
+                let url = `${API}/api/config/poi-brands?`;
+                if (brand) url += `search=${encodeURIComponent(brand)}`;
+                if (dma) url += `${brand ? '&' : ''}dma=${encodeURIComponent(dma)}`;
+
+                const res = await fetch(url);
+                const json = await res.json();
+                if (!json.success) { container.innerHTML = `<div class="empty">Error: ${json.error}</div>`; return; }
+                if (json.count === 0) { container.innerHTML = '<div class="empty">No matching brands found.</div>'; return; }
+
+                let html = `<div class="table-section"><div class="table-header">Results: ${json.count} locations found
+                    <div class="btn-group"><button class="btn btn-sm btn-secondary" onclick="selectAllPOI()">Select All</button>
+                    <button class="btn btn-sm btn-success" onclick="openAssignPoiModal()">Assign Selected</button></div></div>`;
+                html += '<table><thead><tr><th style="width:40px"><input type="checkbox" id="poiSelectAll" onchange="toggleAllPOI(this)"></th><th>Brand</th><th>Category</th><th>DMA</th><th class="text-right">Locations</th><th class="text-right">Zips</th></tr></thead><tbody>';
+                json.data.forEach((r, i) => {
+                    const md5 = r.SEGMENT_MD5 || r.MD5 || r.LOCATION_MD5 || `row_${i}`;
+                    html += `<tr>
+                        <td><input type="checkbox" class="poi-check" value="${esc(md5)}" data-brand="${esc(r.BRAND_NAME || '')}" data-dma="${esc(r.DMA || '')}"></td>
+                        <td>${esc(r.BRAND_NAME || '')}</td>
+                        <td class="text-muted">${esc(r.CATEGORY || '')}</td>
+                        <td>${esc(r.DMA || '')}</td>
+                        <td class="text-right">${fmt(r.UNIQUE_LOCATIONS || r.LOCATION_COUNT || 1)}</td>
+                        <td class="text-right text-muted">${fmt(r.ZIP_COUNT || '')}</td>
+                    </tr>`;
+                });
+                html += '</tbody></table></div>';
+                container.innerHTML = html;
+            } catch (e) {
+                container.innerHTML = `<div class="empty">Search failed: ${e.message}</div>`;
+            }
+        }
+
+        function toggleAllPOI(el) {
+            document.querySelectorAll('.poi-check').forEach(cb => cb.checked = el.checked);
+        }
+        function selectAllPOI() {
+            document.querySelectorAll('.poi-check').forEach(cb => cb.checked = true);
+            const sa = document.getElementById('poiSelectAll');
+            if (sa) sa.checked = true;
+        }
+
+        function openAssignPoiModal() {
+            const checked = document.querySelectorAll('.poi-check:checked');
+            if (checked.length === 0) { showToast('Select at least one location to assign.', 'error'); return; }
+
+            poiSelectedMd5s = Array.from(checked).map(cb => cb.value);
+            poiBrandName = checked[0].dataset.brand || '';
+            poiDmaName = checked[0].dataset.dma || '';
+
+            document.getElementById('poiBrand').textContent = poiBrandName || 'Mixed brands';
+            document.getElementById('poiLocationCount').textContent = `${checked.length} segments selected`;
+            document.getElementById('poiAdvertiserSearch').value = '';
+            document.getElementById('poiAdvertiserId').value = '';
+            document.getElementById('poiAgencyId').value = '';
+            document.getElementById('poiSelectedAdvertiser').style.display = 'none';
+            openModal('modalAssignPoi');
+        }
+
+        async function submitAssignPoi() {
+            const advertiserId = document.getElementById('poiAdvertiserId').value;
+            const agencyId = document.getElementById('poiAgencyId').value;
+            if (!advertiserId) { showToast('Select an advertiser first.', 'error'); return; }
+
+            try {
+                const res = await fetch(`${API}/api/config/assign-poi`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        advertiser_id: parseInt(advertiserId),
+                        agency_id: parseInt(agencyId),
+                        segment_md5s: poiSelectedMd5s,
+                        brand_name: poiBrandName,
+                        dma: poiDmaName
+                    })
+                });
+                const json = await res.json();
+                closeModal('modalAssignPoi');
+                if (json.success) {
+                    showToast(`Assigned ${json.inserted} segments. ${json.skipped || 0} already existed.`);
+                    loadScorecard();
+                } else {
+                    showToast('Error: ' + json.error, 'error');
+                }
+            } catch (e) {
+                showToast('Request failed: ' + e.message, 'error');
+            }
+        }
+
+        // =====================================================
+        // PANEL 3: CAMPAIGN MAPPINGS
+        // =====================================================
+        async function loadCampaignMappings() {
+            const container = document.getElementById('campaignBody');
+            container.innerHTML = '<div class="loading"><div class="spinner"></div> Loading...</div>';
+
+            try {
+                const agencyId = document.getElementById('campAgencyFilter').value;
+                const unmappedOnly = document.getElementById('campUnmappedOnly').checked;
+                let url = `${API}/api/config/campaign-mappings?unmapped_only=${unmappedOnly}`;
+                if (agencyId) url += `&agency_id=${agencyId}`;
+
+                const res = await fetch(url);
+                const json = await res.json();
+                if (!json.success) { container.innerHTML = `<div class="empty">Error: ${json.error}</div>`; return; }
+
+                document.getElementById('campaignCount').textContent = `${json.count} mappings`;
+
+                if (json.count === 0) {
+                    container.innerHTML = '<div class="empty">No campaign mappings found.</div>';
+                    return;
+                }
+
+                let html = '<table><thead><tr><th>DSP Advertiser</th><th>Platform</th><th>Quorum Advertiser ID</th><th class="text-right">Impressions</th><th>Last Impression</th><th>Mapped</th></tr></thead><tbody>';
+                json.data.forEach(r => {
+                    const mapped = r.QUORUM_ADVERTISER_ID != null;
+                    html += `<tr>
+                        <td><span class="truncate">${esc(r.ADVERTISER_NAME_FROM_DSP || r.DSP_ADVERTISER_ID || '—')}</span></td>
+                        <td>${esc(r.DSP_PLATFORM_TYPE || '')}</td>
+                        <td>${mapped ? `<span class="text-green">${r.QUORUM_ADVERTISER_ID}</span>` : '<span class="text-muted">—</span>'}</td>
+                        <td class="text-right">${fmt(r.IMPRESSION_COUNT)}</td>
+                        <td class="text-muted">${r.LAST_IMPRESSION_TIMESTAMP ? new Date(r.LAST_IMPRESSION_TIMESTAMP).toLocaleDateString() : '—'}</td>
+                        <td>${mapped ? '<span class="status-badge success">Mapped</span>' : '<span class="status-badge warning">Unmapped</span>'}</td>
+                    </tr>`;
+                });
+                html += '</tbody></table>';
+                container.innerHTML = html;
+            } catch (e) {
+                container.innerHTML = `<div class="empty">Failed to load: ${e.message}</div>`;
+            }
+        }
+
+        // =====================================================
+        // MAP CAMPAIGN MODAL
+        // =====================================================
+        function openMapCampaignModal(row) {
+            mapCampaignData = row;
+            document.getElementById('mcAgency').textContent = (row.AGENCY_NAME || '') + ' (' + (row.AGENCY_ID || '') + ')';
+            document.getElementById('mcPlatform').textContent = (row.PLATFORM_NAME || '') + ' (PT=' + (row.PLATFORM_TYPE_ID || '') + ')';
+            document.getElementById('mcDspAdvertiser').textContent = (row.DSP_ADVERTISER_NAME || 'Unknown') + ' (ID=' + (row.DSP_ADVERTISER_ID || '') + ')';
+            document.getElementById('mcImpressions').textContent = fmt(row.IMPRESSIONS_30D);
+            document.getElementById('mcAdvertiserSearch').value = '';
+            document.getElementById('mcAdvertiserId').value = '';
+            document.getElementById('mcSelectedAdvertiser').style.display = 'none';
+            document.getElementById('mcAutocomplete').classList.remove('show');
+            openModal('modalMapCampaign');
+        }
+
+        async function submitMapCampaign() {
+            const advertiserId = document.getElementById('mcAdvertiserId').value;
+            if (!advertiserId) { showToast('Select an advertiser first.', 'error'); return; }
+
+            try {
+                const res = await fetch(`${API}/api/config/map-campaign`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        dsp_advertiser_id: mapCampaignData.DSP_ADVERTISER_ID,
+                        platform_type: mapCampaignData.PLATFORM_TYPE_ID,
+                        quorum_advertiser_id: parseInt(advertiserId),
+                        agency_id: mapCampaignData.AGENCY_ID,
+                        dsp_advertiser_name: mapCampaignData.DSP_ADVERTISER_NAME
+                    })
+                });
+                const json = await res.json();
+                closeModal('modalMapCampaign');
+                if (json.success) {
+                    showToast('Campaign mapped successfully! Impressions will flow on next refresh.');
+                    loadUnmappedImpressions();
+                    loadScorecard();
+                } else {
+                    showToast('Error: ' + json.error, 'error');
+                }
+            } catch (e) {
+                showToast('Request failed: ' + e.message, 'error');
+            }
+        }
+
+        // =====================================================
+        // CONFIGURE DOMAIN MODAL
+        // =====================================================
+        function openConfigDomainModal(row) {
+            configDomainData = row;
+            document.getElementById('cdAgency').textContent = (row.AGENCY_NAME || row.AGENCY_ID || '—');
+            document.getElementById('cdDomain').textContent = row.DOMAIN || row.URL || '';
+            document.getElementById('cdEvents').textContent = fmt(row.EVENTS_30D);
+            document.getElementById('cdStatus').textContent = row.STATUS || row.ACTION_REQUIRED || 'Unmapped';
+            document.getElementById('cdAdvertiserSearch').value = '';
+            document.getElementById('cdAdvertiserId').value = '';
+            document.getElementById('cdSelectedAdvertiser').style.display = 'none';
+            document.getElementById('cdAutocomplete').classList.remove('show');
+            openModal('modalConfigDomain');
+        }
+
+        async function submitConfigDomain() {
+            const advertiserId = document.getElementById('cdAdvertiserId').value;
+            if (!advertiserId) { showToast('Select an advertiser first.', 'error'); return; }
+
+            try {
+                const res = await fetch(`${API}/api/config/configure-domain`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        agency_id: configDomainData.AGENCY_ID,
+                        advertiser_id: parseInt(advertiserId),
+                        url: configDomainData.DOMAIN || configDomainData.URL,
+                        is_poi: false
+                    })
+                });
+                const json = await res.json();
+                closeModal('modalConfigDomain');
+                if (json.success) {
+                    showToast('Domain configured! Web visit attribution enabled.');
+                    loadUnmappedWebPixels();
+                    loadScorecard();
+                } else {
+                    showToast('Error: ' + json.error, 'error');
+                }
+            } catch (e) {
+                showToast('Request failed: ' + e.message, 'error');
+            }
+        }
+
+        // =====================================================
+        // ADVERTISER AUTOCOMPLETE
+        // =====================================================
+        let searchTimeout = null;
+        async function searchAdvertisers(prefix) {
+            const input = document.getElementById(prefix + 'AdvertiserSearch');
+            const dropdown = document.getElementById(prefix + 'Autocomplete');
+            const q = input.value.trim();
+
+            if (q.length < 2) { dropdown.classList.remove('show'); return; }
+
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(async () => {
+                try {
+                    // Grab agency_id from context if available
+                    let agencyParam = '';
+                    if (prefix === 'mc' && mapCampaignData.AGENCY_ID) agencyParam = `&agency_id=${mapCampaignData.AGENCY_ID}`;
+                    if (prefix === 'cd' && configDomainData.AGENCY_ID) agencyParam = `&agency_id=${configDomainData.AGENCY_ID}`;
+
+                    const res = await fetch(`${API}/api/config/search-advertisers?q=${encodeURIComponent(q)}${agencyParam}`);
+                    const json = await res.json();
+                    if (!json.success || json.count === 0) { dropdown.classList.remove('show'); return; }
+
+                    dropdown.innerHTML = json.data.map(r => `
+                        <div class="autocomplete-item" onclick="selectAdvertiser('${prefix}', ${r.ADVERTISER_ID}, ${r.AGENCY_ID || 0}, '${esc(r.ADVERTISER_NAME || '')}')">
+                            <div>${esc(r.ADVERTISER_NAME || '')} <span class="text-muted">(ID: ${r.ADVERTISER_ID})</span></div>
+                            <div class="sub">Agency: ${r.AGENCY_ID || '—'} | ${r.CONFIG_STATUS || 'No config'}</div>
+                        </div>
+                    `).join('');
+                    dropdown.classList.add('show');
+                } catch (e) {
+                    dropdown.classList.remove('show');
+                }
+            }, 300);
+        }
+
+        function selectAdvertiser(prefix, id, agencyId, name) {
+            document.getElementById(prefix + 'AdvertiserId').value = id;
+            document.getElementById(prefix + 'AdvertiserSearch').value = name;
+            document.getElementById(prefix + 'Autocomplete').classList.remove('show');
+
+            const selDiv = document.getElementById(prefix + 'SelectedAdvertiser');
+            selDiv.textContent = `✓ ${name} (ID: ${id})`;
+            selDiv.style.display = 'block';
+
+            // For POI, also store agency
+            if (prefix === 'poi') {
+                document.getElementById('poiAgencyId').value = agencyId;
+            }
+        }
+
+        // Close autocomplete on outside click
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('.autocomplete-wrap')) {
+                document.querySelectorAll('.autocomplete-results').forEach(d => d.classList.remove('show'));
+            }
+        });
+
+        // =====================================================
+        // AGENCY FILTER HELPER
+        // =====================================================
+        function populateAgencyFilter(selectId, agencies) {
+            const sel = document.getElementById(selectId);
+            const current = sel.value;
+            // Only add new options if not already populated beyond default
+            if (sel.options.length <= 1) {
+                agencies.forEach(a => {
+                    const opt = document.createElement('option');
+                    opt.value = a.id;
+                    opt.textContent = a.name || a.id;
+                    sel.appendChild(opt);
+                });
+            }
+            sel.value = current;
+        }
+
+        // =====================================================
+        // UTIL
+        // =====================================================
+        function esc(str) {
+            if (str == null) return '';
+            return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+        }
+
+        // =====================================================
+        // INIT
+        // =====================================================
+        loadScorecard();
+        loadUnmappedImpressions();
+        loadUnmappedWebPixels();
+    </script>
+</body>
+</html>

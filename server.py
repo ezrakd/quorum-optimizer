@@ -36,6 +36,11 @@ def index():
 def optimizer_page():
     return app.send_static_file('optimizer_v6.html')
 
+# Config admin screen
+@app.route('/admin')
+def admin_page():
+    return app.send_static_file('config_admin.html')
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
@@ -43,4 +48,5 @@ if __name__ == '__main__':
     print(f"  Optimizer API: /api/v6/*")
     print(f"  Config API:    /api/config/*")
     print(f"  Frontend:      /")
+    print(f"  Config Admin:  /admin")
     app.run(host='0.0.0.0', port=port, debug=False)
