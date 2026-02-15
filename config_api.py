@@ -164,6 +164,22 @@ def get_unmapped_webpixels():
         conn.close()
 
         # Step 3: Filter out mapped domains in Python (fast)
+        # Extract root domains from mapped set for better matching
+        # e.g. "www.scholastic.com" -> "scholastic.com" so it matches "shop.scholastic.com"
+        def get_root_domain(d):
+            """Strip www. prefix and get the registrable domain (last 2+ parts)."""
+            d = d.lower().strip('.')
+            if d.startswith('www.'):
+                d = d[4:]
+            return d
+
+        mapped_roots = set()
+        for md in mapped_domains:
+            root = get_root_domain(md)
+            mapped_roots.add(root)
+            # Also add the raw domain for exact matching
+            mapped_roots.add(md)
+
         platform_detect = {
             'shopify': 'SHOPIFY', 'myshopify.com': 'SHOPIFY',
             'squarespace': 'SQUARESPACE',
@@ -178,10 +194,20 @@ def get_unmapped_webpixels():
             if not domain:
                 continue
 
-            # Check if domain is already mapped
+            # Check if domain is already mapped using root domain matching
+            # "shop.scholastic.com" matches if "scholastic.com" is in mapped_roots
             is_mapped = False
-            for md in mapped_domains:
-                if domain == md or md in domain or domain in md:
+            domain_root = get_root_domain(domain)
+            for mr in mapped_roots:
+                # Check: exact match, root contains mapped, mapped contains root
+                if domain_root == mr or mr.endswith('.' + domain_root) or domain_root.endswith('.' + mr):
+                    is_mapped = True
+                    break
+                # Also check if they share the same registrable domain
+                # e.g. "shop.scholastic.com" root="shop.scholastic.com"
+                #       mapped root="scholastic.com"
+                # domain_root ends with ".scholastic.com"? No, but "scholastic.com" is in domain_root
+                if mr in domain_root or domain_root in mr:
                     is_mapped = True
                     break
             if is_mapped:
