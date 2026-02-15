@@ -233,27 +233,35 @@ def get_campaign_mappings():
 
         query = """
             SELECT
-                MAPPING_ID, DSP_ADVERTISER_ID, INSERTION_ORDER_ID,
-                LINE_ITEM_ID, QUORUM_ADVERTISER_ID, AGENCY_ID,
-                DSP_PLATFORM_TYPE, DATA_SOURCE,
-                ADVERTISER_NAME_FROM_DSP, INSERTION_ORDER_NAME_FROM_DSP,
-                LINE_ITEM_NAME_FROM_DSP,
-                IMPRESSION_COUNT, FIRST_IMPRESSION_TIMESTAMP, LAST_IMPRESSION_TIMESTAMP,
-                CAMPAIGN_START_DATE, CAMPAIGN_END_DATE,
-                CREATED_AT, MODIFIED_AT
-            FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
+                pcm.MAPPING_ID, pcm.DSP_ADVERTISER_ID, pcm.INSERTION_ORDER_ID,
+                pcm.LINE_ITEM_ID, pcm.QUORUM_ADVERTISER_ID, pcm.AGENCY_ID,
+                pcm.DSP_PLATFORM_TYPE,
+                COALESCE(dsp.PLATFORM_NAME, pcm.DATA_SOURCE, 'Unknown') as PLATFORM_NAME,
+                pcm.DATA_SOURCE,
+                pcm.ADVERTISER_NAME_FROM_DSP, pcm.INSERTION_ORDER_NAME_FROM_DSP,
+                pcm.LINE_ITEM_NAME_FROM_DSP,
+                pcm.CAMPAIGN_NAME_MANUAL,
+                COALESCE(aa.COMP_NAME, '') as QUORUM_ADVERTISER_NAME,
+                pcm.IMPRESSION_COUNT, pcm.FIRST_IMPRESSION_TIMESTAMP, pcm.LAST_IMPRESSION_TIMESTAMP,
+                pcm.CAMPAIGN_START_DATE, pcm.CAMPAIGN_END_DATE,
+                pcm.CREATED_AT, pcm.MODIFIED_AT
+            FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2 pcm
+            LEFT JOIN QUORUMDB.BASE_TABLES.REF_DSP_PLATFORM dsp
+                ON TRY_CAST(pcm.DSP_PLATFORM_TYPE AS INTEGER) = dsp.PLATFORM_TYPE_ID
+            LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa
+                ON pcm.QUORUM_ADVERTISER_ID = aa.ID AND pcm.AGENCY_ID = aa.ADVERTISER_ID
             WHERE 1=1
         """
         params = {}
 
         if agency_id:
-            query += " AND AGENCY_ID = %(agency_id)s"
+            query += " AND pcm.AGENCY_ID = %(agency_id)s"
             params['agency_id'] = int(agency_id)
 
         if unmapped_only:
-            query += " AND QUORUM_ADVERTISER_ID IS NULL"
+            query += " AND pcm.QUORUM_ADVERTISER_ID IS NULL"
 
-        query += " ORDER BY LAST_IMPRESSION_TIMESTAMP DESC NULLS LAST LIMIT 500"
+        query += " ORDER BY pcm.LAST_IMPRESSION_TIMESTAMP DESC NULLS LAST LIMIT 500"
 
         cursor.execute(query, params)
         results = rows_to_dicts(cursor)

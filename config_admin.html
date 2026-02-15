@@ -307,11 +307,11 @@
                                     </select>
                                 </div>
                                 <div class="form-group">
-                                    <div class="form-label">Impression Join Strategy</div>
+                                    <div class="form-label">Impression Join Strategy <span style="font-weight:normal; color:#8b98a5; font-size:11px;" title="How this advertiser's impressions are matched to campaign mappings in AD_IMPRESSION_LOG_V2">(?)</span></div>
                                     <select class="form-input" id="cfgEditImprStrategy">
-                                        <option value="ADM_PREFIX">ADM_PREFIX</option>
-                                        <option value="PCM_4KEY">PCM_4KEY</option>
-                                        <option value="DIRECT_AG">DIRECT_AG</option>
+                                        <option value="PCM_4KEY">PCM_4KEY — Match on Platform + DSP Adv + IO + Line Item</option>
+                                        <option value="ADM_PREFIX">ADM_PREFIX — Match via Advertiser Domain Mapping prefix</option>
+                                        <option value="DIRECT_AG">DIRECT_AG — Match directly by Agency ID</option>
                                     </select>
                                 </div>
                                 <div class="form-group">
@@ -323,11 +323,12 @@
                                     </select>
                                 </div>
                                 <div class="form-group">
-                                    <div class="form-label">Exposure Source</div>
+                                    <div class="form-label">Exposure Source <span style="font-weight:normal; color:#8b98a5; font-size:11px;" title="What type of exposure data drives attribution for this advertiser">(?)</span></div>
                                     <select class="form-input" id="cfgEditExposureSource">
                                         <option value="">— not set —</option>
-                                        <option value="PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS">PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS</option>
-                                        <option value="CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS">CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS</option>
+                                        <option value="IMPRESSION">IMPRESSION — Ad impression log (V2)</option>
+                                        <option value="WEB">WEB — Web pixel events</option>
+                                        <option value="OOH">OOH — Out-of-home exposure</option>
                                     </select>
                                 </div>
                                 <div class="form-group">
@@ -808,13 +809,16 @@
                     return;
                 }
 
-                let html = '<table><thead><tr><th>DSP Advertiser</th><th>Platform</th><th>Quorum Advertiser ID</th><th class="text-right">Impressions</th><th>Last Impression</th><th>Mapped</th></tr></thead><tbody>';
+                let html = '<table><thead><tr><th>Campaign / Line Item</th><th>Platform</th><th>Quorum Advertiser</th><th class="text-right">Impressions</th><th>Last Seen</th><th>Status</th></tr></thead><tbody>';
                 json.data.forEach(r => {
                     const mapped = r.QUORUM_ADVERTISER_ID != null;
+                    const campaignName = r.CAMPAIGN_NAME_MANUAL || r.INSERTION_ORDER_NAME_FROM_DSP || r.LINE_ITEM_NAME_FROM_DSP || r.ADVERTISER_NAME_FROM_DSP || '—';
+                    const platformName = r.PLATFORM_NAME || r.DATA_SOURCE || '—';
+                    const quorumName = mapped ? (r.QUORUM_ADVERTISER_NAME || `ID ${r.QUORUM_ADVERTISER_ID}`) : '—';
                     html += `<tr>
-                        <td><span class="truncate">${esc(r.ADVERTISER_NAME_FROM_DSP || r.DSP_ADVERTISER_ID || '—')}</span></td>
-                        <td>${esc(r.DSP_PLATFORM_TYPE || '')}</td>
-                        <td>${mapped ? `<span class="text-green">${r.QUORUM_ADVERTISER_ID}</span>` : '<span class="text-muted">—</span>'}</td>
+                        <td><span class="truncate" title="${esc(campaignName)}">${esc(campaignName)}</span></td>
+                        <td>${esc(platformName)}</td>
+                        <td>${mapped ? `<span class="text-green">${esc(quorumName)}</span>` : '<span class="text-muted">—</span>'}</td>
                         <td class="text-right">${fmt(r.IMPRESSION_COUNT)}</td>
                         <td class="text-muted">${r.LAST_IMPRESSION_TIMESTAMP ? new Date(r.LAST_IMPRESSION_TIMESTAMP).toLocaleDateString() : '—'}</td>
                         <td>${mapped ? '<span class="status-badge success">Mapped</span>' : '<span class="status-badge warning">Unmapped</span>'}</td>
@@ -1068,15 +1072,17 @@
 
                 // Build detail grid
                 const grid = document.getElementById('cfgDetailGrid');
+                const strategyLabels = { 'PCM_4KEY': 'PCM 4-Key (Platform + DSP Adv + IO + Line Item)', 'ADM_PREFIX': 'ADM Prefix (Domain Mapping)', 'DIRECT_AG': 'Direct Agency Match' };
+                const exposureLabels = { 'IMPRESSION': 'Ad Impressions (V2)', 'WEB': 'Web Pixel Events', 'OOH': 'Out-of-Home' };
                 const fields = [
                     ['Advertiser ID', cfgCurrentData.ADVERTISER_ID],
-                    ['Agency ID', cfgCurrentData.AGENCY_ID],
+                    ['Agency', (cfgCurrentData.AGENCY_NAME || '') + ' (' + cfgCurrentData.AGENCY_ID + ')'],
                     ['Advertiser Name', cfgCurrentData.ADVERTISER_NAME],
                     ['Config Status', cfgCurrentData.CONFIG_STATUS],
-                    ['Impression Join Strategy', cfgCurrentData.IMPRESSION_JOIN_STRATEGY],
+                    ['Impression Join Strategy', strategyLabels[cfgCurrentData.IMPRESSION_JOIN_STRATEGY] || cfgCurrentData.IMPRESSION_JOIN_STRATEGY || '—'],
                     ['Match Strategy', cfgCurrentData.MATCH_STRATEGY],
                     ['Attribution Window', cfgCurrentData.ATTRIBUTION_WINDOW_DAYS ? cfgCurrentData.ATTRIBUTION_WINDOW_DAYS + ' days' : '—'],
-                    ['Exposure Source', cfgCurrentData.EXPOSURE_SOURCE || '—'],
+                    ['Exposure Source', exposureLabels[cfgCurrentData.EXPOSURE_SOURCE] || cfgCurrentData.EXPOSURE_SOURCE || '—'],
                     ['Store Visit Attribution', cfgCurrentData.HAS_STORE_VISIT_ATTRIBUTION ? '✓ Yes' : '✗ No'],
                     ['Web Visit Attribution', cfgCurrentData.HAS_WEB_VISIT_ATTRIBUTION ? '✓ Yes' : '✗ No'],
                     ['Impression Tracking', cfgCurrentData.HAS_IMPRESSION_TRACKING ? '✓ Yes' : '✗ No'],
