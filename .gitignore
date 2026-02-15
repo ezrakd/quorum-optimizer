@@ -1,6 +1,48 @@
+# Python
 __pycache__/
 *.pyc
-.DS_Store
-*.env
+
+# Dependencies
 node_modules/
+package-lock.json
+yarn.lock
+
+# Build outputs
+dist/
+build/
+.next/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# Test coverage
+coverage/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# API keys (never commit these!)
+**/api-keys.json
+**/secrets.json
+
+# Claude
 .claude/
