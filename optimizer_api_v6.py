@@ -229,7 +229,7 @@ def get_advertisers():
                 WHERE DATE BETWEEN %(start_date)s AND %(end_date)s
                 GROUP BY QUORUM_ADVERTISER_ID
                 HAVING SUM(IMPRESSIONS) > 0
-                ORDER BY SUM(IMPRESSIONS) DESC
+                ORDER BY 3 DESC
             """, {'start_date': start_date, 'end_date': end_date})
         else:
             # Pre-aggregated path
@@ -1312,10 +1312,10 @@ def get_agency_timeseries():
         rows_p_daily = []
         if row_level_agencies:
             cursor.execute("""
-                SELECT DATE::DATE as DT, 1480 as AGENCY_ID, SUM(IMPRESSIONS) as IMPRESSIONS
+                SELECT DATE::DATE as DT, 1480 as AGENCY_ID, SUM(IMPRESSIONS) as TOTAL_IMPRESSIONS
                 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_DASHBOARD_SUMMARY_STATS
                 WHERE DATE BETWEEN %(start_date)s AND %(end_date)s
-                GROUP BY DATE::DATE HAVING SUM(IMPRESSIONS) > 0
+                GROUP BY DATE::DATE HAVING TOTAL_IMPRESSIONS > 0
             """, {'start_date': start_date, 'end_date': end_date})
             rows_p_daily = cursor.fetchall()
 
