@@ -180,6 +180,7 @@
             <button class="tab active" data-panel="unmapped" onclick="switchTab(this)">Unmapped Activity <span class="badge" id="unmappedBadge" style="display:none"></span></button>
             <button class="tab" data-panel="poi" onclick="switchTab(this)">POI Assignment</button>
             <button class="tab" data-panel="campaigns" onclick="switchTab(this)">Campaigns</button>
+            <button class="tab" data-panel="config" onclick="switchTab(this)">Advertiser Config</button>
         </div>
 
         <!-- Content Panels -->
@@ -254,6 +255,107 @@
                     </div>
                     <div id="campaignBody">
                         <div class="loading"><div class="spinner"></div> Loading campaign mappings...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Panel 4: Advertiser Config -->
+            <div class="panel" id="panel-config">
+                <div class="table-section">
+                    <div class="table-header">Advertiser Configuration Lookup</div>
+                    <div style="padding: 18px;">
+                        <div style="display:flex; gap:8px; margin-bottom:16px;">
+                            <div class="autocomplete-wrap" style="flex:1;">
+                                <input type="text" class="form-input" id="cfgAdvertiserSearch" placeholder="Search advertiser by name..." oninput="searchAdvertisers('cfg')" onkeydown="if(event.key==='Enter') loadAdvertiserConfig()">
+                                <div class="autocomplete-results" id="cfgAutocomplete"></div>
+                            </div>
+                            <input type="hidden" id="cfgAdvertiserId">
+                            <input type="hidden" id="cfgAgencyId">
+                            <input type="number" class="form-input" id="cfgAgencyFilter" placeholder="Agency ID (optional)" style="max-width:160px">
+                            <button class="btn btn-primary" onclick="loadAdvertiserConfig()">Search</button>
+                        </div>
+                        <div id="cfgSelectedAdvertiser" style="margin-bottom:12px; font-size:13px; color:#00ba7c; display:none;"></div>
+                        <div id="cfgResults">
+                            <div class="empty">Search for an advertiser to view and edit their configuration.</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Config detail/editor (hidden until advertiser selected) -->
+                <div class="table-section" id="cfgDetailSection" style="display:none;">
+                    <div class="table-header">
+                        <span id="cfgDetailTitle">Advertiser Configuration</span>
+                        <button class="btn btn-sm btn-secondary" onclick="toggleConfigEdit()">Edit</button>
+                    </div>
+                    <div style="padding: 18px;">
+                        <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 16px;" id="cfgDetailGrid"></div>
+
+                        <!-- Edit form (hidden until Edit clicked) -->
+                        <div id="cfgEditForm" style="display:none; margin-top:20px; padding-top:16px; border-top:1px solid #2f3942;">
+                            <div style="font-weight:600; margin-bottom:12px;">Edit Configuration</div>
+                            <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                                <div class="form-group">
+                                    <div class="form-label">Attribution Window (days)</div>
+                                    <input type="number" class="form-input" id="cfgEditAttrWindow" min="1" max="90">
+                                </div>
+                                <div class="form-group">
+                                    <div class="form-label">Match Strategy</div>
+                                    <select class="form-input" id="cfgEditMatchStrategy">
+                                        <option value="HOUSEHOLD">HOUSEHOLD</option>
+                                        <option value="DEVICE">DEVICE</option>
+                                        <option value="IP_ONLY">IP_ONLY</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <div class="form-label">Impression Join Strategy</div>
+                                    <select class="form-input" id="cfgEditImprStrategy">
+                                        <option value="ADM_PREFIX">ADM_PREFIX</option>
+                                        <option value="PCM_4KEY">PCM_4KEY</option>
+                                        <option value="DIRECT_AG">DIRECT_AG</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <div class="form-label">Config Status</div>
+                                    <select class="form-input" id="cfgEditStatus">
+                                        <option value="ACTIVE">ACTIVE</option>
+                                        <option value="INACTIVE">INACTIVE</option>
+                                        <option value="PENDING">PENDING</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <div class="form-label">Exposure Source</div>
+                                    <select class="form-input" id="cfgEditExposureSource">
+                                        <option value="">— not set —</option>
+                                        <option value="PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS">PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS</option>
+                                        <option value="CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS">CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <div class="form-label">Web Pixel Integration Type</div>
+                                    <select class="form-input" id="cfgEditWebPixelType">
+                                        <option value="">— not set —</option>
+                                        <option value="JAVASCRIPT">JAVASCRIPT</option>
+                                        <option value="IMAGE">IMAGE</option>
+                                        <option value="SERVER_SIDE">SERVER_SIDE</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div style="display:flex; gap:6px; align-items:center; margin-top:12px;">
+                                <label style="font-size:12px; color:#8b98a5; display:flex; align-items:center; gap:4px;">
+                                    <input type="checkbox" id="cfgEditStoreVisit"> Store Visit Attribution
+                                </label>
+                                <label style="font-size:12px; color:#8b98a5; display:flex; align-items:center; gap:4px; margin-left:12px;">
+                                    <input type="checkbox" id="cfgEditWebVisit"> Web Visit Attribution
+                                </label>
+                                <label style="font-size:12px; color:#8b98a5; display:flex; align-items:center; gap:4px; margin-left:12px;">
+                                    <input type="checkbox" id="cfgEditImprTracking"> Impression Tracking
+                                </label>
+                            </div>
+                            <div style="margin-top:16px; display:flex; gap:8px; justify-content:flex-end;">
+                                <button class="btn btn-secondary" onclick="toggleConfigEdit()">Cancel</button>
+                                <button class="btn btn-success" onclick="submitUpdateConfig()">Save Changes</button>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -412,6 +514,7 @@
             if (panel === 'unmapped') { loadUnmappedImpressions(); loadUnmappedWebPixels(); }
             else if (panel === 'poi') { /* POI loads on search */ }
             else if (panel === 'campaigns') { loadCampaignMappings(); }
+            else if (panel === 'config') { /* Config loads on search */ }
         }
 
         // =====================================================
@@ -824,6 +927,7 @@
                     let agencyParam = '';
                     if (prefix === 'mc' && mapCampaignData.AGENCY_ID) agencyParam = `&agency_id=${mapCampaignData.AGENCY_ID}`;
                     if (prefix === 'cd' && configDomainData.AGENCY_ID) agencyParam = `&agency_id=${configDomainData.AGENCY_ID}`;
+                    if (prefix === 'cfg') { const af = document.getElementById('cfgAgencyFilter').value; if (af) agencyParam = `&agency_id=${af}`; }
 
                     const res = await fetch(`${API}/api/config/search-advertisers?q=${encodeURIComponent(q)}${agencyParam}`);
                     const json = await res.json();
@@ -851,9 +955,13 @@
             selDiv.textContent = `✓ ${name} (ID: ${id})`;
             selDiv.style.display = 'block';
 
-            // For POI, also store agency
+            // Store agency where needed
             if (prefix === 'poi') {
                 document.getElementById('poiAgencyId').value = agencyId;
+            }
+            if (prefix === 'cfg') {
+                document.getElementById('cfgAgencyId').value = agencyId;
+                loadAdvertiserConfig();
             }
         }
 
@@ -888,6 +996,118 @@
         function esc(str) {
             if (str == null) return '';
             return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+        }
+
+        // =====================================================
+        // PANEL 4: ADVERTISER CONFIG
+        // =====================================================
+        let cfgCurrentData = null;
+
+        async function loadAdvertiserConfig() {
+            const advId = document.getElementById('cfgAdvertiserId').value;
+            if (!advId) { showToast('Select an advertiser first', 'error'); return; }
+
+            const resultsDiv = document.getElementById('cfgResults');
+            resultsDiv.innerHTML = '<div class="empty">Loading...</div>';
+
+            try {
+                const res = await fetch(`${API}/api/config/advertiser-config?advertiser_id=${advId}`);
+                const json = await res.json();
+                if (!json.success) { resultsDiv.innerHTML = `<div class="empty error">${json.error || 'Not found'}</div>`; return; }
+
+                cfgCurrentData = json.data;
+                resultsDiv.innerHTML = '';
+                document.getElementById('cfgDetailSection').style.display = 'block';
+                document.getElementById('cfgDetailTitle').textContent = `Config: ${cfgCurrentData.ADVERTISER_NAME || ''} (ID: ${cfgCurrentData.ADVERTISER_ID})`;
+                document.getElementById('cfgEditForm').style.display = 'none';
+
+                // Build detail grid
+                const grid = document.getElementById('cfgDetailGrid');
+                const fields = [
+                    ['Advertiser ID', cfgCurrentData.ADVERTISER_ID],
+                    ['Agency ID', cfgCurrentData.AGENCY_ID],
+                    ['Advertiser Name', cfgCurrentData.ADVERTISER_NAME],
+                    ['Config Status', cfgCurrentData.CONFIG_STATUS],
+                    ['Impression Join Strategy', cfgCurrentData.IMPRESSION_JOIN_STRATEGY],
+                    ['Match Strategy', cfgCurrentData.MATCH_STRATEGY],
+                    ['Attribution Window', cfgCurrentData.ATTRIBUTION_WINDOW_DAYS ? cfgCurrentData.ATTRIBUTION_WINDOW_DAYS + ' days' : '—'],
+                    ['Exposure Source', cfgCurrentData.EXPOSURE_SOURCE || '—'],
+                    ['Store Visit Attribution', cfgCurrentData.HAS_STORE_VISIT_ATTRIBUTION ? '✓ Yes' : '✗ No'],
+                    ['Web Visit Attribution', cfgCurrentData.HAS_WEB_VISIT_ATTRIBUTION ? '✓ Yes' : '✗ No'],
+                    ['Impression Tracking', cfgCurrentData.HAS_IMPRESSION_TRACKING ? '✓ Yes' : '✗ No'],
+                    ['Web Pixel Integration', cfgCurrentData.WEB_PIXEL_INTEGRATION_TYPE || '—'],
+                    ['Segment Count', cfgCurrentData.SEGMENT_COUNT ?? '—'],
+                    ['Campaign Mapping Count', cfgCurrentData.CAMPAIGN_MAPPING_COUNT ?? '—'],
+                    ['Platform Type IDs', cfgCurrentData.PLATFORM_TYPE_IDS || '—'],
+                    ['Last Updated', cfgCurrentData.UPDATED_AT || cfgCurrentData.CREATED_AT || '—'],
+                ];
+                grid.innerHTML = fields.map(([label, val]) => `
+                    <div style="padding:8px 0; border-bottom:1px solid #1e2732;">
+                        <div style="font-size:11px; color:#8b98a5; text-transform:uppercase; margin-bottom:2px;">${label}</div>
+                        <div style="font-size:14px;">${val != null ? esc(String(val)) : '—'}</div>
+                    </div>
+                `).join('');
+
+            } catch (e) {
+                resultsDiv.innerHTML = `<div class="empty error">Error: ${e.message}</div>`;
+            }
+        }
+
+        function toggleConfigEdit() {
+            const form = document.getElementById('cfgEditForm');
+            if (form.style.display === 'none') {
+                // Populate form with current values
+                if (cfgCurrentData) {
+                    document.getElementById('cfgEditAttrWindow').value = cfgCurrentData.ATTRIBUTION_WINDOW_DAYS || 30;
+                    document.getElementById('cfgEditMatchStrategy').value = cfgCurrentData.MATCH_STRATEGY || 'HOUSEHOLD';
+                    document.getElementById('cfgEditImprStrategy').value = cfgCurrentData.IMPRESSION_JOIN_STRATEGY || 'ADM_PREFIX';
+                    document.getElementById('cfgEditStatus').value = cfgCurrentData.CONFIG_STATUS || 'ACTIVE';
+                    document.getElementById('cfgEditExposureSource').value = cfgCurrentData.EXPOSURE_SOURCE || '';
+                    document.getElementById('cfgEditWebPixelType').value = cfgCurrentData.WEB_PIXEL_INTEGRATION_TYPE || '';
+                    document.getElementById('cfgEditStoreVisit').checked = !!cfgCurrentData.HAS_STORE_VISIT_ATTRIBUTION;
+                    document.getElementById('cfgEditWebVisit').checked = !!cfgCurrentData.HAS_WEB_VISIT_ATTRIBUTION;
+                    document.getElementById('cfgEditImprTracking').checked = !!cfgCurrentData.HAS_IMPRESSION_TRACKING;
+                }
+                form.style.display = 'block';
+            } else {
+                form.style.display = 'none';
+            }
+        }
+
+        async function submitUpdateConfig() {
+            if (!cfgCurrentData) return;
+
+            const payload = {
+                advertiser_id: cfgCurrentData.ADVERTISER_ID,
+                attribution_window_days: parseInt(document.getElementById('cfgEditAttrWindow').value) || 30,
+                match_strategy: document.getElementById('cfgEditMatchStrategy').value,
+                impression_join_strategy: document.getElementById('cfgEditImprStrategy').value,
+                config_status: document.getElementById('cfgEditStatus').value,
+                exposure_source: document.getElementById('cfgEditExposureSource').value || null,
+                web_pixel_integration_type: document.getElementById('cfgEditWebPixelType').value || null,
+                has_store_visit_attribution: document.getElementById('cfgEditStoreVisit').checked,
+                has_web_visit_attribution: document.getElementById('cfgEditWebVisit').checked,
+                has_impression_tracking: document.getElementById('cfgEditImprTracking').checked,
+            };
+
+            try {
+                const res = await fetch(`${API}/api/config/update-config`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                const json = await res.json();
+                if (json.success) {
+                    showToast('Configuration updated successfully');
+                    document.getElementById('cfgEditForm').style.display = 'none';
+                    loadAdvertiserConfig(); // Refresh detail view
+                    loadScorecard(); // Refresh scorecard counts
+                } else {
+                    showToast(`Error: ${json.error || 'Update failed'}`, 'error');
+                }
+            } catch (e) {
+                showToast(`Error: ${e.message}`, 'error');
+            }
         }
 
         // =====================================================

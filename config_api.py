@@ -45,7 +45,8 @@ def get_config_connection():
         warehouse=os.environ.get('SNOWFLAKE_WAREHOUSE', 'COMPUTE_WH'),
         database='QUORUMDB',
         schema='SEGMENT_DATA',
-        role=os.environ.get('SNOWFLAKE_ADMIN_ROLE', 'ACCOUNTADMIN'),
+        role=os.environ.get('SNOWFLAKE_ADMIN_ROLE',
+             os.environ.get('SNOWFLAKE_ROLE', 'OPTIMIZER_READONLY_ROLE')),
         insecure_mode=True
     )
 
