@@ -65,7 +65,7 @@ def load_agency_config(conn):
     cursor.execute("""
         SELECT
             c.AGENCY_ID,
-            MAX(aa.COMP_NAME) as AGENCY_NAME,
+            MAX(aa.AGENCY_NAME) as AGENCY_NAME,
             MAX(c.EXPOSURE_SOURCE) as EXPOSURE_SOURCE,
             MAX(c.IMPRESSION_JOIN_STRATEGY) as IMPRESSION_JOIN_STRATEGY,
             MAX(c.MATCH_STRATEGY) as MATCH_STRATEGY,
@@ -76,7 +76,7 @@ def load_agency_config(conn):
             LISTAGG(DISTINCT c.PLATFORM_TYPE_IDS, ',') as ALL_PLATFORMS
         FROM QUORUMDB.BASE_TABLES.REF_ADVERTISER_CONFIG c
         LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa
-            ON c.AGENCY_ID = aa.AG_ID
+            ON c.AGENCY_ID = aa.ADVERTISER_ID
         WHERE c.CONFIG_STATUS = 'ACTIVE'
           AND c.HAS_IMPRESSION_TRACKING = TRUE
         GROUP BY c.AGENCY_ID

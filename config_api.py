@@ -112,8 +112,9 @@ def get_unmapped_impressions():
 @config_bp.route('/unmapped-webpixels', methods=['GET'])
 def get_unmapped_webpixels():
     """
-    Returns web pixel domains firing but not configured for reporting.
-    Replaces: manual SQL to identify new web pixel activity
+    Returns web pixel domains firing in the last 7 days that are not yet mapped
+    in ADVERTISER_DOMAIN_MAPPING. Uses direct query against WEBPIXEL_EVENTS
+    instead of the slow V_UNMAPPED_WEB_PIXELS view.
     """
     try:
         agency_id = request.args.get('agency_id')
@@ -121,37 +122,52 @@ def get_unmapped_webpixels():
         conn = get_config_connection()
         cursor = conn.cursor()
 
-        # Set aggressive timeout — this view has expensive LIKE pattern matching
-        cursor.execute("ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = 15")
-
         query = """
-            SELECT *
-            FROM QUORUMDB.BASE_TABLES.V_UNMAPPED_WEB_PIXELS
-            WHERE 1=1
+            WITH recent_pixels AS (
+                SELECT
+                    we.AGENCY_ID,
+                    we.PAGE_URL_DOMAIN as DOMAIN,
+                    COUNT(*) as EVENT_COUNT_7D,
+                    COUNT(DISTINCT we.DEVICE_ID) as UNIQUE_DEVICES_7D,
+                    MIN(we.EVENT_TIMESTAMP) as FIRST_SEEN,
+                    MAX(we.EVENT_TIMESTAMP) as LAST_SEEN
+                FROM QUORUMDB.DERIVED_TABLES.WEBPIXEL_EVENTS we
+                WHERE we.EVENT_TIMESTAMP >= DATEADD(day, -7, CURRENT_TIMESTAMP())
+                  AND we.PAGE_URL_DOMAIN IS NOT NULL
+                  AND we.PAGE_URL_DOMAIN != ''
         """
         params = {}
 
         if agency_id:
-            query += " AND AGENCY_ID = %(agency_id)s"
+            query += " AND we.AGENCY_ID = %(agency_id)s"
             params['agency_id'] = int(agency_id)
 
-        query += " ORDER BY EVENTS_30D DESC LIMIT 50"
+        query += """
+                GROUP BY we.AGENCY_ID, we.PAGE_URL_DOMAIN
+                HAVING COUNT(*) >= 10
+            )
+            SELECT
+                rp.AGENCY_ID,
+                COALESCE(MAX(aa.AGENCY_NAME), 'Agency ' || rp.AGENCY_ID) as AGENCY_NAME,
+                rp.DOMAIN,
+                rp.EVENT_COUNT_7D,
+                rp.UNIQUE_DEVICES_7D,
+                rp.FIRST_SEEN,
+                rp.LAST_SEEN
+            FROM recent_pixels rp
+            LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa
+                ON rp.AGENCY_ID = aa.ADVERTISER_ID
+            LEFT JOIN QUORUMDB.REF_DATA.ADVERTISER_DOMAIN_MAPPING adm
+                ON rp.AGENCY_ID = adm.AGENCY_ID
+                AND rp.DOMAIN LIKE '%' || adm.DOMAIN || '%'
+            WHERE adm.MAPPING_ID IS NULL
+            GROUP BY rp.AGENCY_ID, rp.DOMAIN, rp.EVENT_COUNT_7D, rp.UNIQUE_DEVICES_7D, rp.FIRST_SEEN, rp.LAST_SEEN
+            ORDER BY rp.EVENT_COUNT_7D DESC
+            LIMIT 100
+        """
 
-        try:
-            cursor.execute(query, params)
-            results = rows_to_dicts(cursor)
-        except Exception as timeout_err:
-            err_str = str(timeout_err).lower()
-            if 'timeout' in err_str or 'cancel' in err_str:
-                cursor.close()
-                conn.close()
-                return jsonify({
-                    'success': True,
-                    'count': 0,
-                    'data': [],
-                    'warning': 'Web pixel view timed out. This view needs to be materialized for performance. Try filtering by agency_id.'
-                })
-            raise
+        cursor.execute(query, params)
+        results = rows_to_dicts(cursor)
 
         cursor.close()
         conn.close()
@@ -655,6 +671,7 @@ def search_advertisers():
     try:
         q = request.args.get('q', '')
         agency_id = request.args.get('agency_id')
+        reporting_ready = request.args.get('reporting_ready', 'false').lower() == 'true'
 
         if len(q) < 2:
             return jsonify({'success': False, 'error': 'Search term must be at least 2 chars'}), 400
@@ -667,7 +684,11 @@ def search_advertisers():
                 aa.ID as ADVERTISER_ID,
                 aa.ADVERTISER_ID as AGENCY_ID,
                 aa.COMP_NAME as ADVERTISER_NAME,
+                aa.AGENCY_NAME,
                 c.CONFIG_STATUS,
+                c.SEGMENT_COUNT,
+                c.WEB_PIXEL_URL_COUNT,
+                c.CAMPAIGN_MAPPING_COUNT,
                 c.HAS_STORE_VISIT_ATTRIBUTION,
                 c.HAS_WEB_VISIT_ATTRIBUTION,
                 c.HAS_IMPRESSION_TRACKING
@@ -681,6 +702,9 @@ def search_advertisers():
         if agency_id:
             query += " AND aa.ADVERTISER_ID = %(agency_id)s"
             params['agency_id'] = int(agency_id)
+
+        if reporting_ready:
+            query += " AND c.CONFIG_STATUS = 'ACTIVE' AND (COALESCE(c.SEGMENT_COUNT, 0) > 0 OR COALESCE(c.WEB_PIXEL_URL_COUNT, 0) > 0)"
 
         query += " ORDER BY aa.COMP_NAME LIMIT 25"
 

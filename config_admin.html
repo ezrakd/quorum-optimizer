@@ -264,15 +264,20 @@
                 <div class="table-section">
                     <div class="table-header">Advertiser Configuration Lookup</div>
                     <div style="padding: 18px;">
-                        <div style="display:flex; gap:8px; margin-bottom:16px;">
+                        <div style="display:flex; gap:8px; margin-bottom:10px;">
                             <div class="autocomplete-wrap" style="flex:1;">
                                 <input type="text" class="form-input" id="cfgAdvertiserSearch" placeholder="Search advertiser by name..." oninput="searchAdvertisers('cfg')" onkeydown="if(event.key==='Enter') loadAdvertiserConfig()">
                                 <div class="autocomplete-results" id="cfgAutocomplete"></div>
                             </div>
                             <input type="hidden" id="cfgAdvertiserId">
                             <input type="hidden" id="cfgAgencyId">
-                            <input type="number" class="form-input" id="cfgAgencyFilter" placeholder="Agency ID (optional)" style="max-width:160px">
+                            <input type="number" class="form-input" id="cfgAgencyFilter" placeholder="Agency ID" style="max-width:130px" value="1480">
                             <button class="btn btn-primary" onclick="loadAdvertiserConfig()">Search</button>
+                        </div>
+                        <div style="display:flex; gap:12px; margin-bottom:16px; align-items:center;">
+                            <label style="font-size:12px; color:#8b98a5; display:flex; align-items:center; gap:4px;">
+                                <input type="checkbox" id="cfgReportingReady" checked> Reporting-ready only (has web pixel or POI)
+                            </label>
                         </div>
                         <div id="cfgSelectedAdvertiser" style="margin-bottom:12px; font-size:13px; color:#00ba7c; display:none;"></div>
                         <div id="cfgResults">
@@ -944,14 +949,17 @@
                     if (prefix === 'cd' && configDomainData.AGENCY_ID) agencyParam = `&agency_id=${configDomainData.AGENCY_ID}`;
                     if (prefix === 'cfg') { const af = document.getElementById('cfgAgencyFilter').value; if (af) agencyParam = `&agency_id=${af}`; }
 
-                    const res = await fetch(`${API}/api/config/search-advertisers?q=${encodeURIComponent(q)}${agencyParam}`);
+                    let reportingParam = '';
+                    if (prefix === 'cfg') { const rr = document.getElementById('cfgReportingReady'); if (rr && rr.checked) reportingParam = '&reporting_ready=true'; }
+
+                    const res = await fetch(`${API}/api/config/search-advertisers?q=${encodeURIComponent(q)}${agencyParam}${reportingParam}`);
                     const json = await res.json();
                     if (!json.success || json.count === 0) { dropdown.classList.remove('show'); return; }
 
                     dropdown.innerHTML = json.data.map(r => `
                         <div class="autocomplete-item" onclick="selectAdvertiser('${prefix}', ${r.ADVERTISER_ID}, ${r.AGENCY_ID || 0}, '${esc(r.ADVERTISER_NAME || '')}')">
                             <div>${esc(r.ADVERTISER_NAME || '')} <span class="text-muted">(ID: ${r.ADVERTISER_ID})</span></div>
-                            <div class="sub">Agency: ${r.AGENCY_ID || '—'} | ${r.CONFIG_STATUS || 'No config'}</div>
+                            <div class="sub">${esc(r.AGENCY_NAME || 'Agency ' + (r.AGENCY_ID || '—'))} | ${r.CONFIG_STATUS || 'No config'}</div>
                         </div>
                     `).join('');
                     dropdown.classList.add('show');
