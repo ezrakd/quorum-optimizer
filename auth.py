@@ -133,16 +133,21 @@ def _decode_clerk_token(token):
 def _extract_user_info(payload):
     """
     Extract role and agency_id from Clerk JWT payload.
-    Clerk stores custom data in public_metadata or session claims.
+    Clerk JWTs don't include public_metadata by default, so we fetch
+    user details from the Clerk Backend API using the user_id (sub claim).
     """
-    # Check for public_metadata in the token (Clerk session claims)
+    user_id = payload.get('sub')
+
+    # First, check if metadata is already in the token (custom session claims)
     metadata = payload.get('public_metadata', {})
     if not metadata:
-        # Also check under 'metadata' key
         metadata = payload.get('metadata', {})
     if not metadata:
-        # Check Clerk's custom claims path
         metadata = payload.get('user_public_metadata', {})
+
+    # If no metadata in token, fetch from Clerk Backend API
+    if not metadata and user_id:
+        metadata = _fetch_clerk_user_metadata(user_id)
 
     role = metadata.get('role', 'agency')  # default to agency (least privilege)
     agency_id = metadata.get('agency_id')
@@ -155,11 +160,60 @@ def _extract_user_info(payload):
             agency_id = None
 
     return {
-        'user_id': payload.get('sub'),
+        'user_id': user_id,
         'role': role,
         'agency_id': agency_id,
-        'email': payload.get('email', ''),
+        'email': payload.get('email', metadata.get('email', '')),
     }
+
+
+# ---------------------------------------------------------------------------
+# Clerk Backend API — fetch user metadata
+# ---------------------------------------------------------------------------
+_user_metadata_cache = {}
+_user_metadata_lock = threading.Lock()
+USER_METADATA_TTL = 300  # cache user metadata for 5 minutes
+
+
+def _fetch_clerk_user_metadata(user_id):
+    """Fetch user's public_metadata from Clerk Backend API, with caching."""
+    now = time.time()
+
+    with _user_metadata_lock:
+        cached = _user_metadata_cache.get(user_id)
+        if cached and (now - cached['fetched_at']) < USER_METADATA_TTL:
+            return cached['metadata']
+
+    secret_key = os.environ.get('CLERK_SECRET_KEY', '')
+    if not secret_key:
+        return {}
+
+    try:
+        resp = requests.get(
+            f'https://api.clerk.com/v1/users/{user_id}',
+            headers={'Authorization': f'Bearer {secret_key}'},
+            timeout=10
+        )
+        resp.raise_for_status()
+        user_data = resp.json()
+        metadata = user_data.get('public_metadata', {})
+
+        # Also grab email if available
+        email_addresses = user_data.get('email_addresses', [])
+        if email_addresses:
+            primary = next((e for e in email_addresses if e.get('id') == user_data.get('primary_email_address_id')), None)
+            if primary:
+                metadata['email'] = primary.get('email_address', '')
+
+        with _user_metadata_lock:
+            _user_metadata_cache[user_id] = {
+                'metadata': metadata,
+                'fetched_at': time.time()
+            }
+        return metadata
+    except Exception as e:
+        print(f"[Auth] Failed to fetch user metadata for {user_id}: {e}")
+        return {}
 
 
 # ---------------------------------------------------------------------------

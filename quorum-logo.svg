@@ -1,19 +1,52 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
-  <defs>
-    <filter id="glow">
-      <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
-      <feMerge>
-        <feMergeNode in="coloredBlur"/>
-        <feMergeNode in="SourceGraphic"/>
-      </feMerge>
-    </filter>
-  </defs>
-  <path d="M 100,100 L 87.1,69.0 L 100.0,20.0 L 112.9,69.0 Z" fill="#0A4DA6" opacity="0.85" filter="url(#glow)"/>
-  <path d="M 100,100 L 112.9,69.0 L 156.6,43.4 L 131.0,87.1 Z" fill="#1565C0" opacity="0.85" filter="url(#glow)"/>
-  <path d="M 100,100 L 131.0,87.1 L 180.0,100.0 L 131.0,112.9 Z" fill="#1976D2" opacity="0.85" filter="url(#glow)"/>
-  <path d="M 100,100 L 131.0,112.9 L 156.6,156.6 L 112.9,131.0 Z" fill="#1E88E5" opacity="0.85" filter="url(#glow)"/>
-  <path d="M 100,100 L 112.9,131.0 L 100.0,180.0 L 87.1,131.0 Z" fill="#2196F3" opacity="0.85" filter="url(#glow)"/>
-  <path d="M 100,100 L 87.1,131.0 L 43.4,156.6 L 69.0,112.9 Z" fill="#42A5F5" opacity="0.85" filter="url(#glow)"/>
-  <path d="M 100,100 L 69.0,112.9 L 20.0,100.0 L 69.0,87.1 Z" fill="#64B5F6" opacity="0.85" filter="url(#glow)"/>
-  <path d="M 100,100 L 69.0,87.1 L 43.4,43.4 L 87.1,69.0 Z" fill="#90CAF9" opacity="0.85" filter="url(#glow)"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 280" width="240" height="280">
+  <!-- Quorum crystalline star logo with QUORUM text -->
+
+  <!-- 8 elongated diamond blades radiating from center, crystalline cyan/teal -->
+  <!-- Each blade: 2 triangular facets with light/dark for 3D depth -->
+
+  <!-- Center point: 120, 120 -->
+
+  <!-- Top blade -->
+  <polygon points="120,120 108,68 120,18" fill="#45C6CC" opacity="0.88"/>
+  <polygon points="120,120 132,68 120,18" fill="#7AEAED" opacity="0.88"/>
+
+  <!-- Top-right blade -->
+  <polygon points="120,120 148,82 180,40" fill="#35B0BA" opacity="0.85"/>
+  <polygon points="120,120 158,92 180,40" fill="#6CDFE5" opacity="0.85"/>
+
+  <!-- Right blade -->
+  <polygon points="120,120 172,108 222,120" fill="#2A9BA5" opacity="0.88"/>
+  <polygon points="120,120 172,132 222,120" fill="#5DD4DB" opacity="0.88"/>
+
+  <!-- Bottom-right blade -->
+  <polygon points="120,120 158,148 180,200" fill="#1D8A94" opacity="0.85"/>
+  <polygon points="120,120 148,158 180,200" fill="#45C6CC" opacity="0.85"/>
+
+  <!-- Bottom blade -->
+  <polygon points="120,120 132,172 120,222" fill="#1A7E88" opacity="0.88"/>
+  <polygon points="120,120 108,172 120,222" fill="#3BBCC4" opacity="0.88"/>
+
+  <!-- Bottom-left blade -->
+  <polygon points="120,120 82,158 60,200" fill="#35B0BA" opacity="0.85"/>
+  <polygon points="120,120 92,148 60,200" fill="#1D8A94" opacity="0.85"/>
+
+  <!-- Left blade -->
+  <polygon points="120,120 68,132 18,120" fill="#45C6CC" opacity="0.88"/>
+  <polygon points="120,120 68,108 18,120" fill="#1A7E88" opacity="0.88"/>
+
+  <!-- Top-left blade -->
+  <polygon points="120,120 82,92 60,40" fill="#6CDFE5" opacity="0.85"/>
+  <polygon points="120,120 92,82 60,40" fill="#2A9BA5" opacity="0.85"/>
+
+  <!-- Inner diamond overlays for crystalline depth -->
+  <polygon points="120,120 110,80 120,50 130,80" fill="#8CF0F4" opacity="0.3"/>
+  <polygon points="120,120 160,110 192,120 160,130" fill="#8CF0F4" opacity="0.25"/>
+  <polygon points="120,120 130,160 120,192 110,160" fill="#2A9BA5" opacity="0.25"/>
+  <polygon points="120,120 80,130 48,120 80,110" fill="#3BBCC4" opacity="0.25"/>
+
+  <!-- Center highlight -->
+  <circle cx="120" cy="120" r="5" fill="#A8F4F7" opacity="0.35"/>
+
+  <!-- QUORUM text -->
+  <text x="120" y="260" text-anchor="middle" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="300" letter-spacing="8" fill="#e7e9ea">QUORUM</text>
 </svg>

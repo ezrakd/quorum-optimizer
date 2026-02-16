@@ -64,13 +64,31 @@
             font-size: 14px;
             display: none;
         }
+        /* Improve Clerk social button readability */
+        #clerk-sign-in .cl-socialButtonsBlockButton {
+            background: #ffffff !important;
+            color: #1f1f1f !important;
+            border: 1px solid #dadce0 !important;
+            font-weight: 500 !important;
+        }
+        #clerk-sign-in .cl-socialButtonsBlockButton:hover {
+            background: #f7f8f8 !important;
+        }
+        #clerk-sign-in .cl-socialButtonsBlockButtonText {
+            color: #1f1f1f !important;
+        }
+        #clerk-sign-in .cl-dividerLine {
+            background: #3d5466 !important;
+        }
+        #clerk-sign-in .cl-dividerText {
+            color: #8b98a5 !important;
+        }
     </style>
 </head>
 <body>
     <div class="login-container">
         <div class="logo-area">
-            <img src="/quorum-logo.svg" alt="Quorum" style="width:80px;height:80px;margin-bottom:16px;">
-            <h1>Quorum</h1>
+            <img src="/quorum-logo.png" alt="Quorum" style="max-width:200px;margin-bottom:16px;">
             <div class="subtitle">Location Intelligence Platform</div>
         </div>
 
@@ -136,12 +154,32 @@
                             appearance: {
                                 variables: {
                                     colorPrimary: '#1d9bf0',
-                                    colorBackground: '#1e2732',
+                                    colorBackground: '#1a2332',
                                     colorText: '#e7e9ea',
                                     colorTextSecondary: '#8b98a5',
                                     colorInputBackground: '#273340',
                                     colorInputText: '#e7e9ea',
+                                    colorNeutral: '#e7e9ea',
+                                    colorTextOnPrimaryBackground: '#ffffff',
                                     borderRadius: '8px',
+                                },
+                                elements: {
+                                    socialButtonsBlockButton: {
+                                        backgroundColor: '#ffffff',
+                                        color: '#1f1f1f',
+                                        border: '1px solid #dadce0',
+                                        fontWeight: '500',
+                                    },
+                                    socialButtonsBlockButtonText: {
+                                        color: '#1f1f1f',
+                                    },
+                                    card: {
+                                        backgroundColor: '#1a2332',
+                                        border: '1px solid #2f3942',
+                                    },
+                                    footerActionLink: {
+                                        color: '#1d9bf0',
+                                    },
                                 }
                             },
                             afterSignInUrl: '/',
