@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Quorum — Sign In</title>
+    <link rel="icon" type="image/png" href="/quorum-favicon.png">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -34,7 +35,6 @@
             font-size: 14px;
             color: #8b98a5;
         }
-        /* Clerk component will mount here */
         #clerk-sign-in {
             display: flex;
             justify-content: center;
@@ -69,6 +69,7 @@
 <body>
     <div class="login-container">
         <div class="logo-area">
+            <img src="/quorum-logo.svg" alt="Quorum" style="width:80px;height:80px;margin-bottom:16px;">
             <h1>Quorum</h1>
             <div class="subtitle">Location Intelligence Platform</div>
         </div>
@@ -84,8 +85,18 @@
     </div>
 
     <script>
-        // Clerk publishable key injected by the server as a template variable,
-        // or read from a meta tag / inline script.
+        // Derive Clerk Frontend API URL from publishable key
+        function getFapiUrl(pk) {
+            const encoded = pk.replace('pk_test_', '').replace('pk_live_', '');
+            try {
+                const decoded = atob(encoded);
+                return decoded.replace(/\$$/, '');
+            } catch (e) {
+                return null;
+            }
+        }
+
+        // Clerk publishable key injected by the server
         const CLERK_PK = document.querySelector('meta[name="clerk-pk"]')?.content
                          || window.__CLERK_PK__
                          || '';
@@ -94,50 +105,62 @@
             document.getElementById('clerk-sign-in').innerHTML =
                 '<p style="color:#8b98a5">Authentication is not configured. Contact your administrator.</p>';
         } else {
-            // Load Clerk JS SDK
-            const script = document.createElement('script');
-            script.src = 'https://cdn.jsdelivr.net/npm/@clerk/clerk-js@latest/dist/clerk.browser.js';
-            script.crossOrigin = 'anonymous';
-            script.onload = async () => {
-                try {
-                    const clerk = new window.Clerk(CLERK_PK);
-                    await clerk.load();
-
-                    if (clerk.user) {
-                        // Already signed in — redirect to dashboard
-                        window.location.href = '/';
-                        return;
-                    }
-
-                    // Mount sign-in component
-                    document.getElementById('clerk-sign-in').innerHTML = '';
-                    clerk.mountSignIn(document.getElementById('clerk-sign-in'), {
-                        appearance: {
-                            variables: {
-                                colorPrimary: '#1d9bf0',
-                                colorBackground: '#1e2732',
-                                colorText: '#e7e9ea',
-                                colorTextSecondary: '#8b98a5',
-                                colorInputBackground: '#273340',
-                                colorInputText: '#e7e9ea',
-                                borderRadius: '8px',
-                            }
-                        },
-                        afterSignInUrl: '/',
-                        redirectUrl: '/',
-                    });
-                } catch (err) {
-                    console.error('Clerk init error:', err);
-                    const errDiv = document.getElementById('auth-error');
-                    errDiv.style.display = 'block';
-                    errDiv.textContent = 'Failed to load authentication. Please refresh or contact support.';
-                }
-            };
-            script.onerror = () => {
+            const fapiUrl = getFapiUrl(CLERK_PK);
+            if (!fapiUrl) {
                 document.getElementById('clerk-sign-in').innerHTML =
-                    '<p style="color:#f4212e">Failed to load authentication SDK. Check your connection.</p>';
-            };
-            document.head.appendChild(script);
+                    '<p style="color:#f4212e">Invalid authentication key. Contact your administrator.</p>';
+            } else {
+                // Load Clerk JS SDK from Clerk's own CDN
+                const script = document.createElement('script');
+                script.src = `https://${fapiUrl}/npm/@clerk/clerk-js@5/dist/clerk.browser.js`;
+                script.crossOrigin = 'anonymous';
+                script.setAttribute('data-clerk-publishable-key', CLERK_PK);
+                script.onload = async () => {
+                    try {
+                        // Wait for Clerk global to be available
+                        const clerk = window.Clerk;
+                        if (!clerk) throw new Error('Clerk not loaded');
+
+                        if (typeof clerk.load === 'function') {
+                            await clerk.load();
+                        }
+
+                        if (clerk.user) {
+                            window.location.href = '/';
+                            return;
+                        }
+
+                        // Mount sign-in component
+                        document.getElementById('clerk-sign-in').innerHTML = '';
+                        clerk.mountSignIn(document.getElementById('clerk-sign-in'), {
+                            appearance: {
+                                variables: {
+                                    colorPrimary: '#1d9bf0',
+                                    colorBackground: '#1e2732',
+                                    colorText: '#e7e9ea',
+                                    colorTextSecondary: '#8b98a5',
+                                    colorInputBackground: '#273340',
+                                    colorInputText: '#e7e9ea',
+                                    borderRadius: '8px',
+                                }
+                            },
+                            afterSignInUrl: '/',
+                            redirectUrl: '/',
+                        });
+                    } catch (err) {
+                        console.error('Clerk init error:', err);
+                        const errDiv = document.getElementById('auth-error');
+                        errDiv.style.display = 'block';
+                        errDiv.textContent = 'Failed to load authentication. Please refresh or contact support.';
+                    }
+                };
+                script.onerror = (e) => {
+                    console.error('Clerk script load error:', e);
+                    document.getElementById('clerk-sign-in').innerHTML =
+                        '<p style="color:#f4212e">Failed to load authentication SDK. Check your connection.</p>';
+                };
+                document.head.appendChild(script);
+            }
         }
     </script>
 </body>

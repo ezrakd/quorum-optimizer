@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Quorum Optimizer v6</title>
+    <link rel="icon" type="image/png" href="/quorum-favicon.png">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     <style>
@@ -190,17 +191,26 @@
                     console.log('[Auth] Disabled (no CLERK_SECRET_KEY)');
                     return;
                 }
-                // Load Clerk JS SDK
+                // Derive Clerk Frontend API URL from publishable key
+                function getFapiUrl(pk) {
+                    const encoded = pk.replace('pk_test_', '').replace('pk_live_', '');
+                    try { return atob(encoded).replace(/\$$/, ''); } catch(e) { return null; }
+                }
+                const fapiUrl = getFapiUrl(cfg.publishable_key);
+                if (!fapiUrl) { console.warn('[Auth] Invalid publishable key'); return; }
+                // Load Clerk JS SDK from Clerk's own CDN
                 await new Promise((resolve, reject) => {
                     const s = document.createElement('script');
-                    s.src = 'https://cdn.jsdelivr.net/npm/@clerk/clerk-js@latest/dist/clerk.browser.js';
+                    s.src = `https://${fapiUrl}/npm/@clerk/clerk-js@5/dist/clerk.browser.js`;
                     s.crossOrigin = 'anonymous';
+                    s.setAttribute('data-clerk-publishable-key', cfg.publishable_key);
                     s.onload = resolve;
                     s.onerror = reject;
                     document.head.appendChild(s);
                 });
-                _clerk = new window.Clerk(cfg.publishable_key);
-                await _clerk.load();
+                _clerk = window.Clerk;
+                if (!_clerk) { console.warn('[Auth] Clerk not loaded'); return; }
+                if (typeof _clerk.load === 'function') await _clerk.load();
 
                 if (!_clerk.user) {
                     window.location.href = '/login';

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <defs>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <path d="M 100,100 L 87.1,69.0 L 100.0,20.0 L 112.9,69.0 Z" fill="#0A4DA6" opacity="0.85" filter="url(#glow)"/>
+  <path d="M 100,100 L 112.9,69.0 L 156.6,43.4 L 131.0,87.1 Z" fill="#1565C0" opacity="0.85" filter="url(#glow)"/>
+  <path d="M 100,100 L 131.0,87.1 L 180.0,100.0 L 131.0,112.9 Z" fill="#1976D2" opacity="0.85" filter="url(#glow)"/>
+  <path d="M 100,100 L 131.0,112.9 L 156.6,156.6 L 112.9,131.0 Z" fill="#1E88E5" opacity="0.85" filter="url(#glow)"/>
+  <path d="M 100,100 L 112.9,131.0 L 100.0,180.0 L 87.1,131.0 Z" fill="#2196F3" opacity="0.85" filter="url(#glow)"/>
+  <path d="M 100,100 L 87.1,131.0 L 43.4,156.6 L 69.0,112.9 Z" fill="#42A5F5" opacity="0.85" filter="url(#glow)"/>
+  <path d="M 100,100 L 69.0,112.9 L 20.0,100.0 L 69.0,87.1 Z" fill="#64B5F6" opacity="0.85" filter="url(#glow)"/>
+  <path d="M 100,100 L 69.0,87.1 L 43.4,43.4 L 87.1,69.0 Z" fill="#90CAF9" opacity="0.85" filter="url(#glow)"/>
+</svg>
