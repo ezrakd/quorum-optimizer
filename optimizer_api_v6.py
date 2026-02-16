@@ -156,38 +156,51 @@ def get_agencies():
                 d['IMPRESSION_STRATEGY'] = STRATEGY_PCM_4KEY
                 all_results.append(d)
 
-        # --- ADM_PREFIX agencies: row-level path ---
+        # --- ADM_PREFIX agencies: row-level via V2+PCM join ---
         row_level_agencies = [aid for aid, c in config.items()
                               if c.get('impression_join_strategy') == STRATEGY_ADM_PREFIX]
 
-        for agency_id in row_level_agencies:
-            cursor.execute("""
-                SELECT
-                    APPROX_COUNT_DISTINCT(CACHE_BUSTER) as IMPRESSIONS,
-                    APPROX_COUNT_DISTINCT(CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
-                    APPROX_COUNT_DISTINCT(CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IP END) as WEB_VISITS,
-                    APPROX_COUNT_DISTINCT(QUORUM_ADVERTISER_ID) as ADVERTISER_COUNT,
-                    MIN(IMP_DATE) as MIN_DATE, MAX(IMP_DATE) as MAX_DATE
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
+        if row_level_agencies:
+            rl_ids = ','.join(str(int(a)) for a in row_level_agencies)
+            cursor.execute(f"""
+                SELECT m.AGENCY_ID,
+                       COUNT(*) as IMPRESSIONS,
+                       0 as STORE_VISITS,
+                       0 as WEB_VISITS,
+                       COUNT(DISTINCT m.QUORUM_ADVERTISER_ID) as ADVERTISER_COUNT,
+                       MIN(v.AUCTION_TIMESTAMP::DATE) as MIN_DATE,
+                       MAX(v.AUCTION_TIMESTAMP::DATE) as MAX_DATE
+                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+                JOIN (
+                    SELECT DSP_ADVERTISER_ID, AGENCY_ID,
+                           MAX(QUORUM_ADVERTISER_ID) as QUORUM_ADVERTISER_ID
+                    FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
+                    WHERE AGENCY_ID IN ({rl_ids})
+                      AND QUORUM_ADVERTISER_ID IS NOT NULL AND QUORUM_ADVERTISER_ID != 0
+                    GROUP BY DSP_ADVERTISER_ID, AGENCY_ID
+                ) m ON v.DSP_ADVERTISER_ID = m.DSP_ADVERTISER_ID
+                   AND v.AGENCY_ID = m.AGENCY_ID
+                WHERE v.AGENCY_ID IN ({rl_ids})
+                  AND v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
+                GROUP BY m.AGENCY_ID
             """, {'start_date': start_date, 'end_date': end_date})
 
-            row = cursor.fetchone()
-            if row and (row[0] or row[1] or row[2]):
-                imps = row[0] or 0
-                store = row[1] or 0
-                web = row[2] or 0
+            for row in cursor.fetchall():
+                agency_id_val = row[0]
+                imps = row[1] or 0
+                store = row[2] or 0
+                web = row[3] or 0
                 all_results.append({
-                    'AGENCY_ID': agency_id,
-                    'AGENCY_NAME': config[agency_id]['name'],
+                    'AGENCY_ID': agency_id_val,
+                    'AGENCY_NAME': config.get(agency_id_val, {}).get('name', f'Agency {agency_id_val}'),
                     'IMPRESSIONS': imps,
                     'STORE_VISITS': store,
                     'WEB_VISITS': web,
-                    'ADVERTISER_COUNT': row[3] or 0,
+                    'ADVERTISER_COUNT': row[4] or 0,
                     'STORE_VISIT_RATE': round(store * 100.0 / imps, 4) if imps else 0,
                     'WEB_VISIT_RATE': round(web * 100.0 / imps, 4) if imps else 0,
-                    'MIN_DATE': str(row[4]) if row[4] else None,
-                    'MAX_DATE': str(row[5]) if row[5] else None,
+                    'MIN_DATE': str(row[5]) if row[5] else None,
+                    'MAX_DATE': str(row[6]) if row[6] else None,
                     'IMPRESSION_STRATEGY': STRATEGY_ADM_PREFIX,
                 })
 
@@ -305,17 +318,23 @@ def get_campaign_performance():
         if strategy == STRATEGY_ADM_PREFIX:
             cursor.execute("""
                 SELECT
-                    IO_ID, MAX(IO_NAME) as IO_NAME,
-                    COUNT(DISTINCT CACHE_BUSTER) as IMPRESSIONS,
-                    COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
-                    COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IP END) as WEB_VISITS
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
-                  AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
-                GROUP BY IO_ID
-                HAVING COUNT(DISTINCT CACHE_BUSTER) >= 100
+                    v.INSERTION_ORDER_ID, MAX(v.INSERTION_ORDER_NAME) as IO_NAME,
+                    COUNT(*) as IMPRESSIONS,
+                    0 as STORE_VISITS,
+                    0 as WEB_VISITS
+                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+                JOIN (
+                    SELECT DISTINCT DSP_ADVERTISER_ID
+                    FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
+                    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                      AND AGENCY_ID = %(agency_id)s
+                ) pcm ON v.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
+                WHERE v.AGENCY_ID = %(agency_id)s
+                  AND v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
+                GROUP BY v.INSERTION_ORDER_ID
+                HAVING COUNT(*) >= 100
                 ORDER BY 3 DESC
-            """, {'advertiser_id': advertiser_id, 'start_date': start_date, 'end_date': end_date})
+            """, {'advertiser_id': advertiser_id, 'agency_id': agency_id, 'start_date': start_date, 'end_date': end_date})
         else:
             cursor.execute("""
                 SELECT
@@ -361,24 +380,30 @@ def get_lineitem_performance():
 
         if strategy == STRATEGY_ADM_PREFIX:
             filters = ""
-            if campaign_id: filters += f" AND IO_ID = '{campaign_id}'"
+            if campaign_id: filters += f" AND v.INSERTION_ORDER_ID = '{campaign_id}'"
 
             query = f"""
                 SELECT
-                    LINEITEM_ID, MAX(LINEITEM_NAME) as LINEITEM_NAME,
-                    IO_ID, MAX(IO_NAME) as IO_NAME,
-                    MAX(PT) as PLATFORM_TYPE,
-                    COUNT(DISTINCT CACHE_BUSTER) as IMPRESSIONS,
-                    COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
-                    COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IP END) as WEB_VISITS
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
-                  AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s {filters}
-                GROUP BY LINEITEM_ID, IO_ID
-                HAVING COUNT(DISTINCT CACHE_BUSTER) >= 50
+                    v.LINE_ITEM_ID, MAX(v.LINE_ITEM_NAME) as LINEITEM_NAME,
+                    v.INSERTION_ORDER_ID, MAX(v.INSERTION_ORDER_NAME) as IO_NAME,
+                    MAX(v.DSP_PLATFORM_TYPE) as PLATFORM_TYPE,
+                    COUNT(*) as IMPRESSIONS,
+                    0 as STORE_VISITS,
+                    0 as WEB_VISITS
+                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+                JOIN (
+                    SELECT DISTINCT DSP_ADVERTISER_ID
+                    FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
+                    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                      AND AGENCY_ID = %(agency_id)s
+                ) pcm ON v.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
+                WHERE v.AGENCY_ID = %(agency_id)s
+                  AND v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s {filters}
+                GROUP BY v.LINE_ITEM_ID, v.INSERTION_ORDER_ID
+                HAVING COUNT(*) >= 50
                 ORDER BY 6 DESC
             """
-            cursor.execute(query, {'advertiser_id': advertiser_id,
+            cursor.execute(query, {'advertiser_id': advertiser_id, 'agency_id': agency_id,
                                    'start_date': start_date, 'end_date': end_date})
         else:
             filters = ""
@@ -437,8 +462,8 @@ def get_creative_performance():
 
         if strategy == STRATEGY_ADM_PREFIX:
             filters = ""
-            if campaign_id: filters += f" AND p.IO_ID = '{campaign_id}'"
-            if lineitem_id: filters += f" AND p.LINEITEM_ID = '{lineitem_id}'"
+            if campaign_id: filters += f" AND v.INSERTION_ORDER_ID = '{campaign_id}'"
+            if lineitem_id: filters += f" AND v.LINE_ITEM_ID = '{lineitem_id}'"
 
             query = f"""
                 WITH bounce_data AS (
@@ -453,28 +478,35 @@ def get_creative_performance():
                     GROUP BY CREATIVE_NAME, IP
                 )
                 SELECT
-                    p.CREATIVE_NAME, MAX(p.CREATIVE_SIZE) as CREATIVE_SIZE,
-                    COUNT(DISTINCT p.CACHE_BUSTER) as IMPRESSIONS,
-                    COUNT(DISTINCT CASE WHEN p.IS_STORE_VISIT = 'TRUE' THEN p.IMP_MAID END) as STORE_VISITS,
-                    COUNT(DISTINCT CASE WHEN p.IS_SITE_VISIT = 'TRUE' THEN p.IP END) as WEB_VISITS,
+                    v.CREATIVE_NAME, NULL as CREATIVE_SIZE,
+                    COUNT(*) as IMPRESSIONS,
+                    0 as STORE_VISITS,
+                    0 as WEB_VISITS,
                     MAX(b_stats.bounce_rate) as BOUNCE_RATE,
                     MAX(b_stats.avg_pages) as AVG_PAGES
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS p
+                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+                JOIN (
+                    SELECT DISTINCT DSP_ADVERTISER_ID
+                    FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
+                    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                      AND AGENCY_ID = %(agency_id)s
+                ) pcm ON v.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
                 LEFT JOIN (
                     SELECT CREATIVE_NAME,
                         ROUND(SUM(CASE WHEN page_views = 1 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 1) as bounce_rate,
                         ROUND(AVG(page_views), 2) as avg_pages
                     FROM bounce_data GROUP BY CREATIVE_NAME
-                ) b_stats ON p.CREATIVE_NAME = b_stats.CREATIVE_NAME
-                WHERE p.QUORUM_ADVERTISER_ID = %(advertiser_id)s
-                  AND p.IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
-                  AND p.CREATIVE_NAME IS NOT NULL {filters}
-                GROUP BY p.CREATIVE_NAME
-                HAVING COUNT(DISTINCT p.CACHE_BUSTER) >= 100
+                ) b_stats ON v.CREATIVE_NAME = b_stats.CREATIVE_NAME
+                WHERE v.AGENCY_ID = %(agency_id)s
+                  AND v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
+                  AND v.CREATIVE_NAME IS NOT NULL {filters}
+                GROUP BY v.CREATIVE_NAME
+                HAVING COUNT(*) >= 100
                 ORDER BY 3 DESC
             """
             cursor.execute(query, {
                 'advertiser_id': int(advertiser_id),
+                'agency_id': agency_id,
                 'advertiser_id_str': str(advertiser_id),
                 'start_date': start_date, 'end_date': end_date
             })
@@ -551,24 +583,30 @@ def get_publisher_performance():
 
         if strategy == STRATEGY_ADM_PREFIX:
             filters = ""
-            if campaign_id: filters += f" AND IO_ID = '{campaign_id}'"
-            if lineitem_id: filters += f" AND LINEITEM_ID = '{lineitem_id}'"
+            if campaign_id: filters += f" AND v.INSERTION_ORDER_ID = '{campaign_id}'"
+            if lineitem_id: filters += f" AND v.LINE_ITEM_ID = '{lineitem_id}'"
 
             query = f"""
                 SELECT
-                    SITE as PUBLISHER,
-                    COUNT(DISTINCT CACHE_BUSTER) as IMPRESSIONS,
-                    COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
-                    COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IP END) as WEB_VISITS
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
-                  AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
-                  AND SITE IS NOT NULL {filters}
-                GROUP BY SITE
-                HAVING COUNT(DISTINCT CACHE_BUSTER) >= 100
+                    v.SITE_DOMAIN as PUBLISHER,
+                    COUNT(*) as IMPRESSIONS,
+                    0 as STORE_VISITS,
+                    0 as WEB_VISITS
+                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+                JOIN (
+                    SELECT DISTINCT DSP_ADVERTISER_ID
+                    FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
+                    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                      AND AGENCY_ID = %(agency_id)s
+                ) pcm ON v.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
+                WHERE v.AGENCY_ID = %(agency_id)s
+                  AND v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
+                  AND v.SITE_DOMAIN IS NOT NULL {filters}
+                GROUP BY v.SITE_DOMAIN
+                HAVING COUNT(*) >= 100
                 ORDER BY 2 DESC LIMIT 50
             """
-            cursor.execute(query, {'advertiser_id': advertiser_id,
+            cursor.execute(query, {'advertiser_id': advertiser_id, 'agency_id': agency_id,
                                    'start_date': start_date, 'end_date': end_date})
         else:
             filters = ""
@@ -624,21 +662,25 @@ def get_zip_performance():
 
         if strategy == STRATEGY_ADM_PREFIX:
             filters = ""
-            if campaign_id: filters += f" AND p.IO_ID = '{campaign_id}'"
-            if lineitem_id: filters += f" AND p.LINEITEM_ID = '{lineitem_id}'"
+            if campaign_id: filters += f" AND v.INSERTION_ORDER_ID = '{campaign_id}'"
+            if lineitem_id: filters += f" AND v.LINE_ITEM_ID = '{lineitem_id}'"
 
             query = f"""
-                SELECT p.ZIP_CODE as ZIP,
+                SELECT v.USER_POSTAL_CODE as ZIP,
                     MAX(d.CITY) as CITY, MAX(d.STATE_PROV) as STATE,
-                    COUNT(DISTINCT p.CACHE_BUSTER) as IMPRESSIONS,
-                    COUNT(DISTINCT CASE WHEN p.IS_STORE_VISIT = 'TRUE' THEN p.IMP_MAID END) as STORE_VISITS,
-                    COUNT(DISTINCT CASE WHEN p.IS_SITE_VISIT = 'TRUE' THEN p.IP END) as WEB_VISITS
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS p
-                LEFT JOIN QUORUMDB.SEGMENT_DATA.DBIP_LOOKUP_US d ON p.ZIP_CODE = d.ZIPCODE
-                WHERE p.QUORUM_ADVERTISER_ID = %(advertiser_id)s
-                  AND p.IMP_DATE BETWEEN %(start_date)s AND %(end_date)s {filters}
-                GROUP BY p.ZIP_CODE
-                HAVING COUNT(DISTINCT p.CACHE_BUSTER) >= 50
+                    COUNT(*) as IMPRESSIONS,
+                    0 as STORE_VISITS,
+                    0 as WEB_VISITS
+                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+                JOIN (
+                    SELECT DISTINCT DSP_ADVERTISER_ID
+                    FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
+                    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                ) pcm ON v.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
+                LEFT JOIN QUORUMDB.SEGMENT_DATA.DBIP_LOOKUP_US d ON v.USER_POSTAL_CODE = d.ZIPCODE
+                WHERE v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s {filters}
+                GROUP BY v.USER_POSTAL_CODE
+                HAVING COUNT(*) >= 50
                 ORDER BY 4 DESC LIMIT 100
             """
             cursor.execute(query, {'advertiser_id': advertiser_id,
@@ -715,8 +757,8 @@ def get_dma_performance():
 
         if strategy == STRATEGY_ADM_PREFIX:
             filters = ""
-            if campaign_id: filters += f" AND p.IO_ID = '{campaign_id}'"
-            if lineitem_id: filters += f" AND p.LINEITEM_ID = '{lineitem_id}'"
+            if campaign_id: filters += f" AND v.INSERTION_ORDER_ID = '{campaign_id}'"
+            if lineitem_id: filters += f" AND v.LINE_ITEM_ID = '{lineitem_id}'"
 
             query = f"""
                 WITH zip_dma AS (
@@ -725,14 +767,18 @@ def get_dma_performance():
                     WHERE DMA_NAME IS NOT NULL AND DMA_NAME != ''
                     GROUP BY ZIPCODE
                 )
-                SELECT d.DMA_NAME as DMA, COUNT(DISTINCT p.CACHE_BUSTER) as IMPRESSIONS,
-                    COUNT(DISTINCT CASE WHEN p.IS_STORE_VISIT = 'TRUE' THEN p.IMP_MAID END) as STORE_VISITS,
-                    COUNT(DISTINCT CASE WHEN p.IS_SITE_VISIT = 'TRUE' THEN p.IP END) as WEB_VISITS
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS p
-                JOIN zip_dma d ON p.ZIP_CODE = d.ZIPCODE
-                WHERE p.QUORUM_ADVERTISER_ID = %(advertiser_id)s
-                  AND p.IMP_DATE BETWEEN %(start_date)s AND %(end_date)s {filters}
-                GROUP BY d.DMA_NAME HAVING COUNT(DISTINCT p.CACHE_BUSTER) >= 100 ORDER BY 2 DESC LIMIT 50
+                SELECT d.DMA_NAME as DMA, COUNT(*) as IMPRESSIONS,
+                    0 as STORE_VISITS,
+                    0 as WEB_VISITS
+                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+                JOIN (
+                    SELECT DISTINCT DSP_ADVERTISER_ID
+                    FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
+                    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                ) pcm ON v.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
+                JOIN zip_dma d ON v.USER_POSTAL_CODE = d.ZIPCODE
+                WHERE v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s {filters}
+                GROUP BY d.DMA_NAME HAVING COUNT(*) >= 100 ORDER BY 2 DESC LIMIT 50
             """
             cursor.execute(query, {'advertiser_id': advertiser_id,
                                    'start_date': start_date, 'end_date': end_date})
@@ -783,14 +829,18 @@ def get_summary():
         if strategy == STRATEGY_ADM_PREFIX:
             query = """
                 SELECT
-                    COUNT(DISTINCT CACHE_BUSTER) as IMPRESSIONS,
-                    COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
-                    COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IP END) as WEB_VISITS,
-                    MIN(IMP_DATE) as MIN_DATE,
-                    MAX(IMP_DATE) as MAX_DATE
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
-                  AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
+                    COUNT(*) as IMPRESSIONS,
+                    0 as STORE_VISITS,
+                    0 as WEB_VISITS,
+                    MIN(v.AUCTION_TIMESTAMP::DATE) as MIN_DATE,
+                    MAX(v.AUCTION_TIMESTAMP::DATE) as MAX_DATE
+                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+                JOIN (
+                    SELECT DISTINCT DSP_ADVERTISER_ID
+                    FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
+                    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                ) pcm ON v.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
+                WHERE v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
             """
         else:
             query = """
@@ -844,15 +894,19 @@ def get_timeseries():
         if strategy == STRATEGY_ADM_PREFIX:
             query = """
                 SELECT
-                    IMP_DATE as LOG_DATE,
-                    COUNT(DISTINCT CACHE_BUSTER) as IMPRESSIONS,
-                    COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END) as STORE_VISITS,
-                    COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IP END) as WEB_VISITS
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
-                  AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
-                GROUP BY IMP_DATE
-                ORDER BY IMP_DATE
+                    v.AUCTION_TIMESTAMP::DATE as LOG_DATE,
+                    COUNT(*) as IMPRESSIONS,
+                    0 as STORE_VISITS,
+                    0 as WEB_VISITS
+                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+                JOIN (
+                    SELECT DISTINCT DSP_ADVERTISER_ID
+                    FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
+                    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                ) pcm ON v.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
+                WHERE v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
+                GROUP BY v.AUCTION_TIMESTAMP::DATE
+                ORDER BY v.AUCTION_TIMESTAMP::DATE
             """
         else:
             query = """
@@ -900,33 +954,36 @@ def get_lift_analysis():
 
         if strategy == STRATEGY_ADM_PREFIX:
             if group_by == 'lineitem':
-                group_cols = "IO_ID, LINEITEM_ID"
+                group_cols = "v.INSERTION_ORDER_ID, v.LINE_ITEM_ID"
                 name_cols = """
-                    COALESCE(MAX(LINEITEM_NAME), 'LI-' || LINEITEM_ID::VARCHAR) as NAME,
-                    COALESCE(MAX(IO_NAME), 'IO-' || IO_ID::VARCHAR) as PARENT_NAME,
-                    LINEITEM_ID as ID, IO_ID as PARENT_ID,
+                    COALESCE(MAX(v.LINE_ITEM_NAME), 'LI-' || v.LINE_ITEM_ID::VARCHAR) as NAME,
+                    COALESCE(MAX(v.INSERTION_ORDER_NAME), 'IO-' || v.INSERTION_ORDER_ID::VARCHAR) as PARENT_NAME,
+                    v.LINE_ITEM_ID as ID, v.INSERTION_ORDER_ID as PARENT_ID,
                 """
             else:
-                group_cols = "IO_ID"
+                group_cols = "v.INSERTION_ORDER_ID"
                 name_cols = """
-                    COALESCE(MAX(IO_NAME), 'IO-' || IO_ID::VARCHAR) as NAME,
-                    NULL as PARENT_NAME, IO_ID as ID, NULL as PARENT_ID,
+                    COALESCE(MAX(v.INSERTION_ORDER_NAME), 'IO-' || v.INSERTION_ORDER_ID::VARCHAR) as NAME,
+                    NULL as PARENT_NAME, v.INSERTION_ORDER_ID as ID, NULL as PARENT_ID,
                 """
 
             query = f"""
                 WITH
                 exposed_devices AS (
-                    SELECT DISTINCT LOWER(REPLACE(IMP_MAID,'-','')) AS device_id
-                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                    WHERE QUORUM_ADVERTISER_ID::INT = %(advertiser_id)s
-                      AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s AND IMP_MAID IS NOT NULL
+                    SELECT DISTINCT LOWER(REPLACE(v.DEVICE_ID_RAW,'-','')) AS device_id
+                    FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+                    JOIN (
+                        SELECT DISTINCT DSP_ADVERTISER_ID
+                        FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
+                        WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                    ) pcm ON v.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
+                    WHERE v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s AND v.DEVICE_ID_RAW IS NOT NULL
                 ),
                 control_devices AS (
-                    SELECT DISTINCT LOWER(REPLACE(IMP_MAID,'-','')) AS device_id
-                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                    WHERE QUORUM_ADVERTISER_ID::INT != %(advertiser_id)s
-                      AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s AND IMP_MAID IS NOT NULL
-                      AND LOWER(REPLACE(IMP_MAID,'-','')) NOT IN (SELECT device_id FROM exposed_devices)
+                    SELECT DISTINCT LOWER(REPLACE(v.DEVICE_ID_RAW,'-','')) AS device_id
+                    FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+                    WHERE v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s AND v.DEVICE_ID_RAW IS NOT NULL
+                      AND LOWER(REPLACE(v.DEVICE_ID_RAW,'-','')) NOT IN (SELECT device_id FROM exposed_devices)
                 ),
                 adv_web_visit_days AS (
                     SELECT LOWER(REPLACE(MAID,'-','')) AS device_id, DATE(SITE_VISIT_TIMESTAMP) AS event_date
@@ -960,12 +1017,16 @@ def get_lift_analysis():
                 ),
                 campaign_metrics AS (
                     SELECT {group_cols}, {name_cols}
-                        COUNT(DISTINCT CACHE_BUSTER) as IMPRESSIONS, COUNT(DISTINCT IMP_MAID) as REACH,
-                        COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IP END) as WEB_VISITORS
-                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                    WHERE QUORUM_ADVERTISER_ID::INT = %(advertiser_id)s
-                      AND IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
-                    GROUP BY {group_cols} HAVING COUNT(DISTINCT CACHE_BUSTER) >= 1000
+                        COUNT(*) as IMPRESSIONS, COUNT(DISTINCT v.DEVICE_ID_RAW) as REACH,
+                        0 as WEB_VISITORS
+                    FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+                    JOIN (
+                        SELECT DISTINCT DSP_ADVERTISER_ID, INSERTION_ORDER_ID, LINE_ITEM_ID
+                        FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
+                        WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                    ) pcm ON v.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
+                    WHERE v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
+                    GROUP BY {group_cols} HAVING COUNT(*) >= 1000
                 ),
                 adv_baselines AS (
                     SELECT SUM(WEB_VISITORS)::FLOAT / NULLIF(SUM(REACH), 0) * 100 as WEB_BASELINE,
@@ -1229,10 +1290,14 @@ def get_traffic_sources():
                 SELECT DISTINCT uc.IP
                 FROM uuid_classified uc
                 WHERE EXISTS (
-                    SELECT 1 FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS r
-                    WHERE r.IMP_MAID = uc.MAID
-                      AND r.QUORUM_ADVERTISER_ID = %(advertiser_id_int)s
-                      AND r.IMP_DATE BETWEEN %(start_date)s AND %(end_date)s
+                    SELECT 1 FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+                    JOIN (
+                        SELECT DISTINCT DSP_ADVERTISER_ID
+                        FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
+                        WHERE QUORUM_ADVERTISER_ID = %(advertiser_id_int)s
+                    ) pcm ON v.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
+                    WHERE v.DEVICE_ID_RAW = uc.MAID
+                      AND v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
                 )
             ),
             classified AS (
@@ -1498,40 +1563,45 @@ def get_optimize():
         strategy = get_impression_strategy(agency_id, conn) if agency_id else STRATEGY_PCM_4KEY
 
         if strategy == STRATEGY_ADM_PREFIX:
-            date_filter = "IMP_DATE BETWEEN DATEADD(day, -35, CURRENT_DATE) AND DATEADD(day, -5, CURRENT_DATE)"
-            adv_filter = "QUORUM_ADVERTISER_ID = %(adv_id)s"
-            imps_expr = "COUNT(DISTINCT CACHE_BUSTER)"
-            web_expr = "COUNT(DISTINCT CASE WHEN IS_SITE_VISIT = 'TRUE' THEN IP END)"
-            store_expr = "COUNT(DISTINCT CASE WHEN IS_STORE_VISIT = 'TRUE' THEN IMP_MAID END)"
-            web_vr = f"ROUND({web_expr}*100.0/NULLIF({imps_expr},0), 4)"
-            store_vr = f"ROUND({store_expr}*100.0/NULLIF({imps_expr},0), 4)"
+            date_filter = "v.AUCTION_TIMESTAMP::DATE BETWEEN DATEADD(day, -35, CURRENT_DATE) AND DATEADD(day, -5, CURRENT_DATE)"
+            adv_filter = "pcm.QUORUM_ADVERTISER_ID = %(adv_id)s"
+            imps_expr = "COUNT(*)"
+            web_expr = "0"
+            store_expr = "0"
+            web_vr = f"0"
+            store_vr = f"0"
 
             q1 = f"""
+                WITH adv_dsp AS (
+                    SELECT DISTINCT DSP_ADVERTISER_ID
+                    FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
+                    WHERE QUORUM_ADVERTISER_ID = %(adv_id)s
+                )
                 SELECT 'baseline' as DIM_TYPE, 'overall' as DIM_KEY, NULL as DIM_NAME,
                     {imps_expr} as IMPS, {web_expr} as WEB_VISITS, {store_expr} as STORE_VISITS,
                     {web_vr} as WEB_VR, {store_vr} as STORE_VR
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE {adv_filter} AND {date_filter}
+                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+                WHERE v.DSP_ADVERTISER_ID IN (SELECT DSP_ADVERTISER_ID FROM adv_dsp) AND {date_filter}
                 UNION ALL
-                SELECT 'campaign', IO_ID::VARCHAR, MAX(IO_NAME), {imps_expr}, {web_expr}, {store_expr}, {web_vr}, {store_vr}
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE {adv_filter} AND {date_filter} GROUP BY IO_ID
+                SELECT 'campaign', v.INSERTION_ORDER_ID::VARCHAR, MAX(v.INSERTION_ORDER_NAME), {imps_expr}, {web_expr}, {store_expr}, {web_vr}, {store_vr}
+                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+                WHERE v.DSP_ADVERTISER_ID IN (SELECT DSP_ADVERTISER_ID FROM adv_dsp) AND {date_filter} GROUP BY v.INSERTION_ORDER_ID
                 UNION ALL
-                SELECT 'lineitem', LINEITEM_ID::VARCHAR, MAX(LINEITEM_NAME), {imps_expr}, {web_expr}, {store_expr}, {web_vr}, {store_vr}
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE {adv_filter} AND {date_filter} GROUP BY LINEITEM_ID
+                SELECT 'lineitem', v.LINE_ITEM_ID::VARCHAR, MAX(v.LINE_ITEM_NAME), {imps_expr}, {web_expr}, {store_expr}, {web_vr}, {store_vr}
+                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+                WHERE v.DSP_ADVERTISER_ID IN (SELECT DSP_ADVERTISER_ID FROM adv_dsp) AND {date_filter} GROUP BY v.LINE_ITEM_ID
                 UNION ALL
-                SELECT 'creative', CREATIVE_NAME, NULL, {imps_expr}, {web_expr}, {store_expr}, {web_vr}, {store_vr}
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE {adv_filter} AND {date_filter} GROUP BY CREATIVE_NAME
+                SELECT 'creative', v.CREATIVE_NAME, NULL, {imps_expr}, {web_expr}, {store_expr}, {web_vr}, {store_vr}
+                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+                WHERE v.DSP_ADVERTISER_ID IN (SELECT DSP_ADVERTISER_ID FROM adv_dsp) AND {date_filter} GROUP BY v.CREATIVE_NAME
                 UNION ALL
-                SELECT 'dow', DAYOFWEEK(IMP_DATE)::VARCHAR, NULL, {imps_expr}, {web_expr}, {store_expr}, {web_vr}, {store_vr}
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE {adv_filter} AND {date_filter} GROUP BY DAYOFWEEK(IMP_DATE)
+                SELECT 'dow', DAYOFWEEK(v.AUCTION_TIMESTAMP)::VARCHAR, NULL, {imps_expr}, {web_expr}, {store_expr}, {web_vr}, {store_vr}
+                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+                WHERE v.DSP_ADVERTISER_ID IN (SELECT DSP_ADVERTISER_ID FROM adv_dsp) AND {date_filter} GROUP BY DAYOFWEEK(v.AUCTION_TIMESTAMP)
                 UNION ALL
-                SELECT 'site', SITE, NULL, {imps_expr}, {web_expr}, {store_expr}, {web_vr}, {store_vr}
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS
-                WHERE {adv_filter} AND {date_filter} GROUP BY SITE HAVING COUNT(DISTINCT CACHE_BUSTER) >= 500
+                SELECT 'site', v.SITE_DOMAIN, NULL, {imps_expr}, {web_expr}, {store_expr}, {web_vr}, {store_vr}
+                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+                WHERE v.DSP_ADVERTISER_ID IN (SELECT DSP_ADVERTISER_ID FROM adv_dsp) AND {date_filter} GROUP BY v.SITE_DOMAIN HAVING COUNT(*) >= 500
                 ORDER BY 1, 4 DESC
             """
             cursor.execute(q1, {'adv_id': int(advertiser_id)})
@@ -1610,28 +1680,32 @@ def get_optimize_geo():
         strategy = get_impression_strategy(agency_id, conn) if agency_id else STRATEGY_PCM_4KEY
 
         if strategy == STRATEGY_ADM_PREFIX:
-            date_filter = "IMP_DATE BETWEEN DATEADD(day, -35, CURRENT_DATE) AND DATEADD(day, -5, CURRENT_DATE)"
-            adv_filter = "QUORUM_ADVERTISER_ID = %(adv_id)s"
-            imps_expr = "COUNT(DISTINCT i.CACHE_BUSTER)"
-            web_expr = "COUNT(DISTINCT CASE WHEN i.IS_SITE_VISIT = 'TRUE' THEN i.IP END)"
-            store_expr = "COUNT(DISTINCT CASE WHEN i.IS_STORE_VISIT = 'TRUE' THEN i.IMP_MAID END)"
-            web_vr = f"ROUND({web_expr}*100.0/NULLIF({imps_expr},0), 4)"
-            store_vr = f"ROUND({store_expr}*100.0/NULLIF({imps_expr},0), 4)"
+            date_filter = "i.AUCTION_TIMESTAMP::DATE BETWEEN DATEADD(day, -35, CURRENT_DATE) AND DATEADD(day, -5, CURRENT_DATE)"
+            imps_expr = "COUNT(*)"
+            web_expr = "0"
+            store_expr = "0"
+            web_vr = f"0"
+            store_vr = f"0"
 
             q2 = f"""
+                WITH adv_dsp AS (
+                    SELECT DISTINCT DSP_ADVERTISER_ID
+                    FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
+                    WHERE QUORUM_ADVERTISER_ID = %(adv_id)s
+                )
                 SELECT 'dma' as DIM_TYPE, z.DMA_CODE as DIM_KEY, MAX(z.DMA_NAME) as DIM_NAME,
                     {imps_expr} as IMPS, {web_expr} as WEB_VISITS, {store_expr} as STORE_VISITS,
                     {web_vr} as WEB_VR, {store_vr} as STORE_VR
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS i
-                JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING z ON i.ZIP_CODE = z.ZIP_CODE
-                WHERE i.{adv_filter} AND i.{date_filter}
-                GROUP BY z.DMA_CODE HAVING COUNT(DISTINCT i.CACHE_BUSTER) >= 500
+                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 i
+                JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING z ON i.USER_POSTAL_CODE = z.ZIP_CODE
+                WHERE i.DSP_ADVERTISER_ID IN (SELECT DSP_ADVERTISER_ID FROM adv_dsp) AND {date_filter}
+                GROUP BY z.DMA_CODE HAVING COUNT(*) >= 500
                 UNION ALL
-                SELECT 'zip', i.ZIP_CODE, MAX(z.DMA_NAME), {imps_expr}, {web_expr}, {store_expr}, {web_vr}, {store_vr}
-                FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_IMPRESSIONS_REPORT_90_DAYS i
-                JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING z ON i.ZIP_CODE = z.ZIP_CODE
-                WHERE i.{adv_filter} AND i.{date_filter}
-                GROUP BY i.ZIP_CODE HAVING COUNT(DISTINCT i.CACHE_BUSTER) >= 50
+                SELECT 'zip', i.USER_POSTAL_CODE, MAX(z.DMA_NAME), {imps_expr}, {web_expr}, {store_expr}, {web_vr}, {store_vr}
+                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 i
+                JOIN QUORUMDB.SEGMENT_DATA.ZIP_DMA_MAPPING z ON i.USER_POSTAL_CODE = z.ZIP_CODE
+                WHERE i.DSP_ADVERTISER_ID IN (SELECT DSP_ADVERTISER_ID FROM adv_dsp) AND {date_filter}
+                GROUP BY i.USER_POSTAL_CODE HAVING COUNT(*) >= 50
                 ORDER BY 1, 4 DESC
             """
             cursor.execute(q2, {'adv_id': int(advertiser_id)})
