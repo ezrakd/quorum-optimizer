@@ -169,6 +169,59 @@ def enrich_web_visits_timeseries(cursor, agency_id, advertiser_id, start_date, e
 
 
 # =============================================================================
+# STORE VISIT ENRICHMENT (from Ali's WEB_TO_STORE_VISIT_ATTRIBUTION)
+# Used for ADM_PREFIX agencies whose impression query doesn't include store visits.
+# PCM_4KEY agencies already get store visits from CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS.
+# =============================================================================
+def enrich_store_visits_agency(cursor, start_date, end_date):
+    """Return {agency_id: unique_store_visitor_count} from the pre-matched store attribution table."""
+    try:
+        cursor.execute("""
+            SELECT AGENCY_ID, COUNT(DISTINCT MAID) as STORE_VISITS
+            FROM QUORUMDB.DERIVED_TABLES.WEB_TO_STORE_VISIT_ATTRIBUTION
+            WHERE STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+            GROUP BY AGENCY_ID
+        """, {'start_date': start_date, 'end_date': end_date})
+        return {int(r[0]): int(r[1]) for r in cursor.fetchall()}
+    except Exception:
+        return {}
+
+
+def enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date):
+    """Return unique store visitor count for a specific advertiser from the pre-matched table."""
+    try:
+        cursor.execute("""
+            SELECT COUNT(DISTINCT MAID) as STORE_VISITS
+            FROM QUORUMDB.DERIVED_TABLES.WEB_TO_STORE_VISIT_ATTRIBUTION
+            WHERE AGENCY_ID = %(agency_id)s
+              AND ADVERTISER_ID = %(advertiser_id)s
+              AND STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+        """, {'agency_id': agency_id, 'advertiser_id': advertiser_id,
+              'start_date': start_date, 'end_date': end_date})
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
+    except Exception:
+        return 0
+
+
+def enrich_store_visits_timeseries(cursor, agency_id, advertiser_id, start_date, end_date):
+    """Return {date_str: unique_store_visitor_count} for timeseries enrichment."""
+    try:
+        cursor.execute("""
+            SELECT STORE_VISIT_DATE, COUNT(DISTINCT MAID) as STORE_VISITS
+            FROM QUORUMDB.DERIVED_TABLES.WEB_TO_STORE_VISIT_ATTRIBUTION
+            WHERE AGENCY_ID = %(agency_id)s
+              AND ADVERTISER_ID = %(advertiser_id)s
+              AND STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+            GROUP BY STORE_VISIT_DATE
+        """, {'agency_id': agency_id, 'advertiser_id': advertiser_id,
+              'start_date': start_date, 'end_date': end_date})
+        return {str(r[0]): int(r[1]) for r in cursor.fetchall()}
+    except Exception:
+        return {}
+
+
+# =============================================================================
 # AGENCY OVERVIEW
 # =============================================================================
 @app.route('/api/v6/agencies', methods=['GET'])
@@ -264,6 +317,17 @@ def get_agencies():
             imps = r.get('IMPRESSIONS') or 0
             r['WEB_VISIT_RATE'] = round(wv * 100.0 / imps, 4) if imps > 0 else 0
 
+        # Enrich ADM_PREFIX agencies with store visits from WEB_TO_STORE_VISIT_ATTRIBUTION
+        # (PCM_4KEY agencies already have store visits baked into the weekly stats)
+        store_by_agency = enrich_store_visits_agency(cursor, start_date, end_date)
+        for r in all_results:
+            if r.get('IMPRESSION_STRATEGY') == STRATEGY_ADM_PREFIX:
+                aid = r.get('AGENCY_ID')
+                sv = store_by_agency.get(aid, 0)
+                r['STORE_VISITS'] = sv
+                imps = r.get('IMPRESSIONS') or 0
+                r['STORE_VISIT_RATE'] = round(sv * 100.0 / imps, 4) if imps > 0 else 0
+
         all_results.sort(key=lambda x: x.get('IMPRESSIONS', 0) or 0, reverse=True)
         cursor.close()
         conn.close()
@@ -358,9 +422,28 @@ def get_advertisers():
         except Exception:
             web_by_adv = {}
 
+        # Enrich ADM_PREFIX advertisers with store visits from WEB_TO_STORE_VISIT_ATTRIBUTION
+        store_by_adv = {}
+        if strategy == STRATEGY_ADM_PREFIX:
+            try:
+                cursor.execute("""
+                    SELECT ADVERTISER_ID, COUNT(DISTINCT MAID) as STORE_VISITS
+                    FROM QUORUMDB.DERIVED_TABLES.WEB_TO_STORE_VISIT_ATTRIBUTION
+                    WHERE AGENCY_ID = %(agency_id)s
+                      AND STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+                    GROUP BY ADVERTISER_ID
+                """, {'agency_id': agency_id, 'start_date': start_date, 'end_date': end_date})
+                store_by_adv = {int(r[0]): int(r[1]) for r in cursor.fetchall()}
+            except Exception:
+                store_by_adv = {}
+
         for d in results:
             imps = d.get('IMPRESSIONS') or 0
             store = d.get('STORE_VISITS') or 0
+            # Override store visits for ADM_PREFIX from attribution table
+            if strategy == STRATEGY_ADM_PREFIX:
+                store = store_by_adv.get(d.get('ADVERTISER_ID'), 0)
+                d['STORE_VISITS'] = store
             web = web_by_adv.get(d.get('ADVERTISER_ID'), 0)
             d['WEB_VISITS'] = web
             d['STORE_VISIT_RATE'] = round(store * 100.0 / imps, 4) if imps > 0 else 0
@@ -937,8 +1020,12 @@ def get_summary():
         # Enrich with web visits from pre-matched attribution table
         web = enrich_web_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
 
+        # Enrich ADM_PREFIX with store visits from WEB_TO_STORE_VISIT_ATTRIBUTION
         imps = result.get('IMPRESSIONS') or 0
         store = result.get('STORE_VISITS') or 0
+        if strategy == STRATEGY_ADM_PREFIX:
+            store = enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
+            result['STORE_VISITS'] = store
         result['WEB_VISITS'] = web
         result['STORE_VISIT_RATE'] = round(store * 100.0 / imps, 4) if imps > 0 else 0
         result['WEB_VISIT_RATE'] = round(web * 100.0 / imps, 4) if imps > 0 else 0
@@ -1009,6 +1096,12 @@ def get_timeseries():
         web_ts = enrich_web_visits_timeseries(cursor, agency_id, advertiser_id, start_date, end_date)
         for d in results:
             d['WEB_VISITS'] = web_ts.get(d.get('LOG_DATE'), 0)
+
+        # Enrich ADM_PREFIX timeseries with store visits from WEB_TO_STORE_VISIT_ATTRIBUTION
+        if strategy == STRATEGY_ADM_PREFIX:
+            store_ts = enrich_store_visits_timeseries(cursor, agency_id, advertiser_id, start_date, end_date)
+            for d in results:
+                d['STORE_VISITS'] = store_ts.get(d.get('LOG_DATE'), 0)
 
         cursor.close()
         conn.close()
