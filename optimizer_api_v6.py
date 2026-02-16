@@ -118,6 +118,47 @@ def health_check():
 
 
 # =============================================================================
+# COVERAGE-BASED MULTIPLIER
+# Computes what fraction of attribution MAIDs exist in our household universe.
+# If only 11% are known, multiplier = 1/0.11 ≈ 9x (for every observed visit,
+# ~8 more likely occurred but we can't see them).
+# =============================================================================
+def get_coverage_multiplier(cursor, table, agency_col, agency_id, advertiser_col=None,
+                            advertiser_id=None, date_col=None, start_date=None, end_date=None):
+    """Return coverage multiplier for a given agency (+ optional advertiser) from an attribution table.
+    Returns (multiplier, coverage_pct, total_maids, known_maids).
+    Falls back to 1.0 if computation fails."""
+    try:
+        where_clauses = [f"a.{agency_col} = %(agency_id)s"]
+        params = {'agency_id': agency_id}
+        if advertiser_col and advertiser_id:
+            where_clauses.append(f"a.{advertiser_col} = %(advertiser_id)s")
+            params['advertiser_id'] = advertiser_id
+        if date_col and start_date and end_date:
+            where_clauses.append(f"a.{date_col} BETWEEN %(start_date)s AND %(end_date)s")
+            params['start_date'] = start_date
+            params['end_date'] = end_date
+        where_sql = ' AND '.join(where_clauses)
+        cursor.execute(f"""
+            SELECT COUNT(DISTINCT a.MAID) AS total_maids,
+                   COUNT(DISTINCT CASE WHEN lk.MAID IS NOT NULL THEN a.MAID END) AS known_maids
+            FROM {table} a
+            LEFT JOIN QUORUMDB.HOUSEHOLD_CORE.MAID_HOUSEHOLD_LOOKUP lk ON a.MAID = lk.MAID
+            WHERE {where_sql}
+        """, params)
+        row = cursor.fetchone()
+        total_maids = int(row[0]) if row[0] else 0
+        known_maids = int(row[1]) if row[1] else 0
+        if known_maids > 0 and total_maids > 0:
+            coverage_pct = known_maids / total_maids
+            multiplier = 1.0 / coverage_pct
+            return (round(multiplier, 2), round(coverage_pct * 100, 2), total_maids, known_maids)
+        return (1.0, 0.0, total_maids, known_maids)
+    except Exception:
+        return (1.0, 0.0, 0, 0)
+
+
+# =============================================================================
 # WEB VISIT ENRICHMENT (from Ali's pre-matched AD_TO_WEB_VISIT_ATTRIBUTION)
 # =============================================================================
 def enrich_web_visits_agency(cursor, start_date, end_date):
@@ -318,21 +359,69 @@ def get_agencies():
 
         # Enrich with web visits from pre-matched attribution table
         web_by_agency = enrich_web_visits_agency(cursor, start_date, end_date)
+
+        # Compute coverage multiplier per agency for web visits
+        web_mult_by_agency = {}
+        try:
+            cursor.execute("""
+                SELECT a.AD_IMPRESSION_AGENCY_ID,
+                       COUNT(DISTINCT a.MAID) AS total_maids,
+                       COUNT(DISTINCT CASE WHEN lk.MAID IS NOT NULL THEN a.MAID END) AS known_maids
+                FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION a
+                LEFT JOIN QUORUMDB.HOUSEHOLD_CORE.MAID_HOUSEHOLD_LOOKUP lk ON a.MAID = lk.MAID
+                WHERE a.WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+                GROUP BY a.AD_IMPRESSION_AGENCY_ID
+            """, {'start_date': start_date, 'end_date': end_date})
+            for row in cursor.fetchall():
+                aid_val = int(row[0])
+                total, known = int(row[1] or 0), int(row[2] or 0)
+                web_mult_by_agency[aid_val] = round(total / known, 2) if known > 0 else 1.0
+        except Exception:
+            pass
+
         for r in all_results:
             aid = r.get('AGENCY_ID')
-            wv = web_by_agency.get(aid, 0)
+            raw_wv = web_by_agency.get(aid, 0)
+            mult = web_mult_by_agency.get(aid, 1.0)
+            wv = int(round(raw_wv * mult))
             r['WEB_VISITS'] = wv
+            r['WEB_VISITS_RAW'] = raw_wv
+            r['WEB_VISIT_MULTIPLIER'] = mult
             imps = r.get('IMPRESSIONS') or 0
             r['WEB_VISIT_RATE'] = round(wv * 100.0 / imps, 4) if imps > 0 else 0
 
         # Enrich ADM_PREFIX agencies with store visits from WEB_TO_STORE_VISIT_ATTRIBUTION
         # (PCM_4KEY agencies already have store visits baked into the weekly stats)
         store_by_agency = enrich_store_visits_agency(cursor, start_date, end_date)
+
+        # Compute coverage multiplier per agency for store visits
+        store_mult_by_agency = {}
+        try:
+            cursor.execute("""
+                SELECT a.AGENCY_ID,
+                       COUNT(DISTINCT a.MAID) AS total_maids,
+                       COUNT(DISTINCT CASE WHEN lk.MAID IS NOT NULL THEN a.MAID END) AS known_maids
+                FROM QUORUMDB.DERIVED_TABLES.WEB_TO_STORE_VISIT_ATTRIBUTION a
+                LEFT JOIN QUORUMDB.HOUSEHOLD_CORE.MAID_HOUSEHOLD_LOOKUP lk ON a.MAID = lk.MAID
+                WHERE a.STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+                GROUP BY a.AGENCY_ID
+            """, {'start_date': start_date, 'end_date': end_date})
+            for row in cursor.fetchall():
+                aid_val = int(row[0])
+                total, known = int(row[1] or 0), int(row[2] or 0)
+                store_mult_by_agency[aid_val] = round(total / known, 2) if known > 0 else 1.0
+        except Exception:
+            pass
+
         for r in all_results:
             if r.get('IMPRESSION_STRATEGY') == STRATEGY_ADM_PREFIX:
                 aid = r.get('AGENCY_ID')
-                sv = store_by_agency.get(aid, 0)
+                raw_sv = store_by_agency.get(aid, 0)
+                mult = store_mult_by_agency.get(aid, 1.0)
+                sv = int(round(raw_sv * mult))
                 r['STORE_VISITS'] = sv
+                r['STORE_VISITS_RAW'] = raw_sv
+                r['STORE_VISIT_MULTIPLIER'] = mult
                 imps = r.get('IMPRESSIONS') or 0
                 r['STORE_VISIT_RATE'] = round(sv * 100.0 / imps, 4) if imps > 0 else 0
 
@@ -417,47 +506,76 @@ def get_advertisers():
             d['IMPRESSION_STRATEGY'] = strategy
             results.append(d)
 
-        # Enrich with web visits from pre-matched attribution table
+        # Enrich with web visits + per-advertiser coverage multiplier
         try:
             cursor.execute("""
                 SELECT a.AD_IMPRESSION_ADVERTISER_ID,
-                       COUNT(DISTINCT COALESCE(CAST(lk.HOUSEHOLD_ID AS VARCHAR), a.MAID) || '|' || a.WEB_VISIT_DATE) as WEB_VISITS
+                       COUNT(DISTINCT COALESCE(CAST(lk.HOUSEHOLD_ID AS VARCHAR), a.MAID) || '|' || a.WEB_VISIT_DATE) as WEB_VISITS,
+                       COUNT(DISTINCT a.MAID) AS total_maids,
+                       COUNT(DISTINCT CASE WHEN lk.MAID IS NOT NULL THEN a.MAID END) AS known_maids
                 FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION a
                 LEFT JOIN QUORUMDB.HOUSEHOLD_CORE.MAID_HOUSEHOLD_LOOKUP lk ON a.MAID = lk.MAID
                 WHERE a.AD_IMPRESSION_AGENCY_ID = %(agency_id)s
                   AND a.WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
                 GROUP BY a.AD_IMPRESSION_ADVERTISER_ID
             """, {'agency_id': agency_id, 'start_date': start_date, 'end_date': end_date})
-            web_by_adv = {int(r[0]): int(r[1]) for r in cursor.fetchall()}
+            web_by_adv = {}
+            web_mult_by_adv = {}
+            for r in cursor.fetchall():
+                adv_id = int(r[0])
+                web_by_adv[adv_id] = int(r[1])
+                total, known = int(r[2] or 0), int(r[3] or 0)
+                web_mult_by_adv[adv_id] = round(total / known, 2) if known > 0 else 1.0
         except Exception:
             web_by_adv = {}
+            web_mult_by_adv = {}
 
-        # Enrich ADM_PREFIX advertisers with store visits from WEB_TO_STORE_VISIT_ATTRIBUTION
+        # Enrich ADM_PREFIX advertisers with store visits + per-advertiser coverage multiplier
         store_by_adv = {}
+        store_mult_by_adv = {}
         if strategy == STRATEGY_ADM_PREFIX:
             try:
                 cursor.execute("""
                     SELECT a.ADVERTISER_ID,
-                           COUNT(DISTINCT COALESCE(CAST(lk.HOUSEHOLD_ID AS VARCHAR), a.MAID) || '|' || a.STORE_VISIT_DATE) as STORE_VISITS
+                           COUNT(DISTINCT COALESCE(CAST(lk.HOUSEHOLD_ID AS VARCHAR), a.MAID) || '|' || a.STORE_VISIT_DATE) as STORE_VISITS,
+                           COUNT(DISTINCT a.MAID) AS total_maids,
+                           COUNT(DISTINCT CASE WHEN lk.MAID IS NOT NULL THEN a.MAID END) AS known_maids
                     FROM QUORUMDB.DERIVED_TABLES.WEB_TO_STORE_VISIT_ATTRIBUTION a
                     LEFT JOIN QUORUMDB.HOUSEHOLD_CORE.MAID_HOUSEHOLD_LOOKUP lk ON a.MAID = lk.MAID
                     WHERE a.AGENCY_ID = %(agency_id)s
                       AND a.STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
                     GROUP BY a.ADVERTISER_ID
                 """, {'agency_id': agency_id, 'start_date': start_date, 'end_date': end_date})
-                store_by_adv = {int(r[0]): int(r[1]) for r in cursor.fetchall()}
+                for r in cursor.fetchall():
+                    adv_id = int(r[0])
+                    store_by_adv[adv_id] = int(r[1])
+                    total, known = int(r[2] or 0), int(r[3] or 0)
+                    store_mult_by_adv[adv_id] = round(total / known, 2) if known > 0 else 1.0
             except Exception:
-                store_by_adv = {}
+                pass
 
         for d in results:
+            adv_id = d.get('ADVERTISER_ID')
             imps = d.get('IMPRESSIONS') or 0
-            store = d.get('STORE_VISITS') or 0
-            # Override store visits for ADM_PREFIX from attribution table
-            if strategy == STRATEGY_ADM_PREFIX:
-                store = store_by_adv.get(d.get('ADVERTISER_ID'), 0)
-                d['STORE_VISITS'] = store
-            web = web_by_adv.get(d.get('ADVERTISER_ID'), 0)
+
+            # Web visits with multiplier
+            raw_web = web_by_adv.get(adv_id, 0)
+            w_mult = web_mult_by_adv.get(adv_id, 1.0)
+            web = int(round(raw_web * w_mult))
             d['WEB_VISITS'] = web
+            d['WEB_VISITS_RAW'] = raw_web
+            d['WEB_VISIT_MULTIPLIER'] = w_mult
+
+            # Store visits with multiplier
+            store = d.get('STORE_VISITS') or 0
+            if strategy == STRATEGY_ADM_PREFIX:
+                raw_store = store_by_adv.get(adv_id, 0)
+                s_mult = store_mult_by_adv.get(adv_id, 1.0)
+                store = int(round(raw_store * s_mult))
+                d['STORE_VISITS'] = store
+                d['STORE_VISITS_RAW'] = raw_store
+                d['STORE_VISIT_MULTIPLIER'] = s_mult
+
             d['STORE_VISIT_RATE'] = round(store * 100.0 / imps, 4) if imps > 0 else 0
             d['WEB_VISIT_RATE'] = round(web * 100.0 / imps, 4) if imps > 0 else 0
 
@@ -1029,16 +1147,35 @@ def get_summary():
         row = cursor.fetchone()
         result = dict(zip(columns, row)) if row else {}
 
-        # Enrich with web visits from pre-matched attribution table
-        web = enrich_web_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
+        # Enrich with web visits + coverage multiplier
+        raw_web = enrich_web_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
+        w_mult_info = get_coverage_multiplier(
+            cursor, 'QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION',
+            'AD_IMPRESSION_AGENCY_ID', agency_id,
+            'AD_IMPRESSION_ADVERTISER_ID', advertiser_id,
+            'WEB_VISIT_DATE', start_date, end_date)
+        w_mult = w_mult_info[0]
+        web = int(round(raw_web * w_mult))
 
-        # Enrich ADM_PREFIX with store visits from WEB_TO_STORE_VISIT_ATTRIBUTION
+        # Enrich ADM_PREFIX with store visits + coverage multiplier
         imps = result.get('IMPRESSIONS') or 0
         store = result.get('STORE_VISITS') or 0
+        s_mult = 1.0
         if strategy == STRATEGY_ADM_PREFIX:
-            store = enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
+            raw_store = enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
+            s_mult_info = get_coverage_multiplier(
+                cursor, 'QUORUMDB.DERIVED_TABLES.WEB_TO_STORE_VISIT_ATTRIBUTION',
+                'AGENCY_ID', agency_id,
+                'ADVERTISER_ID', advertiser_id,
+                'STORE_VISIT_DATE', start_date, end_date)
+            s_mult = s_mult_info[0]
+            store = int(round(raw_store * s_mult))
             result['STORE_VISITS'] = store
+            result['STORE_VISITS_RAW'] = raw_store
+            result['STORE_VISIT_MULTIPLIER'] = s_mult
         result['WEB_VISITS'] = web
+        result['WEB_VISITS_RAW'] = raw_web
+        result['WEB_VISIT_MULTIPLIER'] = w_mult
         result['STORE_VISIT_RATE'] = round(store * 100.0 / imps, 4) if imps > 0 else 0
         result['WEB_VISIT_RATE'] = round(web * 100.0 / imps, 4) if imps > 0 else 0
         result['TOTAL_VISITS'] = store + web
@@ -1104,16 +1241,30 @@ def get_timeseries():
             if d.get('LOG_DATE'): d['LOG_DATE'] = str(d['LOG_DATE'])
             results.append(d)
 
-        # Enrich timeseries with web visits from pre-matched attribution table
+        # Compute coverage multipliers once for this advertiser
+        w_mult = get_coverage_multiplier(
+            cursor, 'QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION',
+            'AD_IMPRESSION_AGENCY_ID', agency_id,
+            'AD_IMPRESSION_ADVERTISER_ID', advertiser_id,
+            'WEB_VISIT_DATE', start_date, end_date)[0]
+
+        # Enrich timeseries with web visits (multiplied)
         web_ts = enrich_web_visits_timeseries(cursor, agency_id, advertiser_id, start_date, end_date)
         for d in results:
-            d['WEB_VISITS'] = web_ts.get(d.get('LOG_DATE'), 0)
+            raw_wv = web_ts.get(d.get('LOG_DATE'), 0)
+            d['WEB_VISITS'] = int(round(raw_wv * w_mult))
 
-        # Enrich ADM_PREFIX timeseries with store visits from WEB_TO_STORE_VISIT_ATTRIBUTION
+        # Enrich ADM_PREFIX timeseries with store visits (multiplied)
         if strategy == STRATEGY_ADM_PREFIX:
+            s_mult = get_coverage_multiplier(
+                cursor, 'QUORUMDB.DERIVED_TABLES.WEB_TO_STORE_VISIT_ATTRIBUTION',
+                'AGENCY_ID', agency_id,
+                'ADVERTISER_ID', advertiser_id,
+                'STORE_VISIT_DATE', start_date, end_date)[0]
             store_ts = enrich_store_visits_timeseries(cursor, agency_id, advertiser_id, start_date, end_date)
             for d in results:
-                d['STORE_VISITS'] = store_ts.get(d.get('LOG_DATE'), 0)
+                raw_sv = store_ts.get(d.get('LOG_DATE'), 0)
+                d['STORE_VISITS'] = int(round(raw_sv * s_mult))
 
         cursor.close()
         conn.close()
