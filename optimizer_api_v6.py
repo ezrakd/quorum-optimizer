@@ -11,7 +11,7 @@ ROUTING KEY: IMPRESSION_JOIN_STRATEGY
 
 All SQL queries preserved exactly from v5 — only the routing logic changed.
 """
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, g
 from flask_cors import CORS
 import snowflake.connector
 import os
@@ -33,6 +33,22 @@ from optimizer_v6_migration import (
 
 app = Flask(__name__, static_folder=os.path.dirname(os.path.abspath(__file__)), static_url_path='')
 CORS(app)
+
+
+# ---------------------------------------------------------------------------
+# Auth-aware agency_id getter
+# ---------------------------------------------------------------------------
+def _get_agency_id():
+    """
+    Get agency_id from request params, enforcing role-based restrictions.
+    Agency-role users are locked to their assigned agency_id regardless of
+    what they pass in the query string. Admin users can query any agency.
+    """
+    requested = _get_agency_id()
+    user = getattr(g, 'user', None)
+    if user and user.get('role') != 'admin' and user.get('agency_id'):
+        return str(user['agency_id'])
+    return requested
 
 
 # =============================================================================
@@ -378,6 +394,13 @@ def get_agencies():
                 r['STORE_VISIT_RATE'] = round(sv * 100.0 / imps, 4) if imps > 0 else 0
 
         all_results.sort(key=lambda x: x.get('IMPRESSIONS', 0) or 0, reverse=True)
+
+        # Agency-role users: filter to only their agency
+        user = getattr(g, 'user', None)
+        if user and user.get('role') != 'admin' and user.get('agency_id'):
+            user_agency = int(user['agency_id'])
+            all_results = [r for r in all_results if r.get('AGENCY_ID') == user_agency]
+
         cursor.close()
         conn.close()
         return jsonify({'success': True, 'data': all_results})
@@ -391,7 +414,7 @@ def get_agencies():
 @app.route('/api/v6/advertisers', methods=['GET'])
 def get_advertisers():
     try:
-        agency_id = request.args.get('agency_id')
+        agency_id = _get_agency_id()
         if not agency_id:
             return jsonify({'success': False, 'error': 'agency_id required'}), 400
 
@@ -515,7 +538,7 @@ def get_advertisers():
 @app.route('/api/v6/campaign-performance', methods=['GET'])
 def get_campaign_performance():
     try:
-        agency_id = request.args.get('agency_id')
+        agency_id = _get_agency_id()
         advertiser_id = request.args.get('advertiser_id')
 
         if not agency_id or not advertiser_id:
@@ -577,7 +600,7 @@ def get_campaign_performance():
 @app.route('/api/v6/lineitem-performance', methods=['GET'])
 def get_lineitem_performance():
     try:
-        agency_id = request.args.get('agency_id')
+        agency_id = _get_agency_id()
         advertiser_id = request.args.get('advertiser_id')
         campaign_id = request.args.get('campaign_id')
 
@@ -658,7 +681,7 @@ def get_lineitem_performance():
 @app.route('/api/v6/creative-performance', methods=['GET'])
 def get_creative_performance():
     try:
-        agency_id = request.args.get('agency_id')
+        agency_id = _get_agency_id()
         advertiser_id = request.args.get('advertiser_id')
         campaign_id = request.args.get('campaign_id')
         lineitem_id = request.args.get('lineitem_id')
@@ -779,7 +802,7 @@ def get_creative_performance():
 @app.route('/api/v6/publisher-performance', methods=['GET'])
 def get_publisher_performance():
     try:
-        agency_id = request.args.get('agency_id')
+        agency_id = _get_agency_id()
         advertiser_id = request.args.get('advertiser_id')
         campaign_id = request.args.get('campaign_id')
         lineitem_id = request.args.get('lineitem_id')
@@ -856,7 +879,7 @@ def get_publisher_performance():
 @app.route('/api/v6/zip-performance', methods=['GET'])
 def get_zip_performance():
     try:
-        agency_id = request.args.get('agency_id')
+        agency_id = _get_agency_id()
         advertiser_id = request.args.get('advertiser_id')
         campaign_id = request.args.get('campaign_id')
         lineitem_id = request.args.get('lineitem_id')
@@ -953,7 +976,7 @@ def get_zip_performance():
 @app.route('/api/v6/dma-performance', methods=['GET'])
 def get_dma_performance():
     try:
-        agency_id = request.args.get('agency_id')
+        agency_id = _get_agency_id()
         advertiser_id = request.args.get('advertiser_id')
         campaign_id = request.args.get('campaign_id')
         lineitem_id = request.args.get('lineitem_id')
@@ -1026,7 +1049,7 @@ def get_dma_performance():
 @app.route('/api/v6/summary', methods=['GET'])
 def get_summary():
     try:
-        agency_id = request.args.get('agency_id')
+        agency_id = _get_agency_id()
         advertiser_id = request.args.get('advertiser_id')
 
         if not agency_id or not advertiser_id:
@@ -1098,7 +1121,7 @@ def get_summary():
 @app.route('/api/v6/timeseries', methods=['GET'])
 def get_timeseries():
     try:
-        agency_id = request.args.get('agency_id')
+        agency_id = _get_agency_id()
         advertiser_id = request.args.get('advertiser_id')
 
         if not agency_id or not advertiser_id:
@@ -1169,7 +1192,7 @@ def get_timeseries():
 @app.route('/api/v6/lift-analysis', methods=['GET'])
 def get_lift_analysis():
     try:
-        agency_id = request.args.get('agency_id')
+        agency_id = _get_agency_id()
         advertiser_id = request.args.get('advertiser_id')
         group_by = request.args.get('group_by', 'campaign')
 
@@ -1442,7 +1465,7 @@ def get_lift_analysis():
 @app.route('/api/v6/traffic-sources', methods=['GET'])
 def get_traffic_sources():
     advertiser_id = request.args.get('advertiser_id')
-    agency_id = request.args.get('agency_id')
+    agency_id = _get_agency_id()
 
     if not advertiser_id:
         return jsonify({'success': False, 'error': 'advertiser_id parameter required'}), 400
@@ -1694,7 +1717,7 @@ def get_agency_timeseries():
 @app.route('/api/v6/advertiser-timeseries', methods=['GET'])
 def get_advertiser_timeseries():
     try:
-        agency_id = request.args.get('agency_id')
+        agency_id = _get_agency_id()
         if not agency_id:
             return jsonify({'success': False, 'error': 'agency_id required'}), 400
 
@@ -1782,7 +1805,7 @@ def get_advertiser_timeseries():
 @app.route('/api/v6/optimize', methods=['GET'])
 def get_optimize():
     advertiser_id = request.args.get('advertiser_id')
-    agency_id = request.args.get('agency_id')
+    agency_id = _get_agency_id()
 
     if not advertiser_id:
         return jsonify({'success': False, 'error': 'advertiser_id parameter required'}), 400
@@ -1899,7 +1922,7 @@ def get_optimize():
 @app.route('/api/v6/optimize-geo', methods=['GET'])
 def get_optimize_geo():
     advertiser_id = request.args.get('advertiser_id')
-    agency_id = request.args.get('agency_id')
+    agency_id = _get_agency_id()
 
     if not advertiser_id:
         return jsonify({'success': False, 'error': 'advertiser_id parameter required'}), 400

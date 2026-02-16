@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quorum — Sign In</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f1419;
+            color: #e7e9ea;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+        .login-container {
+            text-align: center;
+            width: 100%;
+            max-width: 440px;
+            padding: 20px;
+        }
+        .logo-area {
+            margin-bottom: 32px;
+        }
+        .logo-area h1 {
+            font-size: 28px;
+            font-weight: 700;
+            color: #e7e9ea;
+            margin-bottom: 8px;
+        }
+        .logo-area .subtitle {
+            font-size: 14px;
+            color: #8b98a5;
+        }
+        /* Clerk component will mount here */
+        #clerk-sign-in {
+            display: flex;
+            justify-content: center;
+        }
+        .loading-auth {
+            color: #8b98a5;
+            font-size: 14px;
+            padding: 40px;
+        }
+        .spinner {
+            width: 24px;
+            height: 24px;
+            border: 3px solid #2f3942;
+            border-top-color: #1d9bf0;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 12px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .error-msg {
+            background: #3d1f1f;
+            border: 1px solid #f4212e;
+            border-radius: 8px;
+            padding: 16px;
+            color: #f4212e;
+            margin-top: 20px;
+            font-size: 14px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <div class="logo-area">
+            <h1>Quorum</h1>
+            <div class="subtitle">Location Intelligence Platform</div>
+        </div>
+
+        <div id="clerk-sign-in">
+            <div class="loading-auth">
+                <div class="spinner"></div>
+                Loading...
+            </div>
+        </div>
+
+        <div id="auth-error" class="error-msg"></div>
+    </div>
+
+    <script>
+        // Clerk publishable key injected by the server as a template variable,
+        // or read from a meta tag / inline script.
+        const CLERK_PK = document.querySelector('meta[name="clerk-pk"]')?.content
+                         || window.__CLERK_PK__
+                         || '';
+
+        if (!CLERK_PK) {
+            document.getElementById('clerk-sign-in').innerHTML =
+                '<p style="color:#8b98a5">Authentication is not configured. Contact your administrator.</p>';
+        } else {
+            // Load Clerk JS SDK
+            const script = document.createElement('script');
+            script.src = 'https://cdn.jsdelivr.net/npm/@clerk/clerk-js@latest/dist/clerk.browser.js';
+            script.crossOrigin = 'anonymous';
+            script.onload = async () => {
+                try {
+                    const clerk = new window.Clerk(CLERK_PK);
+                    await clerk.load();
+
+                    if (clerk.user) {
+                        // Already signed in — redirect to dashboard
+                        window.location.href = '/';
+                        return;
+                    }
+
+                    // Mount sign-in component
+                    document.getElementById('clerk-sign-in').innerHTML = '';
+                    clerk.mountSignIn(document.getElementById('clerk-sign-in'), {
+                        appearance: {
+                            variables: {
+                                colorPrimary: '#1d9bf0',
+                                colorBackground: '#1e2732',
+                                colorText: '#e7e9ea',
+                                colorTextSecondary: '#8b98a5',
+                                colorInputBackground: '#273340',
+                                colorInputText: '#e7e9ea',
+                                borderRadius: '8px',
+                            }
+                        },
+                        afterSignInUrl: '/',
+                        redirectUrl: '/',
+                    });
+                } catch (err) {
+                    console.error('Clerk init error:', err);
+                    const errDiv = document.getElementById('auth-error');
+                    errDiv.style.display = 'block';
+                    errDiv.textContent = 'Failed to load authentication. Please refresh or contact support.';
+                }
+            };
+            script.onerror = () => {
+                document.getElementById('clerk-sign-in').innerHTML =
+                    '<p style="color:#f4212e">Failed to load authentication SDK. Check your connection.</p>';
+            };
+            document.head.appendChild(script);
+        }
+    </script>
+</body>
+</html>

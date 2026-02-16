@@ -485,6 +485,72 @@
         const API = window.location.origin;
         const fmt = n => n != null ? Number(n).toLocaleString() : '0';
 
+        // --- Clerk Auth ---
+        let _clerk = null;
+        let _authToken = null;
+
+        async function initAuth() {
+            try {
+                const cfgRes = await fetch(API + '/api/auth/config');
+                const cfg = await cfgRes.json();
+                if (!cfg.auth_enabled) return;
+                await new Promise((resolve, reject) => {
+                    const s = document.createElement('script');
+                    s.src = 'https://cdn.jsdelivr.net/npm/@clerk/clerk-js@latest/dist/clerk.browser.js';
+                    s.crossOrigin = 'anonymous';
+                    s.onload = resolve;
+                    s.onerror = reject;
+                    document.head.appendChild(s);
+                });
+                _clerk = new window.Clerk(cfg.publishable_key);
+                await _clerk.load();
+                if (!_clerk.user) { window.location.href = '/login'; return; }
+                _authToken = await _clerk.session.getToken();
+                setInterval(async () => {
+                    if (_clerk.session) _authToken = await _clerk.session.getToken();
+                }, 50000);
+                // Check admin role
+                const meRes = await authFetch(API + '/api/auth/me');
+                if (meRes.ok) {
+                    const me = await meRes.json();
+                    if (me.role !== 'admin') {
+                        document.body.innerHTML = '<div style="padding:40px;text-align:center;color:#f4212e;">Admin access required. <a href="/" style="color:#1d9bf0;">Back to dashboard</a></div>';
+                        return;
+                    }
+                }
+            } catch (e) {
+                console.warn('[Auth] Init failed:', e);
+            }
+        }
+
+        // Wrap fetch to inject auth token
+        const _origFetch = window.fetch;
+        function authFetch(url, opts = {}) {
+            if (_authToken) {
+                opts.headers = opts.headers || {};
+                if (opts.headers instanceof Headers) {
+                    opts.headers.set('Authorization', 'Bearer ' + _authToken);
+                } else {
+                    opts.headers['Authorization'] = 'Bearer ' + _authToken;
+                }
+            }
+            return _origFetch(url, opts);
+        }
+
+        // Override global fetch for API calls
+        const _realFetch = window.fetch;
+        window.fetch = function(url, opts) {
+            const urlStr = typeof url === 'string' ? url : url.toString();
+            if (urlStr.includes('/api/') && _authToken) {
+                opts = opts || {};
+                opts.headers = opts.headers || {};
+                if (typeof opts.headers === 'object' && !(opts.headers instanceof Headers)) {
+                    opts.headers['Authorization'] = 'Bearer ' + _authToken;
+                }
+            }
+            return _realFetch(url, opts);
+        };
+
         // State for modals
         let mapCampaignData = {};
         let configDomainData = {};
@@ -1252,9 +1318,15 @@
         // =====================================================
         // INIT
         // =====================================================
-        loadScorecard();
-        loadUnmappedImpressions();
-        loadUnmappedWebPixels();
+        initAuth().then(() => {
+            loadScorecard();
+            loadUnmappedImpressions();
+            loadUnmappedWebPixels();
+        }).catch(() => {
+            loadScorecard();
+            loadUnmappedImpressions();
+            loadUnmappedWebPixels();
+        });
     </script>
 </body>
 </html>

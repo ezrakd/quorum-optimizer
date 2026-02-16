@@ -126,10 +126,10 @@
     </div>
 
     <script>
-        const API = 'https://quorum-optimizer-production.up.railway.app';
-        let state = { 
-            agencyId: null, agencyName: null, 
-            advertiserId: null, advertiserName: null, 
+        const API = window.location.origin;
+        let state = {
+            agencyId: null, agencyName: null,
+            advertiserId: null, advertiserName: null,
             days: 30,
             // Filter state for drilling down
             filter: { campaignId: null, campaignName: null, lineitemId: null, lineitemName: null },
@@ -178,6 +178,71 @@
             `;
         }
         
+        // --- Clerk Auth ---
+        let _clerk = null;
+        let _authToken = null;
+
+        async function initAuth() {
+            try {
+                const cfgRes = await fetch(API + '/api/auth/config');
+                const cfg = await cfgRes.json();
+                if (!cfg.auth_enabled) {
+                    console.log('[Auth] Disabled (no CLERK_SECRET_KEY)');
+                    return;
+                }
+                // Load Clerk JS SDK
+                await new Promise((resolve, reject) => {
+                    const s = document.createElement('script');
+                    s.src = 'https://cdn.jsdelivr.net/npm/@clerk/clerk-js@latest/dist/clerk.browser.js';
+                    s.crossOrigin = 'anonymous';
+                    s.onload = resolve;
+                    s.onerror = reject;
+                    document.head.appendChild(s);
+                });
+                _clerk = new window.Clerk(cfg.publishable_key);
+                await _clerk.load();
+
+                if (!_clerk.user) {
+                    window.location.href = '/login';
+                    return;
+                }
+
+                // Get session token for API calls
+                _authToken = await _clerk.session.getToken();
+
+                // Refresh token periodically (tokens expire after ~60s)
+                setInterval(async () => {
+                    if (_clerk.session) {
+                        _authToken = await _clerk.session.getToken();
+                    }
+                }, 50000);
+
+                // Show user info + logout button
+                showUserInfo(_clerk.user);
+            } catch (e) {
+                console.warn('[Auth] Init failed:', e);
+            }
+        }
+
+        function showUserInfo(user) {
+            const name = user.firstName || user.emailAddresses?.[0]?.emailAddress || 'User';
+            const el = document.createElement('div');
+            el.style.cssText = 'padding:8px 12px;background:#1e2732;border-radius:8px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;font-size:12px;';
+            el.innerHTML = `
+                <span style="color:#8b98a5;">${name}</span>
+                <button onclick="doLogout()" style="background:transparent;border:1px solid #3d5466;color:#8b98a5;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:11px;">Logout</button>
+            `;
+            const sidebar = document.querySelector('.sidebar');
+            sidebar.insertBefore(el, sidebar.children[2]);
+        }
+
+        async function doLogout() {
+            if (_clerk) {
+                await _clerk.signOut();
+            }
+            window.location.href = '/login';
+        }
+
         async function api(endpoint, params = {}) {
             const url = new URL(API + endpoint);
             Object.entries(params).forEach(([k, v]) => v != null && url.searchParams.append(k, v));
@@ -185,8 +250,19 @@
             try {
                 const controller = new AbortController();
                 const timeout = setTimeout(() => controller.abort(), 90000);
-                const res = await fetch(url, { signal: controller.signal });
+                const headers = {};
+                if (_authToken) {
+                    headers['Authorization'] = 'Bearer ' + _authToken;
+                }
+                const res = await fetch(url, { signal: controller.signal, headers });
                 clearTimeout(timeout);
+                if (res.status === 401) {
+                    window.location.href = '/login';
+                    return { success: false, error: 'Authentication required' };
+                }
+                if (res.status === 403) {
+                    return { success: false, error: 'Access denied' };
+                }
                 const data = await res.json();
                 console.log('[API Response]', endpoint, data);
                 return data.success ? data : { success: false, error: data.error || 'API error' };
@@ -2200,7 +2276,8 @@
             const el = document.querySelector('.version');
             if (el) el.textContent = 'API: offline';
         });
-        loadAgencies();
+        // Init auth first, then load agencies
+        initAuth().then(() => loadAgencies()).catch(() => loadAgencies());
     </script>
 </body>
 </html>
