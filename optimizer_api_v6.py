@@ -118,6 +118,57 @@ def health_check():
 
 
 # =============================================================================
+# WEB VISIT ENRICHMENT (from Ali's pre-matched AD_TO_WEB_VISIT_ATTRIBUTION)
+# =============================================================================
+def enrich_web_visits_agency(cursor, start_date, end_date):
+    """Return {agency_id: web_visit_count} from the pre-matched attribution table."""
+    try:
+        cursor.execute("""
+            SELECT AD_IMPRESSION_AGENCY_ID, COUNT(*) as WEB_VISITS
+            FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION
+            WHERE WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+            GROUP BY AD_IMPRESSION_AGENCY_ID
+        """, {'start_date': start_date, 'end_date': end_date})
+        return {int(r[0]): int(r[1]) for r in cursor.fetchall()}
+    except Exception:
+        return {}
+
+
+def enrich_web_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date):
+    """Return total web visits for a specific advertiser from the pre-matched table."""
+    try:
+        cursor.execute("""
+            SELECT COUNT(*) as WEB_VISITS
+            FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION
+            WHERE AD_IMPRESSION_AGENCY_ID = %(agency_id)s
+              AND AD_IMPRESSION_ADVERTISER_ID = %(advertiser_id)s
+              AND WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+        """, {'agency_id': agency_id, 'advertiser_id': advertiser_id,
+              'start_date': start_date, 'end_date': end_date})
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
+    except Exception:
+        return 0
+
+
+def enrich_web_visits_timeseries(cursor, agency_id, advertiser_id, start_date, end_date):
+    """Return {date_str: web_visit_count} for timeseries enrichment."""
+    try:
+        cursor.execute("""
+            SELECT WEB_VISIT_DATE, COUNT(*) as WEB_VISITS
+            FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION
+            WHERE AD_IMPRESSION_AGENCY_ID = %(agency_id)s
+              AND AD_IMPRESSION_ADVERTISER_ID = %(advertiser_id)s
+              AND WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+            GROUP BY WEB_VISIT_DATE
+        """, {'agency_id': agency_id, 'advertiser_id': advertiser_id,
+              'start_date': start_date, 'end_date': end_date})
+        return {str(r[0]): int(r[1]) for r in cursor.fetchall()}
+    except Exception:
+        return {}
+
+
+# =============================================================================
 # AGENCY OVERVIEW
 # =============================================================================
 @app.route('/api/v6/agencies', methods=['GET'])
@@ -204,6 +255,15 @@ def get_agencies():
                     'IMPRESSION_STRATEGY': STRATEGY_ADM_PREFIX,
                 })
 
+        # Enrich with web visits from pre-matched attribution table
+        web_by_agency = enrich_web_visits_agency(cursor, start_date, end_date)
+        for r in all_results:
+            aid = r.get('AGENCY_ID')
+            wv = web_by_agency.get(aid, 0)
+            r['WEB_VISITS'] = wv
+            imps = r.get('IMPRESSIONS') or 0
+            r['WEB_VISIT_RATE'] = round(wv * 100.0 / imps, 4) if imps > 0 else 0
+
         all_results.sort(key=lambda x: x.get('IMPRESSIONS', 0) or 0, reverse=True)
         cursor.close()
         conn.close()
@@ -280,15 +340,31 @@ def get_advertisers():
         results = []
         for row in cursor.fetchall():
             d = dict(zip(columns, row))
-            imps = d.get('IMPRESSIONS') or 0
-            store = d.get('STORE_VISITS') or 0
-            web = d.get('WEB_VISITS') or 0
-            d['STORE_VISIT_RATE'] = round(store * 100.0 / imps, 4) if imps > 0 else 0
-            d['WEB_VISIT_RATE'] = round(web * 100.0 / imps, 4) if imps > 0 else 0
             if d.get('ADVERTISER_NAME') and strategy == STRATEGY_ADM_PREFIX:
                 d['ADVERTISER_NAME'] = re.sub(r'^[0-9A-Za-z]+ - ', '', d['ADVERTISER_NAME'])
             d['IMPRESSION_STRATEGY'] = strategy
             results.append(d)
+
+        # Enrich with web visits from pre-matched attribution table
+        try:
+            cursor.execute("""
+                SELECT AD_IMPRESSION_ADVERTISER_ID, COUNT(*) as WEB_VISITS
+                FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION
+                WHERE AD_IMPRESSION_AGENCY_ID = %(agency_id)s
+                  AND WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+                GROUP BY AD_IMPRESSION_ADVERTISER_ID
+            """, {'agency_id': agency_id, 'start_date': start_date, 'end_date': end_date})
+            web_by_adv = {int(r[0]): int(r[1]) for r in cursor.fetchall()}
+        except Exception:
+            web_by_adv = {}
+
+        for d in results:
+            imps = d.get('IMPRESSIONS') or 0
+            store = d.get('STORE_VISITS') or 0
+            web = web_by_adv.get(d.get('ADVERTISER_ID'), 0)
+            d['WEB_VISITS'] = web
+            d['STORE_VISIT_RATE'] = round(store * 100.0 / imps, 4) if imps > 0 else 0
+            d['WEB_VISIT_RATE'] = round(web * 100.0 / imps, 4) if imps > 0 else 0
 
         cursor.close()
         conn.close()
@@ -858,9 +934,12 @@ def get_summary():
         row = cursor.fetchone()
         result = dict(zip(columns, row)) if row else {}
 
+        # Enrich with web visits from pre-matched attribution table
+        web = enrich_web_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
+
         imps = result.get('IMPRESSIONS') or 0
         store = result.get('STORE_VISITS') or 0
-        web = result.get('WEB_VISITS') or 0
+        result['WEB_VISITS'] = web
         result['STORE_VISIT_RATE'] = round(store * 100.0 / imps, 4) if imps > 0 else 0
         result['WEB_VISIT_RATE'] = round(web * 100.0 / imps, 4) if imps > 0 else 0
         result['TOTAL_VISITS'] = store + web
@@ -925,6 +1004,11 @@ def get_timeseries():
             d = dict(zip(columns, row))
             if d.get('LOG_DATE'): d['LOG_DATE'] = str(d['LOG_DATE'])
             results.append(d)
+
+        # Enrich timeseries with web visits from pre-matched attribution table
+        web_ts = enrich_web_visits_timeseries(cursor, agency_id, advertiser_id, start_date, end_date)
+        for d in results:
+            d['WEB_VISITS'] = web_ts.get(d.get('LOG_DATE'), 0)
 
         cursor.close()
         conn.close()

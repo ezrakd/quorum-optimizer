@@ -656,18 +656,39 @@
                 const agencies = [...new Set(json.data.filter(r => r.AGENCY_ID).map(r => JSON.stringify({ id: r.AGENCY_ID, name: r.AGENCY_NAME || r.AGENCY_ID })))].map(s => JSON.parse(s));
                 populateAgencyFilter('pixelAgencyFilter', agencies);
 
-                const platformColors = { SHOPIFY: '#96bf48', SQUARESPACE: '#222', WIX: '#0C6EFC', TICKETMASTER: '#026CDF', WOOCOMMERCE: '#7f54b3', STANDARD: '#3d5466' };
-                let html = '<table><thead><tr><th>Base Domain</th><th class="text-right">Events (7d)</th><th class="text-right">Unique IPs</th><th>Platform</th><th>Last Seen</th><th></th></tr></thead><tbody>';
+                const platformColors = { SHOPIFY:'#96bf48', SQUARESPACE:'#222', WIX:'#0C6EFC', TICKETMASTER:'#026CDF', SQUARE:'#006aff', WOOCOMMERCE:'#7f54b3', GTM:'#4285f4', BIGCOMMERCE:'#34313f', SFCC:'#00a1e0', STANDARD:'#3d5466' };
+
+                // Summary stats
+                const platforms = {};
+                let totalPurchases = 0, totalLeads = 0, totalRevenue = 0;
                 json.data.forEach(r => {
-                    const lastSeen = r.LAST_SEEN ? new Date(r.LAST_SEEN).toLocaleDateString() : '—';
+                    const p = r.DETECTED_PLATFORM || 'STANDARD';
+                    platforms[p] = (platforms[p] || 0) + 1;
+                    totalPurchases += (r.PURCHASES_7D || 0);
+                    totalLeads += (r.LEADS_7D || 0);
+                    totalRevenue += (r.REVENUE_7D || 0);
+                });
+                let summaryHtml = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">';
+                Object.entries(platforms).sort((a,b) => b[1]-a[1]).forEach(([p, count]) => {
+                    summaryHtml += `<span style="background:${platformColors[p]||platformColors.STANDARD};color:#fff;padding:3px 8px;border-radius:4px;font-size:11px;font-weight:600">${p} (${count})</span>`;
+                });
+                if (totalPurchases > 0) summaryHtml += `<span style="background:#065f46;color:#fff;padding:3px 8px;border-radius:4px;font-size:11px">Purchases: ${fmt(totalPurchases)}</span>`;
+                if (totalLeads > 0) summaryHtml += `<span style="background:#92400e;color:#fff;padding:3px 8px;border-radius:4px;font-size:11px">Leads: ${fmt(totalLeads)}</span>`;
+                if (totalRevenue > 0) summaryHtml += `<span style="background:#065f46;color:#fff;padding:3px 8px;border-radius:4px;font-size:11px">Revenue: $${fmt(Math.round(totalRevenue))}</span>`;
+                summaryHtml += '</div>';
+
+                let html = summaryHtml + '<table><thead><tr><th>Base Domain</th><th class="text-right">Events</th><th class="text-right">Purchases</th><th class="text-right">Leads</th><th class="text-right">Revenue</th><th>Platform</th><th></th></tr></thead><tbody>';
+                json.data.forEach(r => {
                     const platform = r.DETECTED_PLATFORM || 'STANDARD';
                     const pColor = platformColors[platform] || platformColors.STANDARD;
+                    const rev = (r.REVENUE_7D || 0) > 0 ? '$' + fmt(Math.round(r.REVENUE_7D)) : '—';
                     html += `<tr class="clickable" onclick='openConfigDomainModal(${JSON.stringify(r).replace(/'/g, "&#39;")})'>
                         <td><span class="truncate">${esc(r.BASE_DOMAIN || '')}</span></td>
                         <td class="text-right text-blue">${fmt(r.EVENT_COUNT_7D)}</td>
-                        <td class="text-right">${fmt(r.UNIQUE_DEVICES_7D)}</td>
+                        <td class="text-right" style="color:${r.PURCHASES_7D > 0 ? '#059669' : '#8b98a5'}">${r.PURCHASES_7D > 0 ? fmt(r.PURCHASES_7D) : '—'}</td>
+                        <td class="text-right" style="color:${r.LEADS_7D > 0 ? '#d97706' : '#8b98a5'}">${r.LEADS_7D > 0 ? fmt(r.LEADS_7D) : '—'}</td>
+                        <td class="text-right" style="color:${(r.REVENUE_7D||0) > 0 ? '#059669' : '#8b98a5'}">${rev}</td>
                         <td><span class="status-badge" style="background:${pColor};color:#fff;font-size:10px;padding:2px 6px;border-radius:3px">${platform}</span></td>
-                        <td>${lastSeen}</td>
                         <td><button class="btn btn-sm btn-primary">Configure</button></td>
                     </tr>`;
                 });
@@ -1147,16 +1168,33 @@
                     ['Web Pixel Integration', cfgCurrentData.WEB_PIXEL_INTEGRATION_TYPE || '—'],
                     ['POI Segments Assigned', cfgCurrentData.SEGMENT_COUNT > 0 ? `✓ ${cfgCurrentData.SEGMENT_COUNT} segments` : '✗ None'],
                     ['Campaign Mappings', cfgCurrentData.CAMPAIGN_MAPPING_COUNT > 0 ? `✓ ${cfgCurrentData.CAMPAIGN_MAPPING_COUNT} mappings` : '✗ None'],
-                    ['Web Pixel URLs', cfgCurrentData.WEB_PIXEL_URL_COUNT > 0 ? `✓ ${cfgCurrentData.WEB_PIXEL_URL_COUNT} URLs` : '✗ None'],
+                    ['Web Pixel URLs', cfgCurrentData.WEB_PIXEL_URL_COUNT > 0 ? `✓ ${cfgCurrentData.WEB_PIXEL_URL_COUNT} URLs <span id="cfgMappedUrls" style="color:#8b98a5;font-size:12px">loading...</span>` : '✗ None', true],
                     ['Platforms', cfgCurrentData.PLATFORM_TYPE_IDS || '—'],
                     ['Last Updated', cfgCurrentData.UPDATED_AT || cfgCurrentData.CREATED_AT || '—'],
                 ];
-                grid.innerHTML = fields.map(([label, val]) => `
+                grid.innerHTML = fields.map(([label, val, raw]) => `
                     <div style="padding:8px 0; border-bottom:1px solid #1e2732;">
                         <div style="font-size:11px; color:#8b98a5; text-transform:uppercase; margin-bottom:2px;">${label}</div>
-                        <div style="font-size:14px;">${val != null ? esc(String(val)) : '—'}</div>
+                        <div style="font-size:14px;">${val != null ? (raw ? String(val) : esc(String(val))) : '—'}</div>
                     </div>
                 `).join('');
+
+                // Fetch mapped URLs if any exist
+                if (cfgCurrentData.WEB_PIXEL_URL_COUNT > 0) {
+                    fetch(`${API}/api/config/mapped-urls?agency_id=${cfgCurrentData.AGENCY_ID}&advertiser_id=${cfgCurrentData.ADVERTISER_ID}`)
+                        .then(r => r.json())
+                        .then(json => {
+                            const el = document.getElementById('cfgMappedUrls');
+                            if (!el) return;
+                            if (json.success && json.urls.length > 0) {
+                                el.innerHTML = '<br>' + json.urls.map(u =>
+                                    `<div style="margin:2px 0;padding:3px 6px;background:#1e2732;border-radius:3px;font-size:12px;display:inline-block;margin-right:4px">${esc(u.url)}${u.is_poi ? ' <span style="color:#d97706">POI</span>' : ''}</div>`
+                                ).join('');
+                            } else {
+                                el.textContent = '';
+                            }
+                        }).catch(() => {});
+                }
 
             } catch (e) {
                 resultsDiv.innerHTML = `<div class="empty error">Error: ${e.message}</div>`;

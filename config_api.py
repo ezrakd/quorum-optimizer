@@ -139,22 +139,27 @@ def get_unmapped_webpixels():
         """, (agency_id,))
         mapped_domains = set(row[0] for row in cursor.fetchall())
 
-        # Step 2: Get active pixel domains for this agency (fast with agency filter)
+        # Step 2: Get active pixel domains for this agency with conversion metrics
+        # Dropped COUNT(DISTINCT CLIENT_IP) for speed — it's the slowest aggregation
         cursor.execute("""
             SELECT
                 LOWER(SPLIT_PART(SPLIT_PART(PAGE_URL, '://', 2), '/', 1)) as BASE_DOMAIN,
                 COUNT(*) as EVENT_COUNT_7D,
-                COUNT(DISTINCT CLIENT_IP) as UNIQUE_DEVICES_7D,
+                0 as UNIQUE_DEVICES_7D,
+                COUNT_IF(EVENT_TYPE = 'purchase') as PURCHASES_7D,
+                COUNT_IF(EVENT_TYPE = 'lead') as LEADS_7D,
+                COUNT_IF(EVENT_TYPE = 'site_visit') as SITE_VISITS_7D,
+                SUM(COALESCE(TRY_CAST(CONVERSION_VALUE AS FLOAT), 0)) as REVENUE_7D,
                 MIN(EVENT_TIMESTAMP) as FIRST_SEEN,
                 MAX(EVENT_TIMESTAMP) as LAST_SEEN
             FROM QUORUMDB.DERIVED_TABLES.WEBPIXEL_EVENTS
             WHERE EVENT_TIMESTAMP >= DATEADD(day, -7, CURRENT_TIMESTAMP())
-              AND PAGE_URL IS NOT NULL AND PAGE_URL != ''
+              AND PAGE_URL IS NOT NULL
               AND AGENCY_ID = %s
             GROUP BY BASE_DOMAIN
             HAVING COUNT(*) >= 10
             ORDER BY EVENT_COUNT_7D DESC
-            LIMIT 500
+            LIMIT 200
         """, (agency_id,))
 
         columns = [desc[0] for desc in cursor.description]
@@ -181,11 +186,13 @@ def get_unmapped_webpixels():
             mapped_roots.add(md)
 
         platform_detect = {
-            'shopify': 'SHOPIFY', 'myshopify.com': 'SHOPIFY',
-            'squarespace': 'SQUARESPACE',
-            'wix': 'WIX',
-            'ticketmaster': 'TICKETMASTER', 'livenation': 'TICKETMASTER',
+            'myshopify.com': 'SHOPIFY', 'shopify': 'SHOPIFY', 'shopifypreview.com': 'SHOPIFY',
+            'ticketmaster.com': 'TICKETMASTER', 'livenation.com': 'TICKETMASTER',
+            'square.site': 'SQUARE', 'squareup.com': 'SQUARE', 'squarespace': 'SQUARESPACE',
+            'wix.com': 'WIX', 'wixsite.com': 'WIX', 'wixstudio': 'WIX',
+            'gtm-': 'GTM', 'googletagmanager': 'GTM',
             'woocommerce': 'WOOCOMMERCE',
+            'bigcommerce': 'BIGCOMMERCE',
         }
 
         results = []
@@ -293,25 +300,40 @@ def get_pixel_preview():
         columns = [desc[0] for desc in cursor.description]
         samples = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
-        # Detect tag type from sample params
+        # Detect tag type from domain name first, then fall back to params
         detected_tag = 'STANDARD'
-        for s in samples:
-            params = (s.get('PARAMS') or '').lower()
-            page = (s.get('PAGE_URL') or '').lower()
-            if 'shopify' in params or 'checkout_completed' in params:
-                detected_tag = 'SHOPIFY'; break
-            elif 'demandware' in params or 'demandware' in page:
-                detected_tag = 'SFCC'; break
-            elif 'woocommerce' in params or 'wc-' in params:
-                detected_tag = 'WOOCOMMERCE'; break
-            elif 'squarespace' in params:
-                detected_tag = 'SQUARESPACE'; break
-            elif 'ticketmaster' in params:
-                detected_tag = 'TICKETMASTER'; break
-            elif 'wix' in params:
-                detected_tag = 'WIX'; break
-            elif 'gtm' in params or 'google_tag' in params:
-                detected_tag = 'GTM'; break
+        domain_detect = {
+            'myshopify.com': 'SHOPIFY', 'shopify': 'SHOPIFY',
+            'ticketmaster.com': 'TICKETMASTER', 'livenation.com': 'TICKETMASTER',
+            'square.site': 'SQUARE', 'squareup.com': 'SQUARE',
+            'squarespace.com': 'SQUARESPACE', 'squarespace': 'SQUARESPACE',
+            'wixsite.com': 'WIX', 'wix.com': 'WIX', 'wixstudio': 'WIX',
+            'gtm-': 'GTM', 'googletagmanager': 'GTM',
+            'bigcommerce': 'BIGCOMMERCE',
+        }
+        for key, platform in domain_detect.items():
+            if key in domain:
+                detected_tag = platform
+                break
+        # If domain didn't match, check params
+        if detected_tag == 'STANDARD':
+            for s in samples:
+                params = (s.get('PARAMS') or '').lower()
+                page = (s.get('PAGE_URL') or '').lower()
+                if 'shopify' in params or 'checkout_completed' in params:
+                    detected_tag = 'SHOPIFY'; break
+                elif 'demandware' in params or 'demandware' in page:
+                    detected_tag = 'SFCC'; break
+                elif 'woocommerce' in params or 'wc-' in params:
+                    detected_tag = 'WOOCOMMERCE'; break
+                elif 'squarespace' in params:
+                    detected_tag = 'SQUARESPACE'; break
+                elif 'ticketmaster' in params:
+                    detected_tag = 'TICKETMASTER'; break
+                elif 'wix' in params:
+                    detected_tag = 'WIX'; break
+                elif 'gtm' in params or 'google_tag' in params:
+                    detected_tag = 'GTM'; break
 
         # Clean up sample params to keep payload small
         for s in samples:
@@ -483,15 +505,18 @@ def map_campaign():
         conn = get_config_connection()
         cursor = conn.cursor()
 
-        # Insert the mapping
+        # Insert the mapping (MAPPING_ID is NOT NULL, no auto-increment — generate via MAX+1)
         cursor.execute("""
             INSERT INTO QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2 (
+                MAPPING_ID,
                 DSP_ADVERTISER_ID, INSERTION_ORDER_ID, LINE_ITEM_ID,
                 QUORUM_ADVERTISER_ID, AGENCY_ID, DSP_PLATFORM_TYPE,
                 DATA_SOURCE, CAMPAIGN_NAME_MANUAL,
                 ADVERTISER_NAME_FROM_DSP,
                 CREATED_AT, MODIFIED_AT
-            ) VALUES (
+            )
+            SELECT
+                COALESCE(MAX(MAPPING_ID), 0) + 1,
                 %(dsp_advertiser_id)s,
                 %(insertion_order_id)s,
                 %(line_item_id)s,
@@ -503,7 +528,7 @@ def map_campaign():
                 %(dsp_advertiser_name)s,
                 CURRENT_TIMESTAMP(),
                 CURRENT_TIMESTAMP()
-            )
+            FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
         """, {
             'dsp_advertiser_id': data['dsp_advertiser_id'],
             'insertion_order_id': data.get('insertion_order_id'),
@@ -539,6 +564,35 @@ def map_campaign():
                        f"(PT={data['platform_type']}) → Quorum advertiser {data['quorum_advertiser_id']}"
         })
 
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# =============================================================================
+# READ: MAPPED URLS FOR AN ADVERTISER
+# =============================================================================
+@config_bp.route('/mapped-urls', methods=['GET'])
+def get_mapped_urls():
+    """Return the web pixel domains mapped to a specific advertiser."""
+    try:
+        agency_id = request.args.get('agency_id')
+        advertiser_id = request.args.get('advertiser_id')
+        if not agency_id or not advertiser_id:
+            return jsonify({'success': False, 'error': 'agency_id and advertiser_id required'}), 400
+
+        conn = get_config_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT "URL", "IS_POI", "CREATED_AT"
+            FROM QUORUMDB.DERIVED_TABLES.ADVERTISER_DOMAIN_MAPPING
+            WHERE "Agency_Id" = %s AND "Advertiser_id" = %s
+            ORDER BY "CREATED_AT" DESC
+        """, (int(agency_id), int(advertiser_id)))
+        urls = [{'url': r[0], 'is_poi': r[1], 'created_at': str(r[2]) if r[2] else None}
+                for r in cursor.fetchall()]
+        cursor.close()
+        conn.close()
+        return jsonify({'success': True, 'urls': urls})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
