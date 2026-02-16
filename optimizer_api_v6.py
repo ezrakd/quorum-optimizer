@@ -124,7 +124,7 @@ def enrich_web_visits_agency(cursor, start_date, end_date):
     """Return {agency_id: web_visit_count} from the pre-matched attribution table."""
     try:
         cursor.execute("""
-            SELECT AD_IMPRESSION_AGENCY_ID, COUNT(*) as WEB_VISITS
+            SELECT AD_IMPRESSION_AGENCY_ID, COUNT(DISTINCT MAID || '|' || WEB_VISIT_DATE) as WEB_VISITS
             FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION
             WHERE WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
             GROUP BY AD_IMPRESSION_AGENCY_ID
@@ -138,7 +138,7 @@ def enrich_web_visits_advertiser(cursor, agency_id, advertiser_id, start_date, e
     """Return total web visits for a specific advertiser from the pre-matched table."""
     try:
         cursor.execute("""
-            SELECT COUNT(*) as WEB_VISITS
+            SELECT COUNT(DISTINCT MAID || '|' || WEB_VISIT_DATE) as WEB_VISITS
             FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION
             WHERE AD_IMPRESSION_AGENCY_ID = %(agency_id)s
               AND AD_IMPRESSION_ADVERTISER_ID = %(advertiser_id)s
@@ -155,7 +155,7 @@ def enrich_web_visits_timeseries(cursor, agency_id, advertiser_id, start_date, e
     """Return {date_str: web_visit_count} for timeseries enrichment."""
     try:
         cursor.execute("""
-            SELECT WEB_VISIT_DATE, COUNT(*) as WEB_VISITS
+            SELECT WEB_VISIT_DATE, COUNT(DISTINCT MAID) as WEB_VISITS
             FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION
             WHERE AD_IMPRESSION_AGENCY_ID = %(agency_id)s
               AND AD_IMPRESSION_ADVERTISER_ID = %(advertiser_id)s
@@ -412,7 +412,7 @@ def get_advertisers():
         # Enrich with web visits from pre-matched attribution table
         try:
             cursor.execute("""
-                SELECT AD_IMPRESSION_ADVERTISER_ID, COUNT(*) as WEB_VISITS
+                SELECT AD_IMPRESSION_ADVERTISER_ID, COUNT(DISTINCT MAID || '|' || WEB_VISIT_DATE) as WEB_VISITS
                 FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION
                 WHERE AD_IMPRESSION_AGENCY_ID = %(agency_id)s
                   AND WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
