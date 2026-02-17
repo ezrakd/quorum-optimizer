@@ -7,19 +7,22 @@ Endpoints for the 3-panel admin config screen:
   Panel 3: Campaign Mapping CRUD
 
 Write targets:
-  - PIXEL_CAMPAIGN_MAPPING_V2 (REF_DATA)
-  - ADVERTISER_DOMAIN_MAPPING (DERIVED_TABLES)
-  - SEGMENT_MD5_MAPPING (SEGMENT_DATA)
-  - REF_ADVERTISER_CONFIG (BASE_TABLES)
+  - REF_AGENCY_ADVERTISER (BASE_TABLES) — canonical advertiser registry
+  - REF_ADVERTISER_CONFIG (BASE_TABLES) — advertiser config flags/counts
+  - SEGMENT_MD5_MAPPING (BASE_TABLES) — POI segment assignments
+  - PIXEL_CAMPAIGN_MAPPING_V2 (REF_DATA) — DSP campaign mappings
+  - ADVERTISER_DOMAIN_MAPPING (DERIVED_TABLES) — web pixel URL mappings
 
 Read sources:
-  - V_UNMAPPED_AD_IMPRESSIONS (BASE_TABLES)
-  - V_UNMAPPED_WEB_PIXELS (BASE_TABLES)
-  - V_POI_BRAND_SEARCH (BASE_TABLES)
-  - REF_ADVERTISER_CONFIG (BASE_TABLES)
-  - REF_AGENCY_ADVERTISER (BASE_TABLES)
+  - REF_AGENCY_ADVERTISER (BASE_TABLES) — agency/advertiser lookup
+  - REF_ADVERTISER_CONFIG (BASE_TABLES) — config status, report types
+  - REF_REPORT_TYPE (BASE_TABLES) — report type taxonomy
+  - SEGMENT_METADATA (BASE_TABLES) — POI brand/DMA/zip details
+  - V_UNMAPPED_AD_IMPRESSIONS (BASE_TABLES) — unmapped impression discovery
+  - V_POI_BRAND_SEARCH (BASE_TABLES) — POI brand search
+  - AD_IMPRESSION_LOG_V2 (BASE_TABLES) — impression verification
 
-Designed to run alongside optimizer_api_v5 (same Flask app) or standalone.
+Designed to run alongside optimizer_api_v6 (same Flask app) or standalone.
 """
 import os
 from flask import Blueprint, jsonify, request, g
@@ -437,7 +440,7 @@ def get_campaign_mappings():
                 pcm.ADVERTISER_NAME_FROM_DSP, pcm.INSERTION_ORDER_NAME_FROM_DSP,
                 pcm.LINE_ITEM_NAME_FROM_DSP,
                 pcm.CAMPAIGN_NAME_MANUAL,
-                COALESCE(aa.COMP_NAME, '') as QUORUM_ADVERTISER_NAME,
+                COALESCE(aa.ADVERTISER_NAME, '') as QUORUM_ADVERTISER_NAME,
                 pcm.IMPRESSIONS_14DAY_ROLLING, pcm.REACH_14DAY_ROLLING,
                 pcm.IMPRESSION_COUNT, pcm.FIRST_IMPRESSION_TIMESTAMP, pcm.LAST_IMPRESSION_TIMESTAMP,
                 pcm.CAMPAIGN_START_DATE, pcm.CAMPAIGN_END_DATE,
@@ -445,8 +448,8 @@ def get_campaign_mappings():
             FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2 pcm
             LEFT JOIN QUORUMDB.BASE_TABLES.REF_DSP_PLATFORM dsp
                 ON TRY_CAST(pcm.DSP_PLATFORM_TYPE AS INTEGER) = dsp.PLATFORM_TYPE_ID
-            LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa
-                ON pcm.QUORUM_ADVERTISER_ID = aa.ID AND pcm.AGENCY_ID = aa.ADVERTISER_ID
+            LEFT JOIN QUORUMDB.BASE_TABLES.REF_AGENCY_ADVERTISER aa
+                ON pcm.QUORUM_ADVERTISER_ID = aa.ADVERTISER_ID AND pcm.AGENCY_ID = aa.AGENCY_ID
             WHERE 1=1
         """
         params = {}
@@ -663,11 +666,8 @@ def configure_domain():
             'is_poi': data.get('is_poi', False)
         })
 
-        # Determine WEB_VISIT_SOURCE based on agency
-        # Agency 1480 (Paramount) uses PARAMOUNT_SITEVISITS, all others use QUORUM_ADV_WEB_VISITS
-        web_visit_source = data.get('web_visit_source')
-        if not web_visit_source:
-            web_visit_source = 'PARAMOUNT_SITEVISITS' if int(data['agency_id']) == 1480 else 'QUORUM_ADV_WEB_VISITS'
+        # Determine WEB_VISIT_SOURCE — all agencies use base table architecture
+        web_visit_source = data.get('web_visit_source', 'QUORUM_ADV_WEB_VISITS')
 
         # Update REF_ADVERTISER_CONFIG
         cursor.execute("""
@@ -738,7 +738,7 @@ def assign_poi():
         placeholders = ','.join([f"'{m}'" for m in md5s])
         cursor.execute(f"""
             SELECT SEGMENT_MD5
-            FROM QUORUMDB.SEGMENT_DATA.SEGMENT_MD5_MAPPING
+            FROM QUORUMDB.BASE_TABLES.SEGMENT_MD5_MAPPING
             WHERE ADVERTISER_ID = %(advertiser_id)s
               AND SEGMENT_MD5 IN ({placeholders})
         """, {'advertiser_id': data['advertiser_id']})
@@ -766,7 +766,7 @@ def assign_poi():
             )
 
         cursor.execute(f"""
-            INSERT INTO QUORUMDB.SEGMENT_DATA.SEGMENT_MD5_MAPPING
+            INSERT INTO QUORUMDB.BASE_TABLES.SEGMENT_MD5_MAPPING
                 (ADVERTISER_ID, SEGMENT_MD5, SEGMENT_UNIQUE_ID)
             VALUES {','.join(insert_values)}
         """)
@@ -840,14 +840,14 @@ def get_advertiser_config():
                 c.CONFIG_STATUS,
                 c.LAST_IMPRESSION_AT, c.LAST_STORE_VISIT_AT, c.LAST_WEB_VISIT_AT,
                 c.CREATED_AT, c.UPDATED_AT,
-                a.COMP_NAME as ADVERTISER_NAME,
+                a.ADVERTISER_NAME,
                 ag.AGENCY_NAME
             FROM QUORUMDB.BASE_TABLES.REF_ADVERTISER_CONFIG c
-            LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER a
-                ON c.ADVERTISER_ID = a.ID AND c.AGENCY_ID = a.ADVERTISER_ID
+            LEFT JOIN QUORUMDB.BASE_TABLES.REF_AGENCY_ADVERTISER a
+                ON c.ADVERTISER_ID = a.ADVERTISER_ID AND c.AGENCY_ID = a.AGENCY_ID
             LEFT JOIN (
-                SELECT DISTINCT ADVERTISER_ID as AG_ID, AGENCY_NAME
-                FROM QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER
+                SELECT DISTINCT AGENCY_ID as AG_ID, AGENCY_NAME
+                FROM QUORUMDB.BASE_TABLES.REF_AGENCY_ADVERTISER
                 WHERE AGENCY_NAME IS NOT NULL
             ) ag ON c.AGENCY_ID = ag.AG_ID
             WHERE 1=1
@@ -903,9 +903,9 @@ def search_advertisers():
 
         query = """
             SELECT DISTINCT
-                aa.ID as ADVERTISER_ID,
-                aa.ADVERTISER_ID as AGENCY_ID,
-                aa.COMP_NAME as ADVERTISER_NAME,
+                aa.ADVERTISER_ID,
+                aa.AGENCY_ID,
+                aa.ADVERTISER_NAME,
                 aa.AGENCY_NAME,
                 c.CONFIG_STATUS,
                 c.SEGMENT_COUNT,
@@ -915,21 +915,21 @@ def search_advertisers():
                 c.HAS_WEB_VISIT_ATTRIBUTION,
                 c.HAS_IMPRESSION_TRACKING,
                 c.WEB_VISIT_SOURCE
-            FROM QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa
+            FROM QUORUMDB.BASE_TABLES.REF_AGENCY_ADVERTISER aa
             LEFT JOIN QUORUMDB.BASE_TABLES.REF_ADVERTISER_CONFIG c
-                ON aa.ID = c.ADVERTISER_ID AND aa.ADVERTISER_ID = c.AGENCY_ID
-            WHERE aa.COMP_NAME ILIKE %(search)s
+                ON aa.ADVERTISER_ID = c.ADVERTISER_ID AND aa.AGENCY_ID = c.AGENCY_ID
+            WHERE aa.ADVERTISER_NAME ILIKE %(search)s
         """
         params = {'search': f'%{q}%'}
 
         if agency_id:
-            query += " AND aa.ADVERTISER_ID = %(agency_id)s"
+            query += " AND aa.AGENCY_ID = %(agency_id)s"
             params['agency_id'] = int(agency_id)
 
         if reporting_ready:
             query += " AND c.CONFIG_STATUS = 'ACTIVE' AND (COALESCE(c.SEGMENT_COUNT, 0) > 0 OR COALESCE(c.WEB_PIXEL_URL_COUNT, 0) > 0)"
 
-        query += " ORDER BY aa.COMP_NAME LIMIT 25"
+        query += " ORDER BY aa.ADVERTISER_NAME LIMIT 25"
 
         cursor.execute(query, params)
         results = rows_to_dicts(cursor)
@@ -1114,7 +1114,7 @@ def get_advertiser_hub():
                 SELECT
                     ADVERTISER_ID as ADV_ID,
                     COUNT(DISTINCT SEGMENT_MD5) as POI_COUNT
-                FROM QUORUMDB.SEGMENT_DATA.SEGMENT_MD5_MAPPING
+                FROM QUORUMDB.BASE_TABLES.SEGMENT_MD5_MAPPING
                 GROUP BY ADVERTISER_ID
             ),
             adv_campaigns AS (
@@ -1129,9 +1129,9 @@ def get_advertiser_hub():
                 GROUP BY QUORUM_ADVERTISER_ID, AGENCY_ID
             )
             SELECT
-                aa.ID as ADVERTISER_ID,
-                aa.ADVERTISER_ID as AGENCY_ID,
-                aa.COMP_NAME as ADVERTISER_NAME,
+                aa.ADVERTISER_ID,
+                aa.AGENCY_ID,
+                aa.ADVERTISER_NAME,
                 aa.AGENCY_NAME,
                 COALESCE(c.CONFIG_STATUS, 'UNCONFIGURED') as CONFIG_STATUS,
                 COALESCE(c.ATTRIBUTION_WINDOW_DAYS, 30) as ATTRIBUTION_WINDOW_DAYS,
@@ -1151,25 +1151,25 @@ def get_advertiser_hub():
                 c.WEB_PIXEL_URL_COUNT,
                 c.CAMPAIGN_MAPPING_COUNT,
                 c.UPDATED_AT
-            FROM QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa
+            FROM QUORUMDB.BASE_TABLES.REF_AGENCY_ADVERTISER aa
             LEFT JOIN QUORUMDB.BASE_TABLES.REF_ADVERTISER_CONFIG c
-                ON aa.ID = c.ADVERTISER_ID AND aa.ADVERTISER_ID = c.AGENCY_ID
+                ON aa.ADVERTISER_ID = c.ADVERTISER_ID AND aa.AGENCY_ID = c.AGENCY_ID
             LEFT JOIN adv_domains d
-                ON aa.ID = d.ADV_ID AND aa.ADVERTISER_ID = d.AG_ID
+                ON aa.ADVERTISER_ID = d.ADV_ID AND aa.AGENCY_ID = d.AG_ID
             LEFT JOIN adv_pois p
-                ON aa.ID = p.ADV_ID
+                ON aa.ADVERTISER_ID = p.ADV_ID
             LEFT JOIN adv_campaigns cm
-                ON aa.ID = cm.ADV_ID AND aa.ADVERTISER_ID = cm.AG_ID
+                ON aa.ADVERTISER_ID = cm.ADV_ID AND aa.AGENCY_ID = cm.AG_ID
             WHERE 1=1
         """
         params = {}
 
         if agency_id:
-            query += " AND aa.ADVERTISER_ID = %(agency_id)s"
+            query += " AND aa.AGENCY_ID = %(agency_id)s"
             params['agency_id'] = int(agency_id)
 
         if search:
-            query += " AND aa.COMP_NAME ILIKE %(search)s"
+            query += " AND aa.ADVERTISER_NAME ILIKE %(search)s"
             params['search'] = f'%{search}%'
 
         # Only show advertisers with some activity or config
@@ -1180,7 +1180,7 @@ def get_advertiser_hub():
             OR cm.CAMPAIGN_COUNT > 0
         )"""
 
-        query += f" ORDER BY COALESCE(cm.TOTAL_IMPRESSIONS_14D, 0) DESC, aa.COMP_NAME LIMIT {limit}"
+        query += f" ORDER BY COALESCE(cm.TOTAL_IMPRESSIONS_14D, 0) DESC, aa.ADVERTISER_NAME LIMIT {limit}"
 
         cursor.execute(query, params)
         results = rows_to_dicts(cursor)
@@ -1236,8 +1236,8 @@ def get_advertiser_detail():
         # 1. Basic info + config
         query = """
             SELECT
-                aa.ID as ADVERTISER_ID, aa.ADVERTISER_ID as AGENCY_ID,
-                aa.COMP_NAME as ADVERTISER_NAME, aa.AGENCY_NAME,
+                aa.ADVERTISER_ID, aa.AGENCY_ID,
+                aa.ADVERTISER_NAME, aa.AGENCY_NAME,
                 c.CONFIG_STATUS, c.ATTRIBUTION_WINDOW_DAYS, c.MATCH_STRATEGY,
                 c.IMPRESSION_JOIN_STRATEGY, c.EXPOSURE_SOURCE,
                 c.HAS_STORE_VISIT_ATTRIBUTION, c.HAS_WEB_VISIT_ATTRIBUTION,
@@ -1245,14 +1245,14 @@ def get_advertiser_detail():
                 c.WEB_VISIT_SOURCE,
                 c.SEGMENT_COUNT, c.WEB_PIXEL_URL_COUNT, c.CAMPAIGN_MAPPING_COUNT,
                 c.PLATFORM_TYPE_IDS, c.CREATED_AT, c.UPDATED_AT
-            FROM QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa
+            FROM QUORUMDB.BASE_TABLES.REF_AGENCY_ADVERTISER aa
             LEFT JOIN QUORUMDB.BASE_TABLES.REF_ADVERTISER_CONFIG c
-                ON aa.ID = c.ADVERTISER_ID AND aa.ADVERTISER_ID = c.AGENCY_ID
-            WHERE aa.ID = %s
+                ON aa.ADVERTISER_ID = c.ADVERTISER_ID AND aa.AGENCY_ID = c.AGENCY_ID
+            WHERE aa.ADVERTISER_ID = %s
         """
         q_params = [advertiser_id]
         if agency_id:
-            query += " AND aa.ADVERTISER_ID = %s"
+            query += " AND aa.AGENCY_ID = %s"
             q_params.append(int(agency_id))
         query += " LIMIT 1"
         cursor.execute(query, q_params)
@@ -1293,21 +1293,21 @@ def get_advertiser_detail():
         """, (advertiser_id, int(effective_agency)))
         campaigns = rows_to_dicts(cursor)
 
-        # 4. POI summary (brand-level aggregation)
+        # 4. POI summary — join through SEGMENT_METADATA (V_POI_BRAND_SEARCH is brand-aggregate, no SEGMENT_MD5)
         cursor.execute("""
             SELECT
                 sm.SEGMENT_MD5,
                 sm.SEGMENT_UNIQUE_ID,
-                COALESCE(poi.BRAND, 'Unknown') as BRAND,
-                COALESCE(poi.CATEGORY, '') as CATEGORY,
-                COALESCE(poi.DMA_NAME, '') as DMA_NAME,
-                COALESCE(poi.UNIQUE_LOCATIONS, 1) as LOCATIONS,
-                COALESCE(poi.ZIP_CODES, 0) as ZIP_CODES
-            FROM QUORUMDB.SEGMENT_DATA.SEGMENT_MD5_MAPPING sm
-            LEFT JOIN QUORUMDB.BASE_TABLES.V_POI_BRAND_SEARCH poi
-                ON sm.SEGMENT_MD5 = poi.SEGMENT_MD5
+                COALESCE(smd.BRAND, 'Unknown') as BRAND,
+                COALESCE(smd.CATEGORY, '') as CATEGORY,
+                COALESCE(smd.DMA_NAME, '') as DMA_NAME,
+                1 as LOCATIONS,
+                COALESCE(smd.ZIP_CODE, '') as ZIP_CODE
+            FROM QUORUMDB.BASE_TABLES.SEGMENT_MD5_MAPPING sm
+            LEFT JOIN QUORUMDB.BASE_TABLES.SEGMENT_METADATA smd
+                ON sm.SEGMENT_UNIQUE_ID = smd.SEGMENT_UNIQUE_ID
             WHERE sm.ADVERTISER_ID = %s
-            ORDER BY poi.BRAND, poi.DMA_NAME
+            ORDER BY smd.BRAND, smd.DMA_NAME
             LIMIT 500
         """, (advertiser_id,))
         pois = rows_to_dicts(cursor)
@@ -1315,13 +1315,14 @@ def get_advertiser_detail():
         # POI summary stats
         poi_brands = set()
         poi_dmas = set()
-        poi_total_locations = 0
+        poi_zips = set()
         for p in pois:
             if p.get('BRAND') and p['BRAND'] != 'Unknown':
                 poi_brands.add(p['BRAND'])
             if p.get('DMA_NAME'):
                 poi_dmas.add(p['DMA_NAME'])
-            poi_total_locations += p.get('LOCATIONS', 1)
+            if p.get('ZIP_CODE'):
+                poi_zips.add(p['ZIP_CODE'])
 
         cursor.close()
         conn.close()
@@ -1337,7 +1338,7 @@ def get_advertiser_detail():
                 'unique_brands': len(poi_brands),
                 'brands': sorted(list(poi_brands)),
                 'unique_dmas': len(poi_dmas),
-                'total_locations': poi_total_locations
+                'unique_zips': len(poi_zips)
             }
         })
 
@@ -1370,7 +1371,7 @@ def remove_poi():
 
         placeholders = ','.join([f"'{m}'" for m in md5s])
         cursor.execute(f"""
-            DELETE FROM QUORUMDB.SEGMENT_DATA.SEGMENT_MD5_MAPPING
+            DELETE FROM QUORUMDB.BASE_TABLES.SEGMENT_MD5_MAPPING
             WHERE ADVERTISER_ID = %s AND SEGMENT_MD5 IN ({placeholders})
         """, (int(advertiser_id),))
         deleted = cursor.rowcount
@@ -1386,7 +1387,7 @@ def remove_poi():
 
             # Check if any POIs remain
             cursor.execute("""
-                SELECT COUNT(*) FROM QUORUMDB.SEGMENT_DATA.SEGMENT_MD5_MAPPING
+                SELECT COUNT(*) FROM QUORUMDB.BASE_TABLES.SEGMENT_MD5_MAPPING
                 WHERE ADVERTISER_ID = %s
             """, (int(advertiser_id),))
             remaining = cursor.fetchone()[0]
@@ -1431,8 +1432,8 @@ def create_advertiser():
 
         # Check for duplicates
         cursor.execute("""
-            SELECT ID FROM QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER
-            WHERE COMP_NAME ILIKE %s AND ADVERTISER_ID = %s
+            SELECT ADVERTISER_ID FROM QUORUMDB.BASE_TABLES.REF_AGENCY_ADVERTISER
+            WHERE ADVERTISER_NAME ILIKE %s AND AGENCY_ID = %s
             LIMIT 1
         """, (name, agency_id))
         existing = cursor.fetchone()
@@ -1445,26 +1446,26 @@ def create_advertiser():
             }), 409
 
         # Get next ID
-        cursor.execute("SELECT COALESCE(MAX(ID), 0) + 1 FROM QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER")
+        cursor.execute("SELECT COALESCE(MAX(ADVERTISER_ID), 0) + 1 FROM QUORUMDB.BASE_TABLES.REF_AGENCY_ADVERTISER")
         new_id = cursor.fetchone()[0]
 
         # Get agency name
         cursor.execute("""
-            SELECT DISTINCT AGENCY_NAME FROM QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER
-            WHERE ADVERTISER_ID = %s AND AGENCY_NAME IS NOT NULL LIMIT 1
+            SELECT DISTINCT AGENCY_NAME FROM QUORUMDB.BASE_TABLES.REF_AGENCY_ADVERTISER
+            WHERE AGENCY_ID = %s AND AGENCY_NAME IS NOT NULL LIMIT 1
         """, (agency_id,))
         agency_name_row = cursor.fetchone()
         agency_name = agency_name_row[0] if agency_name_row else ''
 
         # Insert advertiser
         cursor.execute("""
-            INSERT INTO QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER
-                (ID, ADVERTISER_ID, COMP_NAME, AGENCY_NAME)
-            VALUES (%s, %s, %s, %s)
-        """, (new_id, agency_id, name, agency_name))
+            INSERT INTO QUORUMDB.BASE_TABLES.REF_AGENCY_ADVERTISER
+                (AGENCY_ID, ADVERTISER_ID, ADVERTISER_NAME, AGENCY_NAME, CREATED_AT, UPDATED_AT)
+            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP())
+        """, (agency_id, new_id, name, agency_name))
 
-        # Determine default WEB_VISIT_SOURCE based on agency
-        default_web_visit_source = 'PARAMOUNT_SITEVISITS' if agency_id == 1480 else 'QUORUM_ADV_WEB_VISITS'
+        # All agencies use base table architecture
+        default_web_visit_source = 'QUORUM_ADV_WEB_VISITS'
 
         # Create initial config
         cursor.execute("""
@@ -1531,7 +1532,7 @@ def impression_search():
                 CASE WHEN pcm.QUORUM_ADVERTISER_ID IS NOT NULL THEN 'MAPPED'
                      ELSE 'UNMAPPED' END as STATUS,
                 pcm.QUORUM_ADVERTISER_ID,
-                COALESCE(aa.COMP_NAME, '') as QUORUM_ADVERTISER_NAME
+                COALESCE(aa.ADVERTISER_NAME, '') as QUORUM_ADVERTISER_NAME
             FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 imp
             LEFT JOIN QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2 pcm
                 ON imp.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
@@ -1539,13 +1540,13 @@ def impression_search():
                 AND imp.PLATFORM_TYPE_ID = TRY_CAST(pcm.DSP_PLATFORM_TYPE AS INTEGER)
             LEFT JOIN QUORUMDB.BASE_TABLES.REF_DSP_PLATFORM dsp
                 ON imp.PLATFORM_TYPE_ID = dsp.PLATFORM_TYPE_ID
-            LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa
-                ON pcm.QUORUM_ADVERTISER_ID = aa.ID AND pcm.AGENCY_ID = aa.ADVERTISER_ID
+            LEFT JOIN QUORUMDB.BASE_TABLES.REF_AGENCY_ADVERTISER aa
+                ON pcm.QUORUM_ADVERTISER_ID = aa.ADVERTISER_ID AND pcm.AGENCY_ID = aa.AGENCY_ID
             WHERE imp.AGENCY_ID = %(agency_id)s
               AND imp.EVENT_DATE >= DATEADD(day, -%(days)s, CURRENT_DATE())
             GROUP BY imp.AGENCY_ID, imp.DSP_ADVERTISER_ID, imp.DSP_ADVERTISER_NAME,
                      imp.PLATFORM_TYPE_ID, dsp.PLATFORM_NAME,
-                     pcm.QUORUM_ADVERTISER_ID, aa.COMP_NAME
+                     pcm.QUORUM_ADVERTISER_ID, aa.ADVERTISER_NAME
             HAVING COUNT(*) >= %(min_impressions)s
             ORDER BY STATUS DESC, IMPRESSIONS DESC
             LIMIT 200
@@ -1727,14 +1728,37 @@ def remove_domain():
 # =============================================================================
 @config_bp.route('/agencies', methods=['GET'])
 def get_agencies():
-    """Return list of agencies for dropdown filters."""
+    """
+    Return list of agencies that have at least one active advertiser —
+    i.e. advertisers with linked POIs, web pixel URLs, campaign mappings,
+    or defined report types. Mirrors the optimizer's agency scope.
+    """
     try:
         conn = get_config_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT DISTINCT ADVERTISER_ID as AGENCY_ID, AGENCY_NAME
-            FROM QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER
-            WHERE AGENCY_NAME IS NOT NULL AND AGENCY_NAME != ''
+            SELECT
+                c.AGENCY_ID,
+                COALESCE(ag.AGENCY_NAME, '') as AGENCY_NAME,
+                COUNT(DISTINCT c.ADVERTISER_ID) as ADVERTISER_COUNT,
+                SUM(CASE WHEN c.SEGMENT_COUNT > 0 THEN 1 ELSE 0 END) as WITH_POI,
+                SUM(CASE WHEN c.WEB_PIXEL_URL_COUNT > 0 THEN 1 ELSE 0 END) as WITH_WEB_PIXEL,
+                SUM(CASE WHEN c.CAMPAIGN_MAPPING_COUNT > 0 THEN 1 ELSE 0 END) as WITH_CAMPAIGNS,
+                SUM(CASE WHEN c.REPORT_TYPE_IDS IS NOT NULL AND c.REPORT_TYPE_IDS != '' THEN 1 ELSE 0 END) as WITH_REPORT_TYPE
+            FROM QUORUMDB.BASE_TABLES.REF_ADVERTISER_CONFIG c
+            LEFT JOIN (
+                SELECT DISTINCT AGENCY_ID as AG_ID, AGENCY_NAME
+                FROM QUORUMDB.BASE_TABLES.REF_AGENCY_ADVERTISER
+                WHERE AGENCY_NAME IS NOT NULL AND AGENCY_NAME != ''
+            ) ag ON c.AGENCY_ID = ag.AG_ID
+            WHERE c.CONFIG_STATUS = 'ACTIVE'
+              AND (
+                  c.SEGMENT_COUNT > 0
+                  OR c.WEB_PIXEL_URL_COUNT > 0
+                  OR c.CAMPAIGN_MAPPING_COUNT > 0
+                  OR (c.REPORT_TYPE_IDS IS NOT NULL AND c.REPORT_TYPE_IDS != '')
+              )
+            GROUP BY c.AGENCY_ID, ag.AGENCY_NAME
             ORDER BY AGENCY_NAME
             LIMIT 100
         """)

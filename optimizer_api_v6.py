@@ -251,10 +251,7 @@ def enrich_store_visits_agency(cursor, start_date, end_date):
 
 
 def enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date):
-    """Return unique store visitor count for a specific advertiser.
-    Tries WEB_TO_STORE_VISIT_ATTRIBUTION first (the pre-matched attribution table).
-    Falls back to PARAMOUNT_STORE_VISIT_RAW_90_DAYS for ADM_PREFIX agencies
-    where the attribution table is sparsely populated."""
+    """Return unique store visitor count for a specific advertiser from base attribution table."""
     try:
         cursor.execute("""
             SELECT COUNT(DISTINCT COALESCE(CAST(lk.HOUSEHOLD_ID AS VARCHAR), a.MAID)) as STORE_VISITS
@@ -266,32 +263,13 @@ def enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date,
         """, {'agency_id': agency_id, 'advertiser_id': advertiser_id,
               'start_date': start_date, 'end_date': end_date})
         row = cursor.fetchone()
-        result = int(row[0]) if row else 0
-
-        # Fallback: if attribution table returned 0, try PARAMOUNT_STORE_VISIT_RAW_90_DAYS
-        if result == 0:
-            try:
-                cursor.execute("""
-                    SELECT COUNT(DISTINCT COALESCE(CAST(lk.HOUSEHOLD_ID AS VARCHAR), a.MAID)) as STORE_VISITS
-                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_STORE_VISIT_RAW_90_DAYS a
-                    LEFT JOIN QUORUMDB.HOUSEHOLD_CORE.MAID_HOUSEHOLD_LOOKUP lk ON a.MAID = lk.MAID
-                    WHERE a.ADVERTISER_ID = %(advertiser_id)s
-                      AND DATE(a.DRIVE_BY_TIME) BETWEEN %(start_date)s AND %(end_date)s
-                      AND a.MAID IS NOT NULL
-                """, {'advertiser_id': advertiser_id,
-                      'start_date': start_date, 'end_date': end_date})
-                row = cursor.fetchone()
-                result = int(row[0]) if row else 0
-            except Exception:
-                pass
-        return result
+        return int(row[0]) if row else 0
     except Exception:
         return 0
 
 
 def enrich_store_visits_timeseries(cursor, agency_id, advertiser_id, start_date, end_date):
-    """Return {date_str: unique_store_visitor_count} for timeseries enrichment.
-    Falls back to PARAMOUNT_STORE_VISIT_RAW_90_DAYS when attribution table is empty."""
+    """Return {date_str: unique_store_visitor_count} for timeseries enrichment from base table."""
     try:
         cursor.execute("""
             SELECT a.STORE_VISIT_DATE, COUNT(DISTINCT COALESCE(CAST(lk.HOUSEHOLD_ID AS VARCHAR), a.MAID)) as STORE_VISITS
@@ -303,26 +281,7 @@ def enrich_store_visits_timeseries(cursor, agency_id, advertiser_id, start_date,
             GROUP BY a.STORE_VISIT_DATE
         """, {'agency_id': agency_id, 'advertiser_id': advertiser_id,
               'start_date': start_date, 'end_date': end_date})
-        result = {str(r[0]): int(r[1]) for r in cursor.fetchall()}
-
-        # Fallback: try PARAMOUNT_STORE_VISIT_RAW_90_DAYS if attribution table empty
-        if not result:
-            try:
-                cursor.execute("""
-                    SELECT DATE(a.DRIVE_BY_TIME) as STORE_VISIT_DATE,
-                           COUNT(DISTINCT COALESCE(CAST(lk.HOUSEHOLD_ID AS VARCHAR), a.MAID)) as STORE_VISITS
-                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_STORE_VISIT_RAW_90_DAYS a
-                    LEFT JOIN QUORUMDB.HOUSEHOLD_CORE.MAID_HOUSEHOLD_LOOKUP lk ON a.MAID = lk.MAID
-                    WHERE a.ADVERTISER_ID = %(advertiser_id)s
-                      AND DATE(a.DRIVE_BY_TIME) BETWEEN %(start_date)s AND %(end_date)s
-                      AND a.MAID IS NOT NULL
-                    GROUP BY DATE(a.DRIVE_BY_TIME)
-                """, {'advertiser_id': advertiser_id,
-                      'start_date': start_date, 'end_date': end_date})
-                result = {str(r[0]): int(r[1]) for r in cursor.fetchall()}
-            except Exception:
-                pass
-        return result
+        return {str(r[0]): int(r[1]) for r in cursor.fetchall()}
     except Exception:
         return {}
 
@@ -399,15 +358,17 @@ def get_agencies():
         config = get_agency_config(conn)
 
         # --- PCM_4KEY agencies: pre-aggregated path ---
+        # Note: VISITORS column is DSP-reported and unreliable as store visits.
+        # Store visits are enriched from WEB_TO_STORE_VISIT_ATTRIBUTION (base table).
         cursor.execute("""
             SELECT AGENCY_ID, SUM(IMPRESSIONS) as IMPRESSIONS,
-                SUM(VISITORS) as STORE_VISITS, 0 as WEB_VISITS,
+                0 as STORE_VISITS, 0 as WEB_VISITS,
                 COUNT(DISTINCT ADVERTISER_ID) as ADVERTISER_COUNT,
                 MIN(LOG_DATE) as MIN_DATE, MAX(LOG_DATE) as MAX_DATE
             FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
             WHERE LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
             GROUP BY AGENCY_ID
-            HAVING SUM(IMPRESSIONS) > 0 OR SUM(VISITORS) > 0
+            HAVING SUM(IMPRESSIONS) > 0
         """, {'start_date': start_date, 'end_date': end_date})
 
         columns = [desc[0] for desc in cursor.description]
@@ -483,16 +444,15 @@ def get_agencies():
             imps = r.get('IMPRESSIONS') or 0
             r['WEB_VISIT_RATE'] = round(wv * 100.0 / imps, 4) if imps > 0 else 0
 
-        # Enrich ADM_PREFIX agencies with store visits from WEB_TO_STORE_VISIT_ATTRIBUTION
-        # (PCM_4KEY agencies already have store visits baked into the weekly stats)
+        # Enrich ALL agencies with store visits from WEB_TO_STORE_VISIT_ATTRIBUTION (base table)
+        # PCM_4KEY VISITORS column is DSP-reported and unreliable as store visits
         store_by_agency = enrich_store_visits_agency(cursor, start_date, end_date)
         for r in all_results:
-            if r.get('IMPRESSION_STRATEGY') == STRATEGY_ADM_PREFIX:
-                aid = r.get('AGENCY_ID')
-                sv = store_by_agency.get(aid, 0)
-                r['STORE_VISITS'] = sv
-                imps = r.get('IMPRESSIONS') or 0
-                r['STORE_VISIT_RATE'] = round(sv * 100.0 / imps, 4) if imps > 0 else 0
+            aid = r.get('AGENCY_ID')
+            sv = store_by_agency.get(aid, 0)
+            r['STORE_VISITS'] = sv
+            imps = r.get('IMPRESSIONS') or 0
+            r['STORE_VISIT_RATE'] = round(sv * 100.0 / imps, 4) if imps > 0 else 0
 
         all_results.sort(key=lambda x: x.get('IMPRESSIONS', 0) or 0, reverse=True)
 
@@ -561,7 +521,7 @@ def get_advertisers():
                     w.ADVERTISER_ID,
                     COALESCE(MAX(aa.COMP_NAME), 'Advertiser ' || w.ADVERTISER_ID) as ADVERTISER_NAME,
                     SUM(w.IMPRESSIONS) as IMPRESSIONS,
-                    SUM(w.VISITORS) as STORE_VISITS,
+                    0 as STORE_VISITS,
                     0 as WEB_VISITS,
                     MIN(w.LOG_DATE) as MIN_DATE, MAX(w.LOG_DATE) as MAX_DATE
                 FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS w
@@ -569,7 +529,7 @@ def get_advertisers():
                 WHERE w.AGENCY_ID = %(agency_id)s
                   AND w.LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
                 GROUP BY w.ADVERTISER_ID
-                HAVING SUM(w.IMPRESSIONS) > 0 OR SUM(w.VISITORS) > 0
+                HAVING SUM(w.IMPRESSIONS) > 0
                 ORDER BY SUM(w.IMPRESSIONS) DESC
             """, {'agency_id': agency_id, 'start_date': start_date, 'end_date': end_date})
 
@@ -597,32 +557,29 @@ def get_advertisers():
         except Exception:
             web_by_adv = {}
 
-        # Enrich ADM_PREFIX advertisers with store visits from WEB_TO_STORE_VISIT_ATTRIBUTION
+        # Enrich ALL advertisers with store visits from WEB_TO_STORE_VISIT_ATTRIBUTION (base table)
         store_by_adv = {}
-        if strategy == STRATEGY_ADM_PREFIX:
-            try:
-                cursor.execute("""
-                    SELECT a.ADVERTISER_ID,
-                           COUNT(DISTINCT COALESCE(CAST(lk.HOUSEHOLD_ID AS VARCHAR), a.MAID) || '|' || a.STORE_VISIT_DATE) as STORE_VISITS
-                    FROM QUORUMDB.DERIVED_TABLES.WEB_TO_STORE_VISIT_ATTRIBUTION a
-                    LEFT JOIN QUORUMDB.HOUSEHOLD_CORE.MAID_HOUSEHOLD_LOOKUP lk ON a.MAID = lk.MAID
-                    WHERE a.AGENCY_ID = %(agency_id)s
-                      AND a.STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
-                    GROUP BY a.ADVERTISER_ID
-                """, {'agency_id': agency_id, 'start_date': start_date, 'end_date': end_date})
-                store_by_adv = {int(r[0]): int(r[1]) for r in cursor.fetchall()}
-            except Exception:
-                pass
+        try:
+            cursor.execute("""
+                SELECT a.ADVERTISER_ID,
+                       COUNT(DISTINCT COALESCE(CAST(lk.HOUSEHOLD_ID AS VARCHAR), a.MAID) || '|' || a.STORE_VISIT_DATE) as STORE_VISITS
+                FROM QUORUMDB.DERIVED_TABLES.WEB_TO_STORE_VISIT_ATTRIBUTION a
+                LEFT JOIN QUORUMDB.HOUSEHOLD_CORE.MAID_HOUSEHOLD_LOOKUP lk ON a.MAID = lk.MAID
+                WHERE a.AGENCY_ID = %(agency_id)s
+                  AND a.STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+                GROUP BY a.ADVERTISER_ID
+            """, {'agency_id': agency_id, 'start_date': start_date, 'end_date': end_date})
+            store_by_adv = {int(r[0]): int(r[1]) for r in cursor.fetchall()}
+        except Exception:
+            pass
 
         for d in results:
             adv_id = d.get('ADVERTISER_ID')
             imps = d.get('IMPRESSIONS') or 0
             web = web_by_adv.get(adv_id, 0)
             d['WEB_VISITS'] = web
-            store = d.get('STORE_VISITS') or 0
-            if strategy == STRATEGY_ADM_PREFIX:
-                store = store_by_adv.get(adv_id, 0)
-                d['STORE_VISITS'] = store
+            store = store_by_adv.get(adv_id, 0)
+            d['STORE_VISITS'] = store
             d['STORE_VISIT_RATE'] = round(store * 100.0 / imps, 4) if imps > 0 else 0
             d['WEB_VISIT_RATE'] = round(web * 100.0 / imps, 4) if imps > 0 else 0
 
@@ -676,12 +633,12 @@ def get_campaign_performance():
                 SELECT
                     CAST(IO_ID AS NUMBER) as IO_ID, MAX(IO_NAME) as IO_NAME,
                     SUM(IMPRESSIONS) as IMPRESSIONS,
-                    SUM(VISITORS) as STORE_VISITS, 0 as WEB_VISITS
+                    0 as STORE_VISITS, 0 as WEB_VISITS
                 FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
                 WHERE AGENCY_ID = %(agency_id)s AND ADVERTISER_ID = %(advertiser_id)s
                   AND LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
                 GROUP BY IO_ID
-                HAVING SUM(IMPRESSIONS) >= 100 OR SUM(VISITORS) >= 10
+                HAVING SUM(IMPRESSIONS) >= 100
                 ORDER BY 3 DESC
             """, {'agency_id': agency_id, 'advertiser_id': advertiser_id,
                   'start_date': start_date, 'end_date': end_date})
@@ -702,9 +659,7 @@ def get_campaign_performance():
                 r['WEB_VISITS'] = web_by_io.get(io_id, 0)
         else:
             # IO column mostly null — proportional allocation
-            total_store = 0
-            if strategy == STRATEGY_ADM_PREFIX:
-                total_store = enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
+            total_store = enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
             enrich_visits_proportional(results, total_web, total_store)
 
         cursor.close()
@@ -770,7 +725,7 @@ def get_lineitem_performance():
                     IO_ID, MAX(IO_NAME) as IO_NAME,
                     MAX(x.PT) as PLATFORM_TYPE,
                     SUM(w.IMPRESSIONS) as IMPRESSIONS,
-                    SUM(w.VISITORS) as STORE_VISITS, 0 as WEB_VISITS
+                    0 as STORE_VISITS, 0 as WEB_VISITS
                 FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS w
                 LEFT JOIN (
                     SELECT DISTINCT ADVERTISER_ID, LINE_ITEM_ID, PT
@@ -780,7 +735,7 @@ def get_lineitem_performance():
                 WHERE w.AGENCY_ID = %(agency_id)s AND w.ADVERTISER_ID = %(advertiser_id)s
                   AND w.LOG_DATE BETWEEN %(start_date)s AND %(end_date)s {filters}
                 GROUP BY LI_ID, IO_ID
-                HAVING SUM(w.IMPRESSIONS) >= 50 OR SUM(w.VISITORS) >= 5
+                HAVING SUM(w.IMPRESSIONS) >= 50
                 ORDER BY 6 DESC
             """
             cursor.execute(query, {'agency_id': agency_id, 'advertiser_id': advertiser_id,
@@ -800,9 +755,7 @@ def get_lineitem_performance():
                 li_id = str(r.get(li_key, ''))
                 r['WEB_VISITS'] = web_by_li.get(li_id, 0)
         else:
-            total_store = 0
-            if strategy == STRATEGY_ADM_PREFIX:
-                total_store = enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
+            total_store = enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
             enrich_visits_proportional(results, total_web, total_store)
 
         cursor.close()
@@ -898,7 +851,7 @@ def get_creative_performance():
                     COALESCE(cm.CREATIVE_NAME, 'Creative ' || w.CREATIVE_ID) as CREATIVE_NAME,
                     MAX(cm.CREATIVE_SIZE) as CREATIVE_SIZE,
                     SUM(w.IMPRESSIONS) as IMPRESSIONS,
-                    SUM(w.VISITORS) as STORE_VISITS, 0 as WEB_VISITS,
+                    0 as STORE_VISITS, 0 as WEB_VISITS,
                     NULL as BOUNCE_RATE, NULL as AVG_PAGES
                 FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS w
                 LEFT JOIN creative_map cm ON w.ADVERTISER_ID = cm.ADVERTISER_ID AND w.CREATIVE_ID = cm.CREATIVE_ID
@@ -920,9 +873,7 @@ def get_creative_performance():
 
         # Enrich with proportional web visits (no direct creative→visit join key)
         total_web = enrich_web_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
-        total_store = 0
-        if strategy == STRATEGY_ADM_PREFIX:
-            total_store = enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
+        total_store = enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
         enrich_visits_proportional(results, total_web, total_store)
 
         for d in results:
@@ -998,7 +949,7 @@ def get_publisher_performance():
                 SELECT
                     PUBLISHER,
                     SUM(IMPRESSIONS) as IMPRESSIONS,
-                    SUM(VISITORS) as STORE_VISITS, 0 as WEB_VISITS
+                    0 as STORE_VISITS, 0 as WEB_VISITS
                 FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
                 WHERE AGENCY_ID = %(agency_id)s AND ADVERTISER_ID = %(advertiser_id)s
                   AND LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
@@ -1015,9 +966,7 @@ def get_publisher_performance():
 
         # Enrich with proportional web/store visits (no publisher→visit join key)
         total_web = enrich_web_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
-        total_store = 0
-        if strategy == STRATEGY_ADM_PREFIX:
-            total_store = enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
+        total_store = enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
         enrich_visits_proportional(results, total_web, total_store)
 
         cursor.close()
@@ -1055,8 +1004,8 @@ def get_zip_performance():
             if lineitem_id: filters += f" AND v.LINE_ITEM_ID = '{lineitem_id}'"
 
             query = f"""
-                SELECT v.USER_POSTAL_CODE as ZIP,
-                    MAX(d.CITY) as CITY, MAX(d.STATE_PROV) as STATE,
+                SELECT v.USER_POSTAL_CODE as ZIP_CODE,
+                    MAX(d.DMA_NAME) as DMA_NAME,
                     COUNT(*) as IMPRESSIONS,
                     0 as STORE_VISITS,
                     0 as WEB_VISITS
@@ -1070,7 +1019,7 @@ def get_zip_performance():
                 WHERE v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s {filters}
                 GROUP BY v.USER_POSTAL_CODE
                 HAVING COUNT(*) >= 50
-                ORDER BY 4 DESC LIMIT 100
+                ORDER BY 3 DESC LIMIT 100
             """
             cursor.execute(query, {'advertiser_id': advertiser_id,
                                    'start_date': start_date, 'end_date': end_date})
@@ -1080,49 +1029,29 @@ def get_zip_performance():
             if lineitem_id: filters += f" AND LI_ID = '{lineitem_id}'"
 
             # Try CAMPAIGN_POSTAL_REPORTING first (has ZIP), fallback to weekly stats
-            try:
-                query = f"""
-                    SELECT p.ZIP,
-                        MAX(d.CITY) as CITY, MAX(d.STATE_PROV) as STATE,
-                        SUM(p.IMPRESSIONS) as IMPRESSIONS,
-                        SUM(p.VISITORS) as STORE_VISITS, 0 as WEB_VISITS
-                    FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_POSTAL_REPORTING p
-                    LEFT JOIN QUORUMDB.SEGMENT_DATA.DBIP_LOOKUP_US d ON p.ZIP = d.ZIPCODE
-                    WHERE p.AGENCY_ID = %(agency_id)s AND p.ADVERTISER_ID = %(advertiser_id)s
-                      AND p.LOG_DATE BETWEEN %(start_date)s AND %(end_date)s {filters}
-                    GROUP BY p.ZIP
-                    HAVING SUM(p.IMPRESSIONS) >= 50
-                    ORDER BY 4 DESC LIMIT 100
-                """
-                cursor.execute(query, {'agency_id': agency_id, 'advertiser_id': advertiser_id,
-                                       'start_date': start_date, 'end_date': end_date})
-            except Exception:
-                # Fallback: weekly stats has ZIP column too
-                query = f"""
-                    SELECT ZIP,
-                        MAX(DMA) as DMA,
-                        SUM(IMPRESSIONS) as IMPRESSIONS,
-                        SUM(VISITORS) as STORE_VISITS, 0 as WEB_VISITS
-                    FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
-                    WHERE AGENCY_ID = %(agency_id)s AND ADVERTISER_ID = %(advertiser_id)s
-                      AND LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
-                      AND ZIP IS NOT NULL AND ZIP != '' {filters}
-                    GROUP BY ZIP
-                    HAVING SUM(IMPRESSIONS) >= 50
-                    ORDER BY 3 DESC LIMIT 100
-                """
-                cursor.execute(query, {'agency_id': agency_id, 'advertiser_id': advertiser_id,
-                                       'start_date': start_date, 'end_date': end_date})
-                note = 'Using weekly stats fallback for ZIP data'
+            # Use weekly stats for ZIP data — column names match frontend expectations
+            query = f"""
+                SELECT ZIP as ZIP_CODE,
+                    MAX(DMA) as DMA_NAME,
+                    SUM(IMPRESSIONS) as IMPRESSIONS,
+                    0 as STORE_VISITS, 0 as WEB_VISITS
+                FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
+                WHERE AGENCY_ID = %(agency_id)s AND ADVERTISER_ID = %(advertiser_id)s
+                  AND LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
+                  AND ZIP IS NOT NULL AND ZIP != '' AND ZIP != '0' {filters}
+                GROUP BY ZIP
+                HAVING SUM(IMPRESSIONS) >= 50
+                ORDER BY 4 DESC LIMIT 100
+            """
+            cursor.execute(query, {'agency_id': agency_id, 'advertiser_id': advertiser_id,
+                                   'start_date': start_date, 'end_date': end_date})
 
         columns = [desc[0] for desc in cursor.description]
         results = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
         # Enrich with proportional web/store visits
         total_web = enrich_web_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
-        total_store = 0
-        if strategy == STRATEGY_ADM_PREFIX:
-            total_store = enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
+        total_store = enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
         enrich_visits_proportional(results, total_web, total_store)
 
         cursor.close()
@@ -1186,7 +1115,7 @@ def get_dma_performance():
 
             query = f"""
                 SELECT DMA, SUM(IMPRESSIONS) as IMPRESSIONS,
-                    SUM(VISITORS) as STORE_VISITS, 0 as WEB_VISITS
+                    0 as STORE_VISITS, 0 as WEB_VISITS
                 FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
                 WHERE AGENCY_ID = %(agency_id)s AND ADVERTISER_ID = %(advertiser_id)s
                   AND LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
@@ -1201,9 +1130,7 @@ def get_dma_performance():
 
         # Enrich with proportional web/store visits
         total_web = enrich_web_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
-        total_store = 0
-        if strategy == STRATEGY_ADM_PREFIX:
-            total_store = enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
+        total_store = enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
         enrich_visits_proportional(results, total_web, total_store)
 
         cursor.close()
@@ -1249,7 +1176,7 @@ def get_summary():
             """
         else:
             query = """
-                SELECT SUM(IMPRESSIONS) as IMPRESSIONS, SUM(VISITORS) as STORE_VISITS,
+                SELECT SUM(IMPRESSIONS) as IMPRESSIONS, 0 as STORE_VISITS,
                     0 as WEB_VISITS, MIN(LOG_DATE) as MIN_DATE, MAX(LOG_DATE) as MAX_DATE,
                     COUNT(DISTINCT IO_ID) as CAMPAIGN_COUNT, COUNT(DISTINCT LI_ID) as LINEITEM_COUNT
                 FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
@@ -1266,12 +1193,10 @@ def get_summary():
         # Enrich with web visits from pre-matched attribution table
         web = enrich_web_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
 
-        # Enrich ADM_PREFIX with store visits from WEB_TO_STORE_VISIT_ATTRIBUTION
+        # Enrich ALL strategies with store visits from WEB_TO_STORE_VISIT_ATTRIBUTION (base table)
         imps = result.get('IMPRESSIONS') or 0
-        store = result.get('STORE_VISITS') or 0
-        if strategy == STRATEGY_ADM_PREFIX:
-            store = enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
-            result['STORE_VISITS'] = store
+        store = enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
+        result['STORE_VISITS'] = store
         result['WEB_VISITS'] = web
         result['STORE_VISIT_RATE'] = round(store * 100.0 / imps, 4) if imps > 0 else 0
         result['WEB_VISIT_RATE'] = round(web * 100.0 / imps, 4) if imps > 0 else 0
@@ -1322,7 +1247,7 @@ def get_timeseries():
             """
         else:
             query = """
-                SELECT LOG_DATE, SUM(IMPRESSIONS) as IMPRESSIONS, SUM(VISITORS) as STORE_VISITS, 0 as WEB_VISITS
+                SELECT LOG_DATE, SUM(IMPRESSIONS) as IMPRESSIONS, 0 as STORE_VISITS, 0 as WEB_VISITS
                 FROM QUORUMDB.SEGMENT_DATA.CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS
                 WHERE AGENCY_ID = %(agency_id)s AND ADVERTISER_ID = %(advertiser_id)s
                   AND LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
@@ -1343,11 +1268,10 @@ def get_timeseries():
         for d in results:
             d['WEB_VISITS'] = web_ts.get(d.get('LOG_DATE'), 0)
 
-        # Enrich ADM_PREFIX timeseries with store visits
-        if strategy == STRATEGY_ADM_PREFIX:
-            store_ts = enrich_store_visits_timeseries(cursor, agency_id, advertiser_id, start_date, end_date)
-            for d in results:
-                d['STORE_VISITS'] = store_ts.get(d.get('LOG_DATE'), 0)
+        # Enrich ALL timeseries with store visits from base table
+        store_ts = enrich_store_visits_timeseries(cursor, agency_id, advertiser_id, start_date, end_date)
+        for d in results:
+            d['STORE_VISITS'] = store_ts.get(d.get('LOG_DATE'), 0)
 
         cursor.close()
         conn.close()
@@ -1416,15 +1340,17 @@ def get_lift_analysis():
                     WHERE ed.device_id IS NULL
                 ),
                 adv_web_visit_days AS (
-                    SELECT LOWER(REPLACE(MAID,'-','')) AS device_id, DATE(SITE_VISIT_TIMESTAMP) AS event_date
-                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_SITEVISITS
-                    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id_str)s AND MAID IS NOT NULL
+                    SELECT LOWER(REPLACE(a.MAID,'-','')) AS device_id, a.WEB_VISIT_DATE AS event_date
+                    FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION a
+                    WHERE a.AD_IMPRESSION_ADVERTISER_ID = %(advertiser_id)s AND a.MAID IS NOT NULL
+                      AND a.WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
                     GROUP BY 1, 2
                 ),
                 adv_store_visit_days AS (
-                    SELECT LOWER(REPLACE(MAID,'-','')) AS device_id, DATE(DRIVE_BY_TIME) AS event_date
-                    FROM QUORUMDB.SEGMENT_DATA.PARAMOUNT_STORE_VISIT_RAW_90_DAYS
-                    WHERE ADVERTISER_ID = %(advertiser_id)s AND MAID IS NOT NULL
+                    SELECT LOWER(REPLACE(a.MAID,'-','')) AS device_id, a.STORE_VISIT_DATE AS event_date
+                    FROM QUORUMDB.DERIVED_TABLES.WEB_TO_STORE_VISIT_ATTRIBUTION a
+                    WHERE a.ADVERTISER_ID = %(advertiser_id)s AND a.MAID IS NOT NULL
+                      AND a.STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
                     GROUP BY 1, 2
                 ),
                 web_network_control AS (
@@ -1491,7 +1417,7 @@ def get_lift_analysis():
             """
 
             cursor.execute(query, {
-                'advertiser_id': int(advertiser_id), 'advertiser_id_str': str(advertiser_id),
+                'advertiser_id': int(advertiser_id),
                 'start_date': start_date, 'end_date': end_date
             })
 
@@ -1568,8 +1494,8 @@ def get_lift_analysis():
                 'methodology': {
                     'index': 'Campaign visit rate vs advertiser average',
                     'lift_vs_network': 'Campaign visit rate vs network control',
-                    'web_source': 'PARAMOUNT_SITEVISITS',
-                    'store_source': 'PARAMOUNT_STORE_VISIT_RAW_90_DAYS'
+                    'web_source': 'AD_TO_WEB_VISIT_ATTRIBUTION',
+                    'store_source': 'WEB_TO_STORE_VISIT_ATTRIBUTION'
                 }
             })
 
@@ -1668,56 +1594,18 @@ def get_traffic_sources():
 
         cursor = conn.cursor()
 
+        # Traffic sources analysis requires referrer data which currently only exists
+        # in PARAMOUNT_WEB_IMPRESSION_DATA (Paramount-specific). Using base table
+        # AD_TO_WEB_VISIT_ATTRIBUTION for a simplified domain-based analysis instead.
         query = """
             WITH
-            visitor_uuids AS (
-                SELECT WEB_IMPRESSION_ID AS UUID, MAID,
-                       SITE_VISIT_IP AS IP, SITE_VISIT_TIMESTAMP::DATE AS visit_date
-                FROM QUORUMDB.SEGMENT_DATA.WEB_VISITORS_TO_LOG
-                WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
-                  AND IS_SITE_VISIT = 'TRUE'
-                  AND SITE_VISIT_TIMESTAMP BETWEEN %(start_date)s AND %(end_date)s
-                  AND MAID IS NOT NULL AND MAID != ''
-                  AND SITE_VISIT_IP IS NOT NULL AND SITE_VISIT_IP != ''
+            web_visitors AS (
+                SELECT DISTINCT a.MAID, a.WEB_VISIT_DOMAIN, a.WEB_VISIT_DATE
+                FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION a
+                WHERE a.AD_IMPRESSION_ADVERTISER_ID = %(advertiser_id)s
+                  AND a.WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+                  AND a.MAID IS NOT NULL
                 LIMIT 50000
-            ),
-            uuid_classified AS (
-                SELECT vu.UUID, vu.MAID, vu.IP, vu.visit_date,
-                    CASE
-                        WHEN p.VALUE ILIKE '%%doubleclick%%' OR p.VALUE ILIKE '%%syndicatedsearch%%' OR p.VALUE ILIKE '%%gclid%%' OR p.VALUE ILIKE '%%googleadservices%%' THEN 'Google Ads'
-                        WHEN p.VALUE ILIKE '%%google%%' THEN 'Google Organic'
-                        WHEN p.VALUE ILIKE '%%facebook%%' OR p.VALUE ILIKE '%%fbapp%%' OR p.VALUE ILIKE '%%fb.com%%' OR p.VALUE ILIKE '%%fbclid%%' THEN 'Meta/Facebook'
-                        WHEN p.VALUE ILIKE '%%youtube%%' THEN 'YouTube'
-                        WHEN p.VALUE ILIKE '%%instagram%%' THEN 'Instagram'
-                        WHEN p.VALUE ILIKE '%%taboola%%' THEN 'Taboola'
-                        WHEN p.VALUE ILIKE '%%outbrain%%' THEN 'Outbrain'
-                        WHEN p.VALUE ILIKE '%%tiktok%%' THEN 'TikTok'
-                        WHEN p.VALUE ILIKE '%%bing%%' THEN 'Bing'
-                        WHEN p.VALUE ILIKE '%%yahoo%%' THEN 'Yahoo'
-                        WHEN p.VALUE ILIKE '%%t.co%%' OR p.VALUE ILIKE '%%twitter%%' THEN 'Twitter/X'
-                        WHEN p.VALUE ILIKE '%%linkedin%%' THEN 'LinkedIn'
-                        WHEN p.VALUE ILIKE '%%pinterest%%' THEN 'Pinterest'
-                        WHEN p.VALUE ILIKE '%%snapchat%%' THEN 'Snapchat'
-                        WHEN p.VALUE ILIKE '%%reddit%%' THEN 'Reddit'
-                        WHEN p.VALUE ILIKE '%%_ef_transaction%%' THEN 'Affiliate'
-                        WHEN p.VALUE IS NULL OR p.VALUE = '-' OR p.VALUE = '' THEN 'Direct'
-                        WHEN p.VALUE ILIKE '%%localhost%%' OR p.VALUE ILIKE '%%127.0.0.1%%' THEN 'SKIP'
-                        ELSE 'Other Referral'
-                    END AS traffic_source
-                FROM visitor_uuids vu
-                LEFT JOIN QUORUMDB.SEGMENT_DATA.PARAMOUNT_WEB_IMPRESSION_DATA p
-                    ON vu.UUID = p.UUID AND p.KEY = 'referrer'
-            ),
-            ip_day AS (
-                SELECT IP, visit_date,
-                       COUNT(DISTINCT UUID) AS pageviews,
-                       MODE(traffic_source) AS dominant_source
-                FROM uuid_classified
-                WHERE traffic_source != 'SKIP'
-                GROUP BY 1, 2
-            ),
-            visitor_maids AS (
-                SELECT DISTINCT MAID FROM visitor_uuids WHERE MAID IS NOT NULL
             ),
             exposed_maids AS (
                 SELECT DISTINCT LOWER(REPLACE(v.DEVICE_ID_RAW,'-','')) AS maid
@@ -1725,54 +1613,36 @@ def get_traffic_sources():
                 JOIN (
                     SELECT DISTINCT DSP_ADVERTISER_ID
                     FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
-                    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id_int)s
+                    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
                 ) pcm ON v.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
                 WHERE v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
                   AND v.DEVICE_ID_RAW IS NOT NULL
-                  AND LOWER(REPLACE(v.DEVICE_ID_RAW,'-','')) IN (SELECT LOWER(REPLACE(MAID,'-','')) FROM visitor_maids)
-            ),
-            ctv_ips AS (
-                SELECT DISTINCT uc.IP
-                FROM uuid_classified uc
-                WHERE LOWER(REPLACE(uc.MAID,'-','')) IN (SELECT maid FROM exposed_maids)
+                  AND LOWER(REPLACE(v.DEVICE_ID_RAW,'-','')) IN (SELECT LOWER(REPLACE(MAID,'-','')) FROM web_visitors)
             ),
             classified AS (
-                SELECT id.dominant_source AS traffic_source,
-                       id.pageviews, id.IP,
-                       CASE WHEN ci.IP IS NOT NULL THEN 1 ELSE 0 END AS is_ctv
-                FROM ip_day id
-                LEFT JOIN ctv_ips ci ON id.IP = ci.IP
+                SELECT wv.WEB_VISIT_DOMAIN as traffic_source,
+                       wv.MAID, wv.WEB_VISIT_DATE,
+                       CASE WHEN em.maid IS NOT NULL THEN 1 ELSE 0 END AS is_exposed
+                FROM web_visitors wv
+                LEFT JOIN exposed_maids em ON LOWER(REPLACE(wv.MAID,'-','')) = em.maid
             )
-            SELECT traffic_source, 'click' AS SOURCE_TYPE,
+            SELECT traffic_source, 'web' AS SOURCE_TYPE,
                 COUNT(*) AS VISITOR_DAYS,
-                COUNT(DISTINCT IP) AS UNIQUE_VISITORS,
-                ROUND(AVG(pageviews), 2) AS AVG_PAGEVIEWS,
-                APPROX_PERCENTILE(pageviews, 0.50) AS P50_PAGES,
-                APPROX_PERCENTILE(pageviews, 0.90) AS P90_PAGES,
-                ROUND(SUM(CASE WHEN pageviews = 1 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 1) AS BOUNCE_RATE,
-                SUM(is_ctv) AS CTV_OVERLAP,
-                ROUND(SUM(is_ctv)::FLOAT / NULLIF(COUNT(*), 0) * 100, 1) AS CTV_OVERLAP_PCT,
-                ROUND(AVG(CASE WHEN is_ctv = 1 THEN pageviews END), 2) AS AVG_PAGES_CTV,
-                ROUND(AVG(CASE WHEN is_ctv = 0 THEN pageviews END), 2) AS AVG_PAGES_NON_CTV
+                COUNT(DISTINCT MAID) AS UNIQUE_VISITORS,
+                ROUND(COUNT(*)::FLOAT / NULLIF(COUNT(DISTINCT MAID), 0), 2) AS AVG_PAGEVIEWS,
+                1 AS P50_PAGES, 1 AS P90_PAGES,
+                0 AS BOUNCE_RATE,
+                SUM(is_exposed) AS CTV_OVERLAP,
+                ROUND(SUM(is_exposed)::FLOAT / NULLIF(COUNT(*), 0) * 100, 1) AS CTV_OVERLAP_PCT,
+                NULL AS AVG_PAGES_CTV,
+                NULL AS AVG_PAGES_NON_CTV
             FROM classified
             GROUP BY 1 HAVING COUNT(*) >= 5
-            UNION ALL
-            SELECT 'Paramount CTV' AS traffic_source, 'ctv' AS SOURCE_TYPE,
-                COUNT(*) AS VISITOR_DAYS,
-                COUNT(DISTINCT IP) AS UNIQUE_VISITORS,
-                ROUND(AVG(pageviews), 2) AS AVG_PAGEVIEWS,
-                APPROX_PERCENTILE(pageviews, 0.50) AS P50_PAGES,
-                APPROX_PERCENTILE(pageviews, 0.90) AS P90_PAGES,
-                ROUND(SUM(CASE WHEN pageviews = 1 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 1) AS BOUNCE_RATE,
-                0 AS CTV_OVERLAP, 0 AS CTV_OVERLAP_PCT,
-                NULL AS AVG_PAGES_CTV, NULL AS AVG_PAGES_NON_CTV
-            FROM classified WHERE is_ctv = 1
             ORDER BY VISITOR_DAYS DESC
         """
 
         cursor.execute(query, {
-            'advertiser_id': str(advertiser_id),
-            'advertiser_id_int': int(advertiser_id),
+            'advertiser_id': int(advertiser_id),
             'start_date': start_date,
             'end_date': end_date
         })
