@@ -287,6 +287,66 @@ def enrich_store_visits_timeseries(cursor, agency_id, advertiser_id, start_date,
 
 
 # =============================================================================
+# DIMENSION-LEVEL ENRICHMENT (for detail table endpoints)
+# Groups web/store visits by campaign, lineitem, etc. and merges into results.
+# =============================================================================
+
+def enrich_web_visits_by_campaign(cursor, agency_id, advertiser_id, start_date, end_date):
+    """Return {insertion_order_id: web_visit_count} for campaign-level enrichment."""
+    try:
+        cursor.execute("""
+            SELECT a.INSERTION_ORDER_ID,
+                   COUNT(DISTINCT COALESCE(CAST(lk.HOUSEHOLD_ID AS VARCHAR), a.MAID) || '|' || a.WEB_VISIT_DATE) as WEB_VISITS
+            FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION a
+            LEFT JOIN QUORUMDB.HOUSEHOLD_CORE.MAID_HOUSEHOLD_LOOKUP lk ON a.MAID = lk.MAID
+            WHERE a.AD_IMPRESSION_AGENCY_ID = %(agency_id)s
+              AND a.AD_IMPRESSION_ADVERTISER_ID = %(advertiser_id)s
+              AND a.WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+              AND a.INSERTION_ORDER_ID IS NOT NULL
+            GROUP BY a.INSERTION_ORDER_ID
+        """, {'agency_id': agency_id, 'advertiser_id': advertiser_id,
+              'start_date': start_date, 'end_date': end_date})
+        return {str(r[0]): int(r[1]) for r in cursor.fetchall()}
+    except Exception:
+        return {}
+
+
+def enrich_web_visits_by_lineitem(cursor, agency_id, advertiser_id, start_date, end_date):
+    """Return {line_item_id: web_visit_count} for lineitem-level enrichment."""
+    try:
+        cursor.execute("""
+            SELECT a.LINE_ITEM_ID,
+                   COUNT(DISTINCT COALESCE(CAST(lk.HOUSEHOLD_ID AS VARCHAR), a.MAID) || '|' || a.WEB_VISIT_DATE) as WEB_VISITS
+            FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION a
+            LEFT JOIN QUORUMDB.HOUSEHOLD_CORE.MAID_HOUSEHOLD_LOOKUP lk ON a.MAID = lk.MAID
+            WHERE a.AD_IMPRESSION_AGENCY_ID = %(agency_id)s
+              AND a.AD_IMPRESSION_ADVERTISER_ID = %(advertiser_id)s
+              AND a.WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+              AND a.LINE_ITEM_ID IS NOT NULL
+            GROUP BY a.LINE_ITEM_ID
+        """, {'agency_id': agency_id, 'advertiser_id': advertiser_id,
+              'start_date': start_date, 'end_date': end_date})
+        return {str(r[0]): int(r[1]) for r in cursor.fetchall()}
+    except Exception:
+        return {}
+
+
+def enrich_visits_proportional(results, total_web_visits, total_store_visits=0):
+    """Distribute total web/store visits proportionally by impression share.
+    Used for dimensions (publisher, creative, zip, dma) where attribution
+    table doesn't have a direct join key."""
+    total_imps = sum(r.get('IMPRESSIONS', 0) for r in results)
+    if total_imps == 0:
+        return results
+    for r in results:
+        share = r.get('IMPRESSIONS', 0) / total_imps
+        r['WEB_VISITS'] = round(total_web_visits * share)
+        if total_store_visits > 0:
+            r['STORE_VISITS'] = round(total_store_visits * share)
+    return results
+
+
+# =============================================================================
 # AGENCY OVERVIEW
 # =============================================================================
 @app.route('/api/v6/agencies', methods=['GET'])
@@ -587,6 +647,14 @@ def get_campaign_performance():
 
         columns = [desc[0] for desc in cursor.description]
         results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        # Enrich with web visits grouped by campaign (IO)
+        web_by_io = enrich_web_visits_by_campaign(cursor, agency_id, advertiser_id, start_date, end_date)
+        io_key = 'INSERTION_ORDER_ID' if strategy == STRATEGY_ADM_PREFIX else 'IO_ID'
+        for r in results:
+            io_id = str(r.get(io_key, ''))
+            r['WEB_VISITS'] = web_by_io.get(io_id, 0)
+
         cursor.close()
         conn.close()
         return jsonify({'success': True, 'data': results, 'strategy': strategy})
@@ -668,6 +736,14 @@ def get_lineitem_performance():
 
         columns = [desc[0] for desc in cursor.description]
         results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        # Enrich with web visits grouped by lineitem
+        web_by_li = enrich_web_visits_by_lineitem(cursor, agency_id, advertiser_id, start_date, end_date)
+        li_key = 'LINE_ITEM_ID' if strategy == STRATEGY_ADM_PREFIX else 'LINEITEM_ID'
+        for r in results:
+            li_id = str(r.get(li_key, ''))
+            r['WEB_VISITS'] = web_by_li.get(li_id, 0)
+
         cursor.close()
         conn.close()
         return jsonify({'success': True, 'data': results, 'strategy': strategy})
@@ -779,12 +855,21 @@ def get_creative_performance():
         note = None
         for row in cursor.fetchall():
             d = dict(zip(columns, row))
+            results.append(d)
+
+        # Enrich with proportional web visits (no direct creative→visit join key)
+        total_web = enrich_web_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
+        total_store = 0
+        if strategy == STRATEGY_ADM_PREFIX:
+            total_store = enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
+        enrich_visits_proportional(results, total_web, total_store)
+
+        for d in results:
             imps = d.get('IMPRESSIONS') or 0
             store = d.get('STORE_VISITS') or 0
             web = d.get('WEB_VISITS') or 0
             d['STORE_VISIT_RATE'] = round(store * 100.0 / imps, 4) if imps > 0 else 0
             d['WEB_VISIT_RATE'] = round(web * 100.0 / imps, 4) if imps > 0 else 0
-            results.append(d)
 
         if strategy != STRATEGY_ADM_PREFIX:
             note = 'Bounce rate and avg pages not available for pre-aggregated agencies'
@@ -866,6 +951,14 @@ def get_publisher_performance():
 
         columns = [desc[0] for desc in cursor.description]
         results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        # Enrich with proportional web/store visits (no publisher→visit join key)
+        total_web = enrich_web_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
+        total_store = 0
+        if strategy == STRATEGY_ADM_PREFIX:
+            total_store = enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
+        enrich_visits_proportional(results, total_web, total_store)
+
         cursor.close()
         conn.close()
         return jsonify({'success': True, 'data': results, 'strategy': strategy})
@@ -963,6 +1056,14 @@ def get_zip_performance():
 
         columns = [desc[0] for desc in cursor.description]
         results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        # Enrich with proportional web/store visits
+        total_web = enrich_web_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
+        total_store = 0
+        if strategy == STRATEGY_ADM_PREFIX:
+            total_store = enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
+        enrich_visits_proportional(results, total_web, total_store)
+
         cursor.close()
         conn.close()
         return jsonify({'success': True, 'data': results, 'strategy': strategy, 'note': note})
@@ -1036,6 +1137,14 @@ def get_dma_performance():
 
         columns = [desc[0] for desc in cursor.description]
         results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        # Enrich with proportional web/store visits
+        total_web = enrich_web_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
+        total_store = 0
+        if strategy == STRATEGY_ADM_PREFIX:
+            total_store = enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
+        enrich_visits_proportional(results, total_web, total_store)
+
         cursor.close()
         conn.close()
         return jsonify({'success': True, 'data': results, 'strategy': strategy})
