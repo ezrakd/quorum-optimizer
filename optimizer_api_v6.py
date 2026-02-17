@@ -44,7 +44,7 @@ def _get_agency_id():
     Agency-role users are locked to their assigned agency_id regardless of
     what they pass in the query string. Admin users can query any agency.
     """
-    requested = _get_agency_id()
+    requested = request.args.get('agency_id')
     user = getattr(g, 'user', None)
     if user and user.get('role') != 'admin' and user.get('agency_id'):
         return str(user['agency_id'])

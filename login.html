@@ -3,203 +3,401 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Quorum — Sign In</title>
+    <title>Quorum — Aquarius</title>
     <link rel="icon" type="image/png" href="/quorum-favicon.png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+        *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { height: 100%; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #0f1419;
-            color: #e7e9ea;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            min-height: 100vh;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #06070a; color: #e7e9ea;
+            display: flex; align-items: center; justify-content: center;
+            overflow: hidden;
         }
-        .login-container {
-            text-align: center;
+        ::selection { background: rgba(108,223,229,0.25); }
+
+        /* Full-page canvas */
+        #cosmograph { position: fixed; inset: 0; z-index: 0; }
+
+        /* Content layer */
+        .login-wrapper {
+            position: relative; z-index: 1;
+            display: flex; flex-direction: column; align-items: center;
+            text-align: center; width: 100%; max-width: 520px; padding: 20px;
+        }
+
+        /* Logo */
+        .logo { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+        .logo svg { height: 36px; width: 36px; }
+        .logo-text { font-size: 16px; font-weight: 300; letter-spacing: 7px; color: #e7e9ea; text-transform: uppercase; }
+
+        .tagline {
+            font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
+            color: #6cdfe5; margin-bottom: 48px; opacity: 0.7;
+        }
+
+        /* DUAL ACTION — Login | Get Started */
+        .auth-panel {
             width: 100%;
-            max-width: 440px;
-            padding: 20px;
+            background: rgba(6,7,10,0.7);
+            backdrop-filter: blur(40px); -webkit-backdrop-filter: blur(40px);
+            border: 1px solid rgba(255,255,255,0.05);
+            border-radius: 20px;
+            overflow: hidden;
         }
-        .logo-area {
-            margin-bottom: 32px;
+
+        /* Tab bar */
+        .auth-tabs {
+            display: grid; grid-template-columns: 1fr 1fr;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
         }
-        .logo-area h1 {
-            font-size: 28px;
-            font-weight: 700;
-            color: #e7e9ea;
-            margin-bottom: 8px;
+        .auth-tab {
+            padding: 16px; font-size: 13px; font-weight: 600; letter-spacing: 0.02em;
+            color: rgba(255,255,255,0.35); background: transparent;
+            border: none; cursor: pointer; transition: color 0.2s, background 0.2s;
+            font-family: inherit;
         }
-        .logo-area .subtitle {
-            font-size: 14px;
-            color: #8b98a5;
+        .auth-tab:hover { color: rgba(255,255,255,0.55); }
+        .auth-tab.active {
+            color: #f0f2f4;
+            background: rgba(255,255,255,0.03);
+            box-shadow: inset 0 -2px 0 #6cdfe5;
         }
-        #clerk-sign-in {
-            display: flex;
-            justify-content: center;
+
+        /* Auth content area */
+        .auth-body { padding: 36px 32px 32px; min-height: 280px; }
+        @media (max-width: 480px) { .auth-body { padding: 28px 20px 24px; } }
+
+        /* Clerk mount area */
+        #clerk-sign-in, #clerk-sign-up {
+            display: flex; justify-content: center;
         }
-        .loading-auth {
-            color: #8b98a5;
-            font-size: 14px;
-            padding: 40px;
-        }
+        .auth-pane { display: none; }
+        .auth-pane.active { display: block; }
+
+        /* Loading */
+        .loading-auth { color: #8b98a5; font-size: 13px; padding: 40px 0; }
         .spinner {
-            width: 24px;
-            height: 24px;
-            border: 3px solid #2f3942;
-            border-top-color: #1d9bf0;
+            width: 22px; height: 22px;
+            border: 2px solid rgba(108,223,229,0.15);
+            border-top-color: #6cdfe5;
             border-radius: 50%;
-            animation: spin 1s linear infinite;
-            margin: 0 auto 12px;
+            animation: spin 0.8s linear infinite;
+            margin: 0 auto 10px;
         }
         @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Error */
         .error-msg {
-            background: #3d1f1f;
-            border: 1px solid #f4212e;
-            border-radius: 8px;
-            padding: 16px;
-            color: #f4212e;
-            margin-top: 20px;
-            font-size: 14px;
-            display: none;
+            background: rgba(244,33,46,0.08); border: 1px solid rgba(244,33,46,0.2);
+            border-radius: 10px; padding: 14px 16px; color: #f4212e;
+            margin-top: 16px; font-size: 13px; display: none;
         }
-        /* Improve Clerk social button readability */
-        #clerk-sign-in .cl-socialButtonsBlockButton {
-            background: #ffffff !important;
-            color: #1f1f1f !important;
-            border: 1px solid #dadce0 !important;
-            font-weight: 500 !important;
+
+        /* Footer */
+        .login-footer {
+            margin-top: 32px; font-size: 11px; color: rgba(255,255,255,0.15);
         }
-        #clerk-sign-in .cl-socialButtonsBlockButton:hover {
+        .login-footer a { color: rgba(255,255,255,0.25); transition: color 0.2s; }
+        .login-footer a:hover { color: #6cdfe5; text-decoration: none; }
+
+        /* Clerk component overrides */
+        #clerk-sign-in .cl-socialButtonsBlockButton,
+        #clerk-sign-up .cl-socialButtonsBlockButton {
+            background: #ffffff !important; color: #1f1f1f !important;
+            border: 1px solid #dadce0 !important; font-weight: 500 !important;
+        }
+        #clerk-sign-in .cl-socialButtonsBlockButton:hover,
+        #clerk-sign-up .cl-socialButtonsBlockButton:hover {
             background: #f7f8f8 !important;
         }
-        #clerk-sign-in .cl-socialButtonsBlockButtonText {
+        #clerk-sign-in .cl-socialButtonsBlockButtonText,
+        #clerk-sign-up .cl-socialButtonsBlockButtonText {
             color: #1f1f1f !important;
         }
-        #clerk-sign-in .cl-dividerLine {
-            background: #3d5466 !important;
+        #clerk-sign-in .cl-dividerLine,
+        #clerk-sign-up .cl-dividerLine {
+            background: rgba(255,255,255,0.08) !important;
         }
-        #clerk-sign-in .cl-dividerText {
-            color: #8b98a5 !important;
+        #clerk-sign-in .cl-dividerText,
+        #clerk-sign-up .cl-dividerText {
+            color: #536471 !important;
         }
     </style>
 </head>
 <body>
-    <div class="login-container">
-        <div class="logo-area">
-            <img src="/quorum-logo.png" alt="Quorum" style="max-width:200px;margin-bottom:16px;">
-            <div class="subtitle">Location Intelligence Platform</div>
-        </div>
 
-        <div id="clerk-sign-in">
-            <div class="loading-auth">
-                <div class="spinner"></div>
-                Loading...
+    <!-- FULL-BLEED CANVAS BACKGROUND -->
+    <canvas id="cosmograph"></canvas>
+
+    <div class="login-wrapper">
+        <!-- Logo -->
+        <div class="logo">
+            <svg viewBox="0 0 240 240" height="36" width="36">
+                <polygon points="120,120 108,68 120,18" fill="#45C6CC" opacity="0.88"/>
+                <polygon points="120,120 132,68 120,18" fill="#7AEAED" opacity="0.88"/>
+                <polygon points="120,120 148,82 180,40" fill="#35B0BA" opacity="0.85"/>
+                <polygon points="120,120 158,92 180,40" fill="#6CDFE5" opacity="0.85"/>
+                <polygon points="120,120 172,108 222,120" fill="#2A9BA5" opacity="0.88"/>
+                <polygon points="120,120 172,132 222,120" fill="#5DD4DB" opacity="0.88"/>
+                <polygon points="120,120 158,148 180,200" fill="#1D8A94" opacity="0.85"/>
+                <polygon points="120,120 148,158 180,200" fill="#45C6CC" opacity="0.85"/>
+                <polygon points="120,120 132,172 120,222" fill="#1A7E88" opacity="0.88"/>
+                <polygon points="120,120 108,172 120,222" fill="#3BBCC4" opacity="0.88"/>
+                <polygon points="120,120 82,158 60,200" fill="#35B0BA" opacity="0.85"/>
+                <polygon points="120,120 92,148 60,200" fill="#1D8A94" opacity="0.85"/>
+                <polygon points="120,120 68,132 18,120" fill="#45C6CC" opacity="0.88"/>
+                <polygon points="120,120 68,108 18,120" fill="#1A7E88" opacity="0.88"/>
+                <polygon points="120,120 82,92 60,40" fill="#6CDFE5" opacity="0.85"/>
+                <polygon points="120,120 92,82 60,40" fill="#2A9BA5" opacity="0.85"/>
+                <circle cx="120" cy="120" r="5" fill="#A8F4F7" opacity="0.35"/>
+            </svg>
+            <span class="logo-text">Quorum</span>
+        </div>
+        <div class="tagline">Aquarius</div>
+
+        <!-- Auth panel -->
+        <div class="auth-panel">
+            <div class="auth-tabs">
+                <button class="auth-tab active" id="tabLogin" onclick="switchTab('login')">Log In</button>
+                <button class="auth-tab" id="tabSignup" onclick="switchTab('signup')">Get Started</button>
+            </div>
+            <div class="auth-body">
+                <div class="auth-pane active" id="paneLogin">
+                    <div id="clerk-sign-in">
+                        <div class="loading-auth"><div class="spinner"></div>Loading...</div>
+                    </div>
+                </div>
+                <div class="auth-pane" id="paneSignup">
+                    <div id="clerk-sign-up">
+                        <div class="loading-auth"><div class="spinner"></div>Loading...</div>
+                    </div>
+                </div>
             </div>
         </div>
 
         <div id="auth-error" class="error-msg"></div>
+
+        <div class="login-footer">
+            <a href="https://quorum.inc">quorum.inc</a> &nbsp;·&nbsp;
+            <a href="https://quorum.inc/docs">Documentation</a> &nbsp;·&nbsp;
+            <a href="https://quorum.inc/#contact">Support</a>
+        </div>
     </div>
 
     <script>
-        // Derive Clerk Frontend API URL from publishable key
-        function getFapiUrl(pk) {
-            const encoded = pk.replace('pk_test_', '').replace('pk_live_', '');
-            try {
-                const decoded = atob(encoded);
-                return decoded.replace(/\$$/, '');
-            } catch (e) {
-                return null;
-            }
+        // ====================================================================
+        // TAB SWITCHING
+        // ====================================================================
+        function switchTab(tab) {
+            document.getElementById('tabLogin').classList.toggle('active', tab === 'login');
+            document.getElementById('tabSignup').classList.toggle('active', tab === 'signup');
+            document.getElementById('paneLogin').classList.toggle('active', tab === 'login');
+            document.getElementById('paneSignup').classList.toggle('active', tab === 'signup');
         }
 
-        // Clerk publishable key injected by the server
+        // Check URL param for mode
+        const params = new URLSearchParams(window.location.search);
+        if (params.get('mode') === 'signup') switchTab('signup');
+
+        // ====================================================================
+        // CLERK AUTH
+        // ====================================================================
+        function getFapiUrl(pk) {
+            const encoded = pk.replace('pk_test_', '').replace('pk_live_', '');
+            try { return atob(encoded).replace(/\$$/, ''); }
+            catch (e) { return null; }
+        }
+
         const CLERK_PK = document.querySelector('meta[name="clerk-pk"]')?.content
                          || window.__CLERK_PK__
                          || '';
 
+        const clerkAppearance = {
+            variables: {
+                colorPrimary: '#6cdfe5',
+                colorBackground: 'rgba(6,7,10,0.01)',
+                colorText: '#e7e9ea',
+                colorTextSecondary: '#8b98a5',
+                colorInputBackground: 'rgba(255,255,255,0.04)',
+                colorInputText: '#e7e9ea',
+                colorNeutral: '#e7e9ea',
+                colorTextOnPrimaryBackground: '#06070a',
+                borderRadius: '10px',
+            },
+            elements: {
+                socialButtonsBlockButton: {
+                    backgroundColor: '#ffffff', color: '#1f1f1f',
+                    border: '1px solid #dadce0', fontWeight: '500',
+                },
+                socialButtonsBlockButtonText: { color: '#1f1f1f' },
+                card: { backgroundColor: 'transparent', border: 'none', boxShadow: 'none' },
+                footerActionLink: { color: '#6cdfe5' },
+                formFieldInput: {
+                    backgroundColor: 'rgba(255,255,255,0.04)',
+                    borderColor: 'rgba(255,255,255,0.08)',
+                },
+            }
+        };
+
         if (!CLERK_PK) {
             document.getElementById('clerk-sign-in').innerHTML =
-                '<p style="color:#8b98a5">Authentication is not configured. Contact your administrator.</p>';
+                '<p style="color:#8b98a5;padding:20px;">Authentication is not configured. Contact your administrator.</p>';
+            document.getElementById('clerk-sign-up').innerHTML =
+                '<p style="color:#8b98a5;padding:20px;">Authentication is not configured. Contact your administrator.</p>';
         } else {
             const fapiUrl = getFapiUrl(CLERK_PK);
             if (!fapiUrl) {
                 document.getElementById('clerk-sign-in').innerHTML =
-                    '<p style="color:#f4212e">Invalid authentication key. Contact your administrator.</p>';
+                    '<p style="color:#f4212e;padding:20px;">Invalid authentication key.</p>';
             } else {
-                // Load Clerk JS SDK from Clerk's own CDN
                 const script = document.createElement('script');
                 script.src = `https://${fapiUrl}/npm/@clerk/clerk-js@5/dist/clerk.browser.js`;
                 script.crossOrigin = 'anonymous';
                 script.setAttribute('data-clerk-publishable-key', CLERK_PK);
                 script.onload = async () => {
                     try {
-                        // Wait for Clerk global to be available
                         const clerk = window.Clerk;
                         if (!clerk) throw new Error('Clerk not loaded');
+                        if (typeof clerk.load === 'function') await clerk.load();
 
-                        if (typeof clerk.load === 'function') {
-                            await clerk.load();
-                        }
+                        if (clerk.user) { window.location.href = '/'; return; }
 
-                        if (clerk.user) {
-                            window.location.href = '/';
-                            return;
-                        }
-
-                        // Mount sign-in component
+                        // Mount sign-in
                         document.getElementById('clerk-sign-in').innerHTML = '';
                         clerk.mountSignIn(document.getElementById('clerk-sign-in'), {
-                            appearance: {
-                                variables: {
-                                    colorPrimary: '#1d9bf0',
-                                    colorBackground: '#1a2332',
-                                    colorText: '#e7e9ea',
-                                    colorTextSecondary: '#8b98a5',
-                                    colorInputBackground: '#273340',
-                                    colorInputText: '#e7e9ea',
-                                    colorNeutral: '#e7e9ea',
-                                    colorTextOnPrimaryBackground: '#ffffff',
-                                    borderRadius: '8px',
-                                },
-                                elements: {
-                                    socialButtonsBlockButton: {
-                                        backgroundColor: '#ffffff',
-                                        color: '#1f1f1f',
-                                        border: '1px solid #dadce0',
-                                        fontWeight: '500',
-                                    },
-                                    socialButtonsBlockButtonText: {
-                                        color: '#1f1f1f',
-                                    },
-                                    card: {
-                                        backgroundColor: '#1a2332',
-                                        border: '1px solid #2f3942',
-                                    },
-                                    footerActionLink: {
-                                        color: '#1d9bf0',
-                                    },
-                                }
-                            },
+                            appearance: clerkAppearance,
                             afterSignInUrl: '/',
+                            redirectUrl: '/',
+                        });
+
+                        // Mount sign-up
+                        document.getElementById('clerk-sign-up').innerHTML = '';
+                        clerk.mountSignUp(document.getElementById('clerk-sign-up'), {
+                            appearance: clerkAppearance,
+                            afterSignUpUrl: '/',
                             redirectUrl: '/',
                         });
                     } catch (err) {
                         console.error('Clerk init error:', err);
                         const errDiv = document.getElementById('auth-error');
                         errDiv.style.display = 'block';
-                        errDiv.textContent = 'Failed to load authentication. Please refresh or contact support.';
+                        errDiv.textContent = 'Failed to load authentication. Please refresh.';
                     }
                 };
-                script.onerror = (e) => {
-                    console.error('Clerk script load error:', e);
+                script.onerror = () => {
                     document.getElementById('clerk-sign-in').innerHTML =
-                        '<p style="color:#f4212e">Failed to load authentication SDK. Check your connection.</p>';
+                        '<p style="color:#f4212e;padding:20px;">Failed to load authentication SDK.</p>';
                 };
                 document.head.appendChild(script);
             }
         }
+
+        // ====================================================================
+        // COSMOGRAPH — interactive node network background
+        // ====================================================================
+        (function() {
+            const canvas = document.getElementById('cosmograph');
+            const ctx = canvas.getContext('2d');
+            let W, H, nodes = [], mouse = { x: -9999, y: -9999 };
+
+            const NODE_COUNT = 80;
+            const CONNECT_DIST = 160;
+            const COLORS = [
+                'rgba(108,223,229,', 'rgba(29,155,240,', 'rgba(167,139,250,',
+                'rgba(0,186,124,', 'rgba(247,147,26,',
+            ];
+
+            function resize() {
+                W = canvas.width = window.innerWidth;
+                H = canvas.height = window.innerHeight;
+            }
+            window.addEventListener('resize', () => { resize(); initNodes(); });
+            resize();
+
+            function initNodes() {
+                nodes = [];
+                for (let i = 0; i < NODE_COUNT; i++) {
+                    const cluster = Math.random();
+                    let cx, cy;
+                    if (cluster < 0.25) { cx = W * 0.25; cy = H * 0.3; }
+                    else if (cluster < 0.45) { cx = W * 0.75; cy = H * 0.25; }
+                    else if (cluster < 0.65) { cx = W * 0.5; cy = H * 0.7; }
+                    else { cx = Math.random() * W; cy = Math.random() * H; }
+
+                    nodes.push({
+                        x: cx + (Math.random() - 0.5) * W * 0.5,
+                        y: cy + (Math.random() - 0.5) * H * 0.4,
+                        vx: (Math.random() - 0.5) * 0.3,
+                        vy: (Math.random() - 0.5) * 0.2,
+                        r: Math.random() * 2.5 + 0.5,
+                        color: COLORS[Math.floor(Math.random() * COLORS.length)],
+                        baseAlpha: 0.12 + Math.random() * 0.25,
+                    });
+                }
+            }
+            initNodes();
+
+            canvas.addEventListener('mousemove', e => {
+                mouse.x = e.clientX; mouse.y = e.clientY;
+            });
+
+            function draw() {
+                ctx.clearRect(0, 0, W, H);
+
+                nodes.forEach(n => {
+                    n.x += n.vx; n.y += n.vy;
+                    if (n.x < -30) n.x = W + 30; if (n.x > W + 30) n.x = -30;
+                    if (n.y < -30) n.y = H + 30; if (n.y > H + 30) n.y = -30;
+
+                    // Mouse repel
+                    const dx = mouse.x - n.x, dy = mouse.y - n.y;
+                    const md = Math.sqrt(dx*dx + dy*dy);
+                    if (md < 200 && md > 0) {
+                        const force = (1 - md / 200) * 0.5;
+                        n.x -= dx / md * force;
+                        n.y -= dy / md * force;
+                    }
+                });
+
+                // Connections
+                for (let i = 0; i < nodes.length; i++) {
+                    for (let j = i + 1; j < nodes.length; j++) {
+                        const dx = nodes[i].x - nodes[j].x;
+                        const dy = nodes[i].y - nodes[j].y;
+                        const d = Math.sqrt(dx*dx + dy*dy);
+                        if (d < CONNECT_DIST) {
+                            const alpha = (1 - d / CONNECT_DIST) * 0.1;
+                            ctx.beginPath();
+                            ctx.moveTo(nodes[i].x, nodes[i].y);
+                            ctx.lineTo(nodes[j].x, nodes[j].y);
+                            ctx.strokeStyle = nodes[i].color + alpha + ')';
+                            ctx.lineWidth = 0.5;
+                            ctx.stroke();
+                        }
+                    }
+                }
+
+                // Nodes
+                nodes.forEach(n => {
+                    ctx.beginPath();
+                    ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+                    ctx.fillStyle = n.color + n.baseAlpha + ')';
+                    ctx.fill();
+                    if (n.r > 1.8) {
+                        ctx.beginPath();
+                        ctx.arc(n.x, n.y, n.r * 3.5, 0, Math.PI * 2);
+                        ctx.fillStyle = n.color + '0.025)';
+                        ctx.fill();
+                    }
+                });
+
+                requestAnimationFrame(draw);
+            }
+            draw();
+        })();
     </script>
 </body>
 </html>

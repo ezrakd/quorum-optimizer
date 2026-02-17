@@ -72,10 +72,10 @@ def enforce_auth():
         if err:
             return err
 
-        # Config API requires admin role
+        # Config API requires admin or account_admin role
         if path.startswith('/api/config/'):
-            if g.user.get('role') != 'admin':
-                return jsonify({'error': 'Admin access required'}), 403
+            if g.user.get('role') not in ('admin', 'account_admin'):
+                return jsonify({'error': 'Admin or account admin access required'}), 403
 
     return None
 

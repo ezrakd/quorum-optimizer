@@ -278,6 +278,20 @@ def require_admin(f):
     return decorated
 
 
+def require_config_access(f):
+    """Decorator: requires admin or account_admin role for config access."""
+    @functools.wraps(f)
+    def decorated(*args, **kwargs):
+        err = _check_auth()
+        if err:
+            return err
+        role = g.user.get('role')
+        if role not in ('admin', 'account_admin'):
+            return jsonify({'error': 'Config access requires admin or account_admin role'}), 403
+        return f(*args, **kwargs)
+    return decorated
+
+
 def get_effective_agency_id(requested_agency_id):
     """
     For admin users: returns whatever agency_id was requested.

@@ -21,7 +21,8 @@ Read sources:
 
 Designed to run alongside optimizer_api_v5 (same Flask app) or standalone.
 """
-from flask import Blueprint, jsonify, request
+import os
+from flask import Blueprint, jsonify, request, g
 from datetime import datetime
 
 config_bp = Blueprint('config', __name__, url_prefix='/api/config')
@@ -612,7 +613,8 @@ def configure_domain():
         "advertiser_id": 12345,
         "url": "mountainwestbankchecking.com",
         "advertiser_name": "Mountain West Bank",
-        "is_poi": false
+        "is_poi": false,
+        "web_visit_source": "QUORUM_ADV_WEB_VISITS"  // optional, auto-detected from agency_id
     }
     """
     try:
@@ -661,18 +663,26 @@ def configure_domain():
             'is_poi': data.get('is_poi', False)
         })
 
+        # Determine WEB_VISIT_SOURCE based on agency
+        # Agency 1480 (Paramount) uses PARAMOUNT_SITEVISITS, all others use QUORUM_ADV_WEB_VISITS
+        web_visit_source = data.get('web_visit_source')
+        if not web_visit_source:
+            web_visit_source = 'PARAMOUNT_SITEVISITS' if int(data['agency_id']) == 1480 else 'QUORUM_ADV_WEB_VISITS'
+
         # Update REF_ADVERTISER_CONFIG
         cursor.execute("""
             UPDATE QUORUMDB.BASE_TABLES.REF_ADVERTISER_CONFIG
             SET
                 HAS_WEB_VISIT_ATTRIBUTION = TRUE,
                 WEB_PIXEL_URL_COUNT = WEB_PIXEL_URL_COUNT + 1,
+                WEB_VISIT_SOURCE = %(web_visit_source)s,
                 UPDATED_AT = CURRENT_TIMESTAMP()
             WHERE ADVERTISER_ID = %(advertiser_id)s
               AND AGENCY_ID = %(agency_id)s
         """, {
             'advertiser_id': data['advertiser_id'],
-            'agency_id': data['agency_id']
+            'agency_id': data['agency_id'],
+            'web_visit_source': web_visit_source
         })
 
         conn.commit()
@@ -826,6 +836,7 @@ def get_advertiser_config():
                 c.ATTRIBUTION_WINDOW_DAYS, c.MATCH_STRATEGY,
                 c.IMPRESSION_JOIN_STRATEGY, c.EXPOSURE_SOURCE,
                 c.WEB_PIXEL_INTEGRATION_TYPE,
+                c.WEB_VISIT_SOURCE,
                 c.CONFIG_STATUS,
                 c.LAST_IMPRESSION_AT, c.LAST_STORE_VISIT_AT, c.LAST_WEB_VISIT_AT,
                 c.CREATED_AT, c.UPDATED_AT,
@@ -902,7 +913,8 @@ def search_advertisers():
                 c.CAMPAIGN_MAPPING_COUNT,
                 c.HAS_STORE_VISIT_ATTRIBUTION,
                 c.HAS_WEB_VISIT_ATTRIBUTION,
-                c.HAS_IMPRESSION_TRACKING
+                c.HAS_IMPRESSION_TRACKING,
+                c.WEB_VISIT_SOURCE
             FROM QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa
             LEFT JOIN QUORUMDB.BASE_TABLES.REF_ADVERTISER_CONFIG c
                 ON aa.ID = c.ADVERTISER_ID AND aa.ADVERTISER_ID = c.AGENCY_ID
@@ -996,6 +1008,7 @@ def update_config():
         "agency_id": 1813,
         "attribution_window_days": 14,
         "match_strategy": "HOUSEHOLD",
+        "web_visit_source": "PARAMOUNT_SITEVISITS",  // or "QUORUM_ADV_WEB_VISITS"
         "config_status": "ACTIVE"
     }
     """
@@ -1018,6 +1031,7 @@ def update_config():
             'has_impression_tracking': 'HAS_IMPRESSION_TRACKING',
             'web_pixel_integration_type': 'WEB_PIXEL_INTEGRATION_TYPE',
             'exposure_source': 'EXPOSURE_SOURCE',
+            'web_visit_source': 'WEB_VISIT_SOURCE',
         }
 
         set_clauses = ["UPDATED_AT = CURRENT_TIMESTAMP()"]
@@ -1062,6 +1076,672 @@ def update_config():
             'fields_updated': [k for k in allowed_fields if k in data]
         })
 
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# =============================================================================
+# ADVERTISER HUB: List advertisers with inline domains, POIs, campaigns
+# =============================================================================
+@config_bp.route('/advertiser-hub', methods=['GET'])
+def get_advertiser_hub():
+    """
+    Returns advertiser list with inline domains, POI counts, campaign counts,
+    and setup status indicators for the Advertiser Hub view.
+    Supports agency filtering for non-admin users.
+    Query params: agency_id (optional), search (optional name filter), limit
+    """
+    try:
+        agency_id = request.args.get('agency_id')
+        search = request.args.get('search', '').strip()
+        limit = min(int(request.args.get('limit', 100)), 500)
+
+        conn = get_config_connection()
+        cursor = conn.cursor()
+
+        query = """
+            WITH adv_domains AS (
+                SELECT
+                    "Advertiser_id" as ADV_ID,
+                    "Agency_Id" as AG_ID,
+                    LISTAGG(DISTINCT "URL", ', ') WITHIN GROUP (ORDER BY "URL") as DOMAINS,
+                    COUNT(DISTINCT "URL") as DOMAIN_COUNT
+                FROM QUORUMDB.DERIVED_TABLES.ADVERTISER_DOMAIN_MAPPING
+                WHERE "URL" IS NOT NULL
+                GROUP BY "Advertiser_id", "Agency_Id"
+            ),
+            adv_pois AS (
+                SELECT
+                    ADVERTISER_ID as ADV_ID,
+                    COUNT(DISTINCT SEGMENT_MD5) as POI_COUNT
+                FROM QUORUMDB.SEGMENT_DATA.SEGMENT_MD5_MAPPING
+                GROUP BY ADVERTISER_ID
+            ),
+            adv_campaigns AS (
+                SELECT
+                    QUORUM_ADVERTISER_ID as ADV_ID,
+                    AGENCY_ID as AG_ID,
+                    COUNT(*) as CAMPAIGN_COUNT,
+                    SUM(COALESCE(IMPRESSIONS_14DAY_ROLLING, 0)) as TOTAL_IMPRESSIONS_14D,
+                    MAX(LAST_IMPRESSION_TIMESTAMP) as LAST_IMPRESSION
+                FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
+                WHERE QUORUM_ADVERTISER_ID IS NOT NULL
+                GROUP BY QUORUM_ADVERTISER_ID, AGENCY_ID
+            )
+            SELECT
+                aa.ID as ADVERTISER_ID,
+                aa.ADVERTISER_ID as AGENCY_ID,
+                aa.COMP_NAME as ADVERTISER_NAME,
+                aa.AGENCY_NAME,
+                COALESCE(c.CONFIG_STATUS, 'UNCONFIGURED') as CONFIG_STATUS,
+                COALESCE(c.ATTRIBUTION_WINDOW_DAYS, 30) as ATTRIBUTION_WINDOW_DAYS,
+                COALESCE(c.MATCH_STRATEGY, 'HOUSEHOLD') as MATCH_STRATEGY,
+                COALESCE(c.IMPRESSION_JOIN_STRATEGY, 'PCM_4KEY') as IMPRESSION_JOIN_STRATEGY,
+                c.HAS_STORE_VISIT_ATTRIBUTION,
+                c.HAS_WEB_VISIT_ATTRIBUTION,
+                c.HAS_IMPRESSION_TRACKING,
+                c.WEB_VISIT_SOURCE,
+                COALESCE(d.DOMAINS, '') as DOMAINS,
+                COALESCE(d.DOMAIN_COUNT, 0) as DOMAIN_COUNT,
+                COALESCE(p.POI_COUNT, 0) as POI_COUNT,
+                COALESCE(cm.CAMPAIGN_COUNT, 0) as CAMPAIGN_COUNT,
+                COALESCE(cm.TOTAL_IMPRESSIONS_14D, 0) as TOTAL_IMPRESSIONS_14D,
+                cm.LAST_IMPRESSION,
+                c.SEGMENT_COUNT,
+                c.WEB_PIXEL_URL_COUNT,
+                c.CAMPAIGN_MAPPING_COUNT,
+                c.UPDATED_AT
+            FROM QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa
+            LEFT JOIN QUORUMDB.BASE_TABLES.REF_ADVERTISER_CONFIG c
+                ON aa.ID = c.ADVERTISER_ID AND aa.ADVERTISER_ID = c.AGENCY_ID
+            LEFT JOIN adv_domains d
+                ON aa.ID = d.ADV_ID AND aa.ADVERTISER_ID = d.AG_ID
+            LEFT JOIN adv_pois p
+                ON aa.ID = p.ADV_ID
+            LEFT JOIN adv_campaigns cm
+                ON aa.ID = cm.ADV_ID AND aa.ADVERTISER_ID = cm.AG_ID
+            WHERE 1=1
+        """
+        params = {}
+
+        if agency_id:
+            query += " AND aa.ADVERTISER_ID = %(agency_id)s"
+            params['agency_id'] = int(agency_id)
+
+        if search:
+            query += " AND aa.COMP_NAME ILIKE %(search)s"
+            params['search'] = f'%{search}%'
+
+        # Only show advertisers with some activity or config
+        query += """ AND (
+            c.CONFIG_STATUS IS NOT NULL
+            OR d.DOMAIN_COUNT > 0
+            OR p.POI_COUNT > 0
+            OR cm.CAMPAIGN_COUNT > 0
+        )"""
+
+        query += f" ORDER BY COALESCE(cm.TOTAL_IMPRESSIONS_14D, 0) DESC, aa.COMP_NAME LIMIT {limit}"
+
+        cursor.execute(query, params)
+        results = rows_to_dicts(cursor)
+
+        # Add setup completeness score
+        for r in results:
+            score = 0
+            steps_needed = []
+            if r.get('CAMPAIGN_COUNT', 0) > 0 or r.get('CAMPAIGN_MAPPING_COUNT', 0) > 0:
+                score += 1
+            else:
+                steps_needed.append('Map campaigns')
+            if r.get('DOMAIN_COUNT', 0) > 0 or r.get('WEB_PIXEL_URL_COUNT', 0) > 0:
+                score += 1
+            else:
+                steps_needed.append('Add web pixel URLs')
+            if r.get('POI_COUNT', 0) > 0 or r.get('SEGMENT_COUNT', 0) > 0:
+                score += 1
+            else:
+                steps_needed.append('Assign POI locations')
+            r['SETUP_SCORE'] = score
+            r['SETUP_MAX'] = 3
+            r['STEPS_NEEDED'] = steps_needed
+
+        cursor.close()
+        conn.close()
+
+        return jsonify({'success': True, 'count': len(results), 'data': results})
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# =============================================================================
+# ADVERTISER DETAIL: Full detail for one advertiser
+# =============================================================================
+@config_bp.route('/advertiser-detail', methods=['GET'])
+def get_advertiser_detail():
+    """
+    Returns full detail for a single advertiser: config, domains, campaigns, POIs.
+    Query params: advertiser_id (required), agency_id (optional)
+    """
+    try:
+        advertiser_id = request.args.get('advertiser_id')
+        agency_id = request.args.get('agency_id')
+        if not advertiser_id:
+            return jsonify({'success': False, 'error': 'advertiser_id required'}), 400
+        advertiser_id = int(advertiser_id)
+
+        conn = get_config_connection()
+        cursor = conn.cursor()
+
+        # 1. Basic info + config
+        query = """
+            SELECT
+                aa.ID as ADVERTISER_ID, aa.ADVERTISER_ID as AGENCY_ID,
+                aa.COMP_NAME as ADVERTISER_NAME, aa.AGENCY_NAME,
+                c.CONFIG_STATUS, c.ATTRIBUTION_WINDOW_DAYS, c.MATCH_STRATEGY,
+                c.IMPRESSION_JOIN_STRATEGY, c.EXPOSURE_SOURCE,
+                c.HAS_STORE_VISIT_ATTRIBUTION, c.HAS_WEB_VISIT_ATTRIBUTION,
+                c.HAS_IMPRESSION_TRACKING, c.WEB_PIXEL_INTEGRATION_TYPE,
+                c.WEB_VISIT_SOURCE,
+                c.SEGMENT_COUNT, c.WEB_PIXEL_URL_COUNT, c.CAMPAIGN_MAPPING_COUNT,
+                c.PLATFORM_TYPE_IDS, c.CREATED_AT, c.UPDATED_AT
+            FROM QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa
+            LEFT JOIN QUORUMDB.BASE_TABLES.REF_ADVERTISER_CONFIG c
+                ON aa.ID = c.ADVERTISER_ID AND aa.ADVERTISER_ID = c.AGENCY_ID
+            WHERE aa.ID = %s
+        """
+        q_params = [advertiser_id]
+        if agency_id:
+            query += " AND aa.ADVERTISER_ID = %s"
+            q_params.append(int(agency_id))
+        query += " LIMIT 1"
+        cursor.execute(query, q_params)
+        config_rows = rows_to_dicts(cursor)
+        config = config_rows[0] if config_rows else None
+
+        if not config:
+            cursor.close()
+            conn.close()
+            return jsonify({'success': False, 'error': 'Advertiser not found'}), 404
+
+        effective_agency = agency_id or config.get('AGENCY_ID')
+
+        # 2. Domains
+        cursor.execute("""
+            SELECT "URL", "IS_POI", "CREATED_AT"
+            FROM QUORUMDB.DERIVED_TABLES.ADVERTISER_DOMAIN_MAPPING
+            WHERE "Advertiser_id" = %s AND "Agency_Id" = %s
+            ORDER BY "CREATED_AT" DESC
+        """, (advertiser_id, int(effective_agency)))
+        domains = [{'url': r[0], 'is_poi': r[1], 'created_at': str(r[2]) if r[2] else None}
+                   for r in cursor.fetchall()]
+
+        # 3. Campaigns
+        cursor.execute("""
+            SELECT
+                MAPPING_ID, DSP_ADVERTISER_ID, INSERTION_ORDER_ID, LINE_ITEM_ID,
+                DSP_PLATFORM_TYPE, DATA_SOURCE,
+                ADVERTISER_NAME_FROM_DSP, INSERTION_ORDER_NAME_FROM_DSP,
+                LINE_ITEM_NAME_FROM_DSP, CAMPAIGN_NAME_MANUAL,
+                IMPRESSIONS_14DAY_ROLLING, REACH_14DAY_ROLLING,
+                IMPRESSION_COUNT, FIRST_IMPRESSION_TIMESTAMP, LAST_IMPRESSION_TIMESTAMP,
+                CAMPAIGN_START_DATE, CAMPAIGN_END_DATE
+            FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
+            WHERE QUORUM_ADVERTISER_ID = %s AND AGENCY_ID = %s
+            ORDER BY LAST_IMPRESSION_TIMESTAMP DESC NULLS LAST
+            LIMIT 100
+        """, (advertiser_id, int(effective_agency)))
+        campaigns = rows_to_dicts(cursor)
+
+        # 4. POI summary (brand-level aggregation)
+        cursor.execute("""
+            SELECT
+                sm.SEGMENT_MD5,
+                sm.SEGMENT_UNIQUE_ID,
+                COALESCE(poi.BRAND, 'Unknown') as BRAND,
+                COALESCE(poi.CATEGORY, '') as CATEGORY,
+                COALESCE(poi.DMA_NAME, '') as DMA_NAME,
+                COALESCE(poi.UNIQUE_LOCATIONS, 1) as LOCATIONS,
+                COALESCE(poi.ZIP_CODES, 0) as ZIP_CODES
+            FROM QUORUMDB.SEGMENT_DATA.SEGMENT_MD5_MAPPING sm
+            LEFT JOIN QUORUMDB.BASE_TABLES.V_POI_BRAND_SEARCH poi
+                ON sm.SEGMENT_MD5 = poi.SEGMENT_MD5
+            WHERE sm.ADVERTISER_ID = %s
+            ORDER BY poi.BRAND, poi.DMA_NAME
+            LIMIT 500
+        """, (advertiser_id,))
+        pois = rows_to_dicts(cursor)
+
+        # POI summary stats
+        poi_brands = set()
+        poi_dmas = set()
+        poi_total_locations = 0
+        for p in pois:
+            if p.get('BRAND') and p['BRAND'] != 'Unknown':
+                poi_brands.add(p['BRAND'])
+            if p.get('DMA_NAME'):
+                poi_dmas.add(p['DMA_NAME'])
+            poi_total_locations += p.get('LOCATIONS', 1)
+
+        cursor.close()
+        conn.close()
+
+        return jsonify({
+            'success': True,
+            'config': config,
+            'domains': domains,
+            'campaigns': campaigns,
+            'pois': pois,
+            'poi_summary': {
+                'total_segments': len(pois),
+                'unique_brands': len(poi_brands),
+                'brands': sorted(list(poi_brands)),
+                'unique_dmas': len(poi_dmas),
+                'total_locations': poi_total_locations
+            }
+        })
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# =============================================================================
+# WRITE: REMOVE POI FROM ADVERTISER
+# =============================================================================
+@config_bp.route('/remove-poi', methods=['POST'])
+def remove_poi():
+    """
+    Remove POI segment(s) from an advertiser.
+    POST body: { "advertiser_id": 123, "agency_id": 1480, "segment_md5s": ["abc..."] }
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'success': False, 'error': 'JSON body required'}), 400
+
+        advertiser_id = data.get('advertiser_id')
+        agency_id = data.get('agency_id')
+        md5s = data.get('segment_md5s', [])
+        if not advertiser_id or not md5s:
+            return jsonify({'success': False, 'error': 'advertiser_id and segment_md5s required'}), 400
+
+        conn = get_config_connection()
+        cursor = conn.cursor()
+
+        placeholders = ','.join([f"'{m}'" for m in md5s])
+        cursor.execute(f"""
+            DELETE FROM QUORUMDB.SEGMENT_DATA.SEGMENT_MD5_MAPPING
+            WHERE ADVERTISER_ID = %s AND SEGMENT_MD5 IN ({placeholders})
+        """, (int(advertiser_id),))
+        deleted = cursor.rowcount
+
+        # Update config counts
+        if deleted > 0 and agency_id:
+            cursor.execute("""
+                UPDATE QUORUMDB.BASE_TABLES.REF_ADVERTISER_CONFIG
+                SET SEGMENT_COUNT = GREATEST(SEGMENT_COUNT - %s, 0),
+                    UPDATED_AT = CURRENT_TIMESTAMP()
+                WHERE ADVERTISER_ID = %s AND AGENCY_ID = %s
+            """, (deleted, int(advertiser_id), int(agency_id)))
+
+            # Check if any POIs remain
+            cursor.execute("""
+                SELECT COUNT(*) FROM QUORUMDB.SEGMENT_DATA.SEGMENT_MD5_MAPPING
+                WHERE ADVERTISER_ID = %s
+            """, (int(advertiser_id),))
+            remaining = cursor.fetchone()[0]
+            if remaining == 0:
+                cursor.execute("""
+                    UPDATE QUORUMDB.BASE_TABLES.REF_ADVERTISER_CONFIG
+                    SET HAS_STORE_VISIT_ATTRIBUTION = FALSE, UPDATED_AT = CURRENT_TIMESTAMP()
+                    WHERE ADVERTISER_ID = %s AND AGENCY_ID = %s
+                """, (int(advertiser_id), int(agency_id)))
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        return jsonify({'success': True, 'deleted': deleted})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# =============================================================================
+# WRITE: CREATE NEW ADVERTISER
+# =============================================================================
+@config_bp.route('/create-advertiser', methods=['POST'])
+def create_advertiser():
+    """
+    Create a new advertiser in AGENCY_ADVERTISER and REF_ADVERTISER_CONFIG.
+    POST body: { "advertiser_name": "Acme Corp", "agency_id": 1480 }
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'success': False, 'error': 'JSON body required'}), 400
+
+        name = data.get('advertiser_name', '').strip()
+        agency_id = data.get('agency_id')
+        if not name or not agency_id:
+            return jsonify({'success': False, 'error': 'advertiser_name and agency_id required'}), 400
+
+        agency_id = int(agency_id)
+        conn = get_config_connection()
+        cursor = conn.cursor()
+
+        # Check for duplicates
+        cursor.execute("""
+            SELECT ID FROM QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER
+            WHERE COMP_NAME ILIKE %s AND ADVERTISER_ID = %s
+            LIMIT 1
+        """, (name, agency_id))
+        existing = cursor.fetchone()
+        if existing:
+            cursor.close()
+            conn.close()
+            return jsonify({
+                'success': False,
+                'error': f'Advertiser "{name}" already exists for this agency (ID: {existing[0]})'
+            }), 409
+
+        # Get next ID
+        cursor.execute("SELECT COALESCE(MAX(ID), 0) + 1 FROM QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER")
+        new_id = cursor.fetchone()[0]
+
+        # Get agency name
+        cursor.execute("""
+            SELECT DISTINCT AGENCY_NAME FROM QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER
+            WHERE ADVERTISER_ID = %s AND AGENCY_NAME IS NOT NULL LIMIT 1
+        """, (agency_id,))
+        agency_name_row = cursor.fetchone()
+        agency_name = agency_name_row[0] if agency_name_row else ''
+
+        # Insert advertiser
+        cursor.execute("""
+            INSERT INTO QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER
+                (ID, ADVERTISER_ID, COMP_NAME, AGENCY_NAME)
+            VALUES (%s, %s, %s, %s)
+        """, (new_id, agency_id, name, agency_name))
+
+        # Determine default WEB_VISIT_SOURCE based on agency
+        default_web_visit_source = 'PARAMOUNT_SITEVISITS' if agency_id == 1480 else 'QUORUM_ADV_WEB_VISITS'
+
+        # Create initial config
+        cursor.execute("""
+            INSERT INTO QUORUMDB.BASE_TABLES.REF_ADVERTISER_CONFIG (
+                ADVERTISER_ID, AGENCY_ID, CONFIG_STATUS,
+                ATTRIBUTION_WINDOW_DAYS, MATCH_STRATEGY, IMPRESSION_JOIN_STRATEGY,
+                HAS_STORE_VISIT_ATTRIBUTION, HAS_WEB_VISIT_ATTRIBUTION, HAS_IMPRESSION_TRACKING,
+                SEGMENT_COUNT, POI_URL_COUNT, WEB_PIXEL_URL_COUNT, CAMPAIGN_MAPPING_COUNT,
+                WEB_VISIT_SOURCE,
+                CREATED_AT, UPDATED_AT
+            ) VALUES (
+                %s, %s, 'ACTIVE', 30, 'HOUSEHOLD', 'PCM_4KEY',
+                FALSE, FALSE, FALSE, 0, 0, 0, 0,
+                %s,
+                CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()
+            )
+        """, (new_id, agency_id, default_web_visit_source))
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        return jsonify({
+            'success': True,
+            'advertiser_id': new_id,
+            'message': f'Created advertiser "{name}" (ID: {new_id}) for agency {agency_id}'
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# =============================================================================
+# IMPRESSION LOG SEARCH — discover new advertisers
+# =============================================================================
+@config_bp.route('/impression-search', methods=['GET'])
+def impression_search():
+    """
+    Search ad impression logs by agency to discover new unmapped advertisers.
+    Returns DSP advertisers grouped by name with impression counts.
+    Query params: agency_id (required), days (default 30), min_impressions (default 50)
+    """
+    try:
+        agency_id = request.args.get('agency_id')
+        if not agency_id:
+            return jsonify({'success': False, 'error': 'agency_id required'}), 400
+
+        days = min(int(request.args.get('days', 30)), 90)
+        min_impressions = int(request.args.get('min_impressions', 50))
+
+        conn = get_config_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT
+                imp.AGENCY_ID,
+                imp.DSP_ADVERTISER_ID,
+                imp.DSP_ADVERTISER_NAME,
+                imp.PLATFORM_TYPE_ID,
+                COALESCE(dsp.PLATFORM_NAME, 'Unknown') as PLATFORM_NAME,
+                COUNT(*) as IMPRESSIONS,
+                COUNT(DISTINCT CAST(imp.EVENT_DATE AS DATE)) as ACTIVE_DAYS,
+                MIN(imp.EVENT_DATE) as FIRST_SEEN,
+                MAX(imp.EVENT_DATE) as LAST_SEEN,
+                CASE WHEN pcm.QUORUM_ADVERTISER_ID IS NOT NULL THEN 'MAPPED'
+                     ELSE 'UNMAPPED' END as STATUS,
+                pcm.QUORUM_ADVERTISER_ID,
+                COALESCE(aa.COMP_NAME, '') as QUORUM_ADVERTISER_NAME
+            FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 imp
+            LEFT JOIN QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2 pcm
+                ON imp.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
+                AND imp.AGENCY_ID = pcm.AGENCY_ID
+                AND imp.PLATFORM_TYPE_ID = TRY_CAST(pcm.DSP_PLATFORM_TYPE AS INTEGER)
+            LEFT JOIN QUORUMDB.BASE_TABLES.REF_DSP_PLATFORM dsp
+                ON imp.PLATFORM_TYPE_ID = dsp.PLATFORM_TYPE_ID
+            LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa
+                ON pcm.QUORUM_ADVERTISER_ID = aa.ID AND pcm.AGENCY_ID = aa.ADVERTISER_ID
+            WHERE imp.AGENCY_ID = %(agency_id)s
+              AND imp.EVENT_DATE >= DATEADD(day, -%(days)s, CURRENT_DATE())
+            GROUP BY imp.AGENCY_ID, imp.DSP_ADVERTISER_ID, imp.DSP_ADVERTISER_NAME,
+                     imp.PLATFORM_TYPE_ID, dsp.PLATFORM_NAME,
+                     pcm.QUORUM_ADVERTISER_ID, aa.COMP_NAME
+            HAVING COUNT(*) >= %(min_impressions)s
+            ORDER BY STATUS DESC, IMPRESSIONS DESC
+            LIMIT 200
+        """, {'agency_id': int(agency_id), 'days': days, 'min_impressions': min_impressions})
+
+        results = rows_to_dicts(cursor)
+        cursor.close()
+        conn.close()
+
+        mapped = [r for r in results if r.get('STATUS') == 'MAPPED']
+        unmapped = [r for r in results if r.get('STATUS') == 'UNMAPPED']
+
+        return jsonify({
+            'success': True,
+            'count': len(results),
+            'mapped_count': len(mapped),
+            'unmapped_count': len(unmapped),
+            'data': results
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# =============================================================================
+# STORE LIST UPLOAD + EMAIL TRIGGER
+# =============================================================================
+@config_bp.route('/upload-storelist', methods=['POST'])
+def upload_storelist():
+    """
+    Upload a store list CSV for POI processing.
+    Saves the file and sends notification email to cs@quorum.inc.
+    POST: multipart form with 'file', 'advertiser_id', 'agency_id', 'advertiser_name'
+    """
+    try:
+        import smtplib
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+        from email.mime.base import MIMEBase
+        from email import encoders
+        import tempfile
+
+        advertiser_id = request.form.get('advertiser_id')
+        agency_id = request.form.get('agency_id')
+        advertiser_name = request.form.get('advertiser_name', '')
+        uploaded_by = ''
+        if hasattr(g, 'user'):
+            uploaded_by = g.user.get('email', g.user.get('user_id', 'unknown'))
+
+        if 'file' not in request.files:
+            return jsonify({'success': False, 'error': 'No file uploaded'}), 400
+
+        file = request.files['file']
+        if not file.filename:
+            return jsonify({'success': False, 'error': 'Empty filename'}), 400
+
+        # Save to temp
+        temp_dir = tempfile.mkdtemp()
+        filepath = os.path.join(temp_dir, file.filename)
+        file.save(filepath)
+
+        # Read file content for preview
+        with open(filepath, 'r', errors='ignore') as f:
+            preview_lines = f.readlines()[:10]
+        preview = ''.join(preview_lines)
+        total_lines = sum(1 for _ in open(filepath, 'r', errors='ignore'))
+
+        # Try to send email notification
+        email_sent = False
+        email_error = None
+        try:
+            import os as _os
+            smtp_host = _os.environ.get('SMTP_HOST', 'smtp.gmail.com')
+            smtp_port = int(_os.environ.get('SMTP_PORT', 587))
+            smtp_user = _os.environ.get('SMTP_USER', '')
+            smtp_pass = _os.environ.get('SMTP_PASSWORD', '')
+
+            if smtp_user and smtp_pass:
+                msg = MIMEMultipart()
+                msg['From'] = smtp_user
+                msg['To'] = 'cs@quorum.inc'
+                msg['Subject'] = f'Store List Upload — {advertiser_name} (Adv {advertiser_id}, Agency {agency_id})'
+
+                body = f"""New store list uploaded for POI processing.
+
+Advertiser: {advertiser_name} (ID: {advertiser_id})
+Agency ID: {agency_id}
+Uploaded by: {uploaded_by}
+File: {file.filename}
+Rows: ~{total_lines}
+
+Preview (first 10 lines):
+{preview}
+
+Please process this store list via PolyPak and assign the resulting segments to advertiser {advertiser_id}.
+"""
+                msg.attach(MIMEText(body, 'plain'))
+
+                # Attach file
+                with open(filepath, 'rb') as attachment:
+                    part = MIMEBase('application', 'octet-stream')
+                    part.set_payload(attachment.read())
+                    encoders.encode_base64(part)
+                    part.add_header('Content-Disposition', f'attachment; filename={file.filename}')
+                    msg.attach(part)
+
+                with smtplib.SMTP(smtp_host, smtp_port) as server:
+                    server.starttls()
+                    server.login(smtp_user, smtp_pass)
+                    server.send_message(msg)
+                email_sent = True
+        except Exception as mail_err:
+            email_error = str(mail_err)
+
+        # Clean up temp file
+        import shutil
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+        return jsonify({
+            'success': True,
+            'message': f'Store list "{file.filename}" received ({total_lines} rows).',
+            'email_sent': email_sent,
+            'email_error': email_error,
+            'rows': total_lines,
+            'filename': file.filename
+        })
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# =============================================================================
+# REMOVE DOMAIN FROM ADVERTISER
+# =============================================================================
+@config_bp.route('/remove-domain', methods=['POST'])
+def remove_domain():
+    """
+    Remove a web pixel domain from an advertiser.
+    POST body: { "advertiser_id": 123, "agency_id": 1480, "url": "example.com" }
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'success': False, 'error': 'JSON body required'}), 400
+
+        advertiser_id = data.get('advertiser_id')
+        agency_id = data.get('agency_id')
+        url = data.get('url', '').strip()
+        if not advertiser_id or not agency_id or not url:
+            return jsonify({'success': False, 'error': 'advertiser_id, agency_id, and url required'}), 400
+
+        conn = get_config_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            DELETE FROM QUORUMDB.DERIVED_TABLES.ADVERTISER_DOMAIN_MAPPING
+            WHERE "Advertiser_id" = %s AND "Agency_Id" = %s AND "URL" = %s
+        """, (int(advertiser_id), int(agency_id), url))
+        deleted = cursor.rowcount
+
+        if deleted > 0:
+            cursor.execute("""
+                UPDATE QUORUMDB.BASE_TABLES.REF_ADVERTISER_CONFIG
+                SET WEB_PIXEL_URL_COUNT = GREATEST(WEB_PIXEL_URL_COUNT - %s, 0),
+                    UPDATED_AT = CURRENT_TIMESTAMP()
+                WHERE ADVERTISER_ID = %s AND AGENCY_ID = %s
+            """, (deleted, int(advertiser_id), int(agency_id)))
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        return jsonify({'success': True, 'deleted': deleted})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# =============================================================================
+# AGENCIES LIST — for dropdowns
+# =============================================================================
+@config_bp.route('/agencies', methods=['GET'])
+def get_agencies():
+    """Return list of agencies for dropdown filters."""
+    try:
+        conn = get_config_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT DISTINCT ADVERTISER_ID as AGENCY_ID, AGENCY_NAME
+            FROM QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER
+            WHERE AGENCY_NAME IS NOT NULL AND AGENCY_NAME != ''
+            ORDER BY AGENCY_NAME
+            LIMIT 100
+        """)
+        results = rows_to_dicts(cursor)
+        cursor.close()
+        conn.close()
+        return jsonify({'success': True, 'data': results})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 

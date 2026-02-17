@@ -3,131 +3,237 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Quorum Config Admin</title>
+    <title>Quorum — Advertiser Hub</title>
     <link rel="icon" type="image/png" href="/quorum-favicon.png">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f1419; color: #e7e9ea; }
+        ::selection { background: rgba(29,155,240,0.3); }
 
         /* Layout */
-        .app { display: flex; flex-direction: column; min-height: 100vh; }
-        .top-bar { background: #16202a; border-bottom: 1px solid #2f3942; padding: 12px 24px; display: flex; justify-content: space-between; align-items: center; }
-        .top-bar-left { display: flex; align-items: center; gap: 16px; }
-        .top-bar-title { font-size: 18px; font-weight: 700; }
+        .app { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+        .top-bar { background: #16202a; border-bottom: 1px solid #2f3942; padding: 10px 20px; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
+        .top-bar-left { display: flex; align-items: center; gap: 14px; }
+        .top-bar-title { font-size: 17px; font-weight: 700; }
         .top-bar-title span { color: #1d9bf0; }
-        .back-link { color: #8b98a5; text-decoration: none; font-size: 13px; padding: 6px 12px; border: 1px solid #3d5466; border-radius: 6px; transition: all 0.2s; }
+        .back-link { color: #8b98a5; text-decoration: none; font-size: 12px; padding: 5px 10px; border: 1px solid #3d5466; border-radius: 5px; }
         .back-link:hover { color: #e7e9ea; border-color: #1d9bf0; }
-        .top-bar-right { display: flex; align-items: center; gap: 12px; }
-        .refresh-btn { background: #273340; border: 1px solid #3d5466; color: #e7e9ea; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; transition: all 0.2s; }
-        .refresh-btn:hover { border-color: #1d9bf0; background: #1d3a4d; }
-        .last-update { font-size: 11px; color: #8b98a5; }
+        .top-bar-right { display: flex; align-items: center; gap: 10px; }
+        .user-info { font-size: 11px; color: #8b98a5; }
+        .user-info .role { color: #1d9bf0; text-transform: uppercase; font-weight: 600; font-size: 10px; }
 
-        /* Scorecard */
-        .scorecard { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; padding: 16px 24px; background: #16202a; border-bottom: 1px solid #2f3942; }
-        .score-card { background: #1e2732; border-radius: 10px; padding: 14px 16px; }
-        .score-label { font-size: 11px; color: #8b98a5; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
-        .score-value { font-size: 22px; font-weight: 700; }
-        .score-value.green { color: #00ba7c; }
-        .score-value.blue { color: #1d9bf0; }
-        .score-value.yellow { color: #f7931a; }
-        .score-sub { font-size: 11px; color: #8b98a5; margin-top: 4px; }
-        .score-bar { height: 4px; background: #273340; border-radius: 2px; margin-top: 8px; overflow: hidden; }
-        .score-bar-fill { height: 100%; border-radius: 2px; transition: width 0.6s ease; }
-        .score-bar-fill.green { background: #00ba7c; }
-        .score-bar-fill.blue { background: #1d9bf0; }
-        .score-bar-fill.yellow { background: #f7931a; }
+        /* Main layout: sidebar + content */
+        .main { display: flex; flex: 1; overflow: hidden; }
 
-        /* Tabs */
-        .tab-bar { display: flex; gap: 0; padding: 0 24px; background: #16202a; border-bottom: 1px solid #2f3942; }
-        .tab { padding: 14px 24px; background: transparent; border: none; color: #8b98a5; cursor: pointer; font-size: 14px; font-weight: 500; border-bottom: 2px solid transparent; transition: all 0.2s; position: relative; }
-        .tab:hover { color: #e7e9ea; }
-        .tab.active { color: #1d9bf0; border-bottom-color: #1d9bf0; }
-        .tab .badge { background: #f7931a; color: #000; font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 10px; margin-left: 8px; }
+        /* Left sidebar: advertiser list */
+        .sidebar { width: 380px; min-width: 380px; background: #16202a; border-right: 1px solid #2f3942; display: flex; flex-direction: column; overflow: hidden; transition: width 0.2s, min-width 0.2s; }
+        .sidebar.collapsed { width: 0; min-width: 0; border-right: none; overflow: hidden; }
+        .sidebar-header { padding: 12px 14px; border-bottom: 1px solid #2f3942; }
+        .sidebar-header h3 { font-size: 13px; font-weight: 600; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
+        .sidebar-filters { display: flex; gap: 6px; margin-bottom: 6px; }
+        .search-wrap { position: relative; width: 100%; }
+        .sidebar-search { width: 100%; padding: 7px 10px 7px 30px; background: #273340; border: 1px solid #3d5466; border-radius: 6px; color: #e7e9ea; font-size: 12px; }
+        .sidebar-search:focus { outline: none; border-color: #1d9bf0; box-shadow: 0 0 0 2px rgba(29,155,240,0.15); }
+        .search-icon { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); color: #8b98a5; font-size: 13px; pointer-events: none; }
+        .search-clear { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); color: #8b98a5; font-size: 14px; cursor: pointer; padding: 2px 4px; display: none; background: none; border: none; line-height: 1; }
+        .search-clear:hover { color: #e7e9ea; }
+        .search-wrap.has-value .search-clear { display: block; }
+        .search-kbd { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); font-size: 9px; color: #536471; background: #1e2732; border: 1px solid #3d5466; padding: 1px 5px; border-radius: 3px; pointer-events: none; }
+        .search-wrap.has-value .search-kbd { display: none; }
+        .agency-select { padding: 7px 8px; background: #273340; border: 1px solid #3d5466; border-radius: 6px; color: #e7e9ea; font-size: 12px; min-width: 130px; }
+        .agency-select:focus { outline: none; border-color: #1d9bf0; }
+        .sidebar-list { flex: 1; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #3d5466 transparent; }
+        .sidebar-list::-webkit-scrollbar { width: 5px; }
+        .sidebar-list::-webkit-scrollbar-track { background: transparent; }
+        .sidebar-list::-webkit-scrollbar-thumb { background: #3d5466; border-radius: 3px; }
+        .sidebar-list::-webkit-scrollbar-thumb:hover { background: #536471; }
+        .adv-item { padding: 10px 14px; border-bottom: 1px solid #1e2732; cursor: pointer; transition: background 0.15s, border-left 0.15s; border-left: 3px solid transparent; }
+        .adv-item:hover { background: #1e2732; }
+        .adv-item.active { background: #1d3a4d; border-left: 3px solid #1d9bf0; }
+        .adv-name { font-size: 13px; font-weight: 600; margin-bottom: 3px; display: flex; justify-content: space-between; align-items: center; }
+        .adv-agency { font-size: 11px; color: #8b98a5; margin-bottom: 4px; }
+        .adv-domains { font-size: 11px; color: #6cdfe5; word-break: break-all; line-height: 1.4; }
+        .adv-meta { display: flex; gap: 8px; margin-top: 5px; font-size: 10px; }
+        .adv-meta .chip { padding: 2px 6px; border-radius: 3px; font-weight: 500; }
+        .chip-green { background: rgba(0,186,124,0.15); color: #00ba7c; }
+        .chip-blue { background: rgba(29,155,240,0.15); color: #1d9bf0; }
+        .chip-yellow { background: rgba(247,147,26,0.15); color: #f7931a; }
+        .chip-red { background: rgba(244,33,46,0.15); color: #f4212e; }
+        .chip-muted { background: rgba(139,152,165,0.1); color: #8b98a5; }
+        .setup-dots { display: flex; gap: 3px; align-items: center; }
+        .setup-dot { width: 8px; height: 8px; border-radius: 50%; }
+        .setup-dot.on { background: #00ba7c; }
+        .setup-dot.off { background: #3d5466; }
+        .sidebar-footer { padding: 10px 14px; border-top: 1px solid #2f3942; display: flex; gap: 6px; }
 
-        /* Main content */
-        .content { flex: 1; padding: 20px 24px; overflow-y: auto; }
-        .panel { display: none; }
-        .panel.active { display: block; }
+        /* Right content */
+        .content { flex: 1; overflow-y: auto; display: flex; flex-direction: column; scrollbar-width: thin; scrollbar-color: #3d5466 transparent; }
+        .content::-webkit-scrollbar { width: 5px; }
+        .content::-webkit-scrollbar-track { background: transparent; }
+        .content::-webkit-scrollbar-thumb { background: #3d5466; border-radius: 3px; }
+        .content-empty { display: flex; justify-content: center; align-items: center; flex: 1; color: #8b98a5; font-size: 14px; flex-direction: column; gap: 12px; }
+        .content-empty .empty-icon { font-size: 36px; opacity: 0.4; }
+        .content-header { padding: 14px 20px; background: #16202a; border-bottom: 1px solid #2f3942; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
+        .content-header h2 { font-size: 16px; font-weight: 700; }
+        .content-header .adv-id { font-size: 12px; color: #8b98a5; margin-left: 8px; }
+
+        /* Tabs inside content */
+        .content-tabs { display: flex; gap: 0; padding: 0 20px; background: #16202a; border-bottom: 1px solid #2f3942; flex-shrink: 0; }
+        .ctab { padding: 10px 18px; background: none; border: none; color: #8b98a5; cursor: pointer; font-size: 13px; font-weight: 500; border-bottom: 2px solid transparent; }
+        .ctab:hover { color: #e7e9ea; }
+        .ctab.active { color: #1d9bf0; border-bottom-color: #1d9bf0; }
+        .ctab .count { font-size: 10px; background: #273340; padding: 1px 5px; border-radius: 8px; margin-left: 4px; }
+
+        /* Content panels */
+        .cpanel { display: none; padding: 16px 20px; flex: 1; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #3d5466 transparent; }
+        .cpanel::-webkit-scrollbar { width: 5px; }
+        .cpanel::-webkit-scrollbar-track { background: transparent; }
+        .cpanel::-webkit-scrollbar-thumb { background: #3d5466; border-radius: 3px; }
+        .cpanel.active { display: block; animation: fadeIn 0.2s ease; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+        /* Cards */
+        .card { background: #1e2732; border-radius: 10px; overflow: hidden; margin-bottom: 14px; border: 1px solid transparent; transition: border-color 0.2s; }
+        .card:hover { border-color: #2f3942; }
+        .card-header { padding: 12px 16px; font-weight: 600; font-size: 13px; border-bottom: 1px solid #2f3942; display: flex; justify-content: space-between; align-items: center; }
+        .card-body { padding: 14px 16px; }
+        .card-body-compact { padding: 0; }
+
+        /* Summary row */
+        .summary-row { display: flex; gap: 12px; margin-bottom: 14px; }
+        .summary-card { flex: 1; background: #1e2732; border-radius: 8px; padding: 12px 14px; border: 1px solid transparent; transition: border-color 0.2s, transform 0.15s; }
+        .summary-card:hover { border-color: #2f3942; transform: translateY(-1px); }
+        .summary-label { font-size: 10px; color: #8b98a5; text-transform: uppercase; letter-spacing: 0.3px; margin-bottom: 4px; }
+        .summary-value { font-size: 20px; font-weight: 700; }
+        .summary-sub { font-size: 11px; color: #8b98a5; margin-top: 2px; }
 
         /* Tables */
-        .table-section { background: #1e2732; border-radius: 10px; overflow: hidden; margin-bottom: 16px; }
-        .table-header { padding: 14px 18px; font-weight: 600; font-size: 14px; border-bottom: 1px solid #2f3942; display: flex; justify-content: space-between; align-items: center; }
-        .table-header .count { font-size: 12px; color: #8b98a5; font-weight: normal; }
-        .table-filters { padding: 10px 18px; display: flex; gap: 8px; align-items: center; border-bottom: 1px solid #2f3942; background: #1a2530; }
-        .filter-input { padding: 6px 10px; background: #273340; border: 1px solid #3d5466; border-radius: 6px; color: #e7e9ea; font-size: 12px; min-width: 160px; }
-        .filter-input:focus { outline: none; border-color: #1d9bf0; }
-        .filter-select { padding: 6px 10px; background: #273340; border: 1px solid #3d5466; border-radius: 6px; color: #e7e9ea; font-size: 12px; }
         table { width: 100%; border-collapse: collapse; }
-        th { text-align: left; padding: 10px 16px; font-size: 11px; color: #8b98a5; text-transform: uppercase; background: #16202a; font-weight: 600; letter-spacing: 0.3px; }
-        td { padding: 11px 16px; border-bottom: 1px solid #2f3942; font-size: 13px; }
+        th { text-align: left; padding: 8px 14px; font-size: 10px; color: #8b98a5; text-transform: uppercase; background: #16202a; font-weight: 600; letter-spacing: 0.3px; }
+        td { padding: 9px 14px; border-bottom: 1px solid #2f3942; font-size: 12px; }
         tr:last-child td { border-bottom: none; }
-        tr:hover { background: #252e38; }
-        tr.clickable { cursor: pointer; }
-        tr.clickable:hover { background: #1d3a4d; }
+        tbody tr { transition: background 0.1s; }
+        tbody tr:hover { background: #252e38; }
         .text-right { text-align: right; }
         .text-green { color: #00ba7c; }
         .text-blue { color: #1d9bf0; }
         .text-yellow { color: #f7931a; }
         .text-red { color: #f4212e; }
         .text-muted { color: #8b98a5; }
-        .truncate { max-width: 220px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: inline-block; vertical-align: middle; }
-        .status-badge { font-size: 11px; padding: 3px 8px; border-radius: 4px; font-weight: 500; }
-        .status-badge.warning { background: rgba(247,147,26,0.15); color: #f7931a; }
-        .status-badge.success { background: rgba(0,186,124,0.15); color: #00ba7c; }
-        .status-badge.new { background: rgba(29,155,240,0.15); color: #1d9bf0; }
+        .text-cyan { color: #6cdfe5; }
+        .truncate { max-width: 200px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: inline-block; vertical-align: middle; }
+
+        /* Status badges */
+        .badge { font-size: 10px; padding: 2px 7px; border-radius: 4px; font-weight: 600; }
+        .badge-green { background: rgba(0,186,124,0.15); color: #00ba7c; }
+        .badge-yellow { background: rgba(247,147,26,0.15); color: #f7931a; }
+        .badge-red { background: rgba(244,33,46,0.15); color: #f4212e; }
+        .badge-blue { background: rgba(29,155,240,0.15); color: #1d9bf0; }
+        .badge-muted { background: rgba(139,152,165,0.1); color: #8b98a5; }
+
+        /* Setup progress bar */
+        .setup-bar { display: flex; gap: 4px; align-items: center; }
+        .setup-step { flex: 1; height: 6px; border-radius: 3px; background: #273340; }
+        .setup-step.done { background: #00ba7c; }
+        .setup-step.partial { background: #f7931a; }
+        .setup-label { font-size: 10px; color: #8b98a5; margin-left: 6px; white-space: nowrap; }
 
         /* Buttons */
-        .btn { padding: 7px 14px; border-radius: 6px; border: none; cursor: pointer; font-size: 12px; font-weight: 500; transition: all 0.2s; }
+        .btn { padding: 6px 12px; border-radius: 5px; border: none; cursor: pointer; font-size: 11px; font-weight: 500; transition: all 0.15s; }
         .btn-primary { background: #1d9bf0; color: #fff; }
         .btn-primary:hover { background: #1a8cd8; }
         .btn-secondary { background: #273340; color: #e7e9ea; border: 1px solid #3d5466; }
         .btn-secondary:hover { border-color: #1d9bf0; }
         .btn-success { background: #00ba7c; color: #fff; }
         .btn-success:hover { background: #00a66d; }
-        .btn-sm { padding: 4px 10px; font-size: 11px; }
-        .btn-group { display: flex; gap: 6px; }
+        .btn-danger { background: #f4212e; color: #fff; }
+        .btn-danger:hover { background: #d91c27; }
+        .btn-sm { padding: 4px 8px; font-size: 10px; }
+        .btn-group { display: flex; gap: 5px; }
 
-        /* Loading/Empty */
-        .loading { display: flex; justify-content: center; align-items: center; padding: 40px; color: #8b98a5; font-size: 13px; }
-        .spinner { width: 20px; height: 20px; border: 2px solid #2f3942; border-top-color: #1d9bf0; border-radius: 50%; animation: spin 1s linear infinite; margin-right: 10px; }
+        /* Domain tags */
+        .domain-tag { display: inline-block; padding: 2px 8px; background: #273340; border-radius: 4px; font-size: 11px; margin: 2px 2px; color: #6cdfe5; }
+        .domain-tag .remove { color: #8b98a5; cursor: pointer; margin-left: 4px; font-size: 12px; }
+        .domain-tag .remove:hover { color: #f4212e; }
+
+        /* POI brand tags */
+        .poi-tag { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; background: #273340; border-radius: 4px; font-size: 11px; margin: 2px; }
+        .poi-tag .brand-name { color: #e7e9ea; font-weight: 500; }
+        .poi-tag .poi-count { color: #8b98a5; }
+
+        /* Loading / Empty */
+        .loading { display: flex; justify-content: center; align-items: center; padding: 30px; color: #8b98a5; font-size: 12px; gap: 8px; }
+        .spinner { width: 16px; height: 16px; border: 2px solid #2f3942; border-top-color: #1d9bf0; border-radius: 50%; animation: spin 0.8s linear infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
-        .empty { text-align: center; padding: 40px; color: #8b98a5; font-size: 13px; }
+        .empty { text-align: center; padding: 30px; color: #8b98a5; font-size: 12px; }
 
         /* Modal */
-        .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); z-index: 1000; justify-content: center; align-items: center; }
-        .modal-overlay.active { display: flex; }
-        .modal { background: #1e2732; border-radius: 12px; border: 1px solid #3d5466; width: 520px; max-width: 90vw; max-height: 80vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
-        .modal-header { padding: 18px 20px; border-bottom: 1px solid #2f3942; display: flex; justify-content: space-between; align-items: center; }
-        .modal-title { font-size: 16px; font-weight: 600; }
-        .modal-close { background: none; border: none; color: #8b98a5; font-size: 20px; cursor: pointer; padding: 4px; }
+        .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); z-index: 1000; justify-content: center; align-items: center; }
+        .modal-overlay.active { display: flex; animation: fadeIn 0.15s ease; }
+        .modal { background: #1e2732; border-radius: 12px; border: 1px solid #3d5466; width: 560px; max-width: 90vw; max-height: 80vh; overflow-y: auto; animation: slideUp 0.2s ease; box-shadow: 0 16px 48px rgba(0,0,0,0.4); }
+        @keyframes slideUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+        .modal-header { padding: 16px 18px; border-bottom: 1px solid #2f3942; display: flex; justify-content: space-between; align-items: center; }
+        .modal-title { font-size: 15px; font-weight: 600; }
+        .modal-close { background: none; border: none; color: #8b98a5; font-size: 18px; cursor: pointer; }
         .modal-close:hover { color: #e7e9ea; }
-        .modal-body { padding: 20px; }
-        .modal-footer { padding: 14px 20px; border-top: 1px solid #2f3942; display: flex; justify-content: flex-end; gap: 8px; }
-        .form-group { margin-bottom: 16px; }
-        .form-label { display: block; font-size: 12px; color: #8b98a5; margin-bottom: 6px; font-weight: 500; }
-        .form-value { font-size: 14px; color: #e7e9ea; padding: 8px 0; }
-        .form-input { width: 100%; padding: 9px 12px; background: #273340; border: 1px solid #3d5466; border-radius: 6px; color: #e7e9ea; font-size: 13px; }
-        .form-input:focus { outline: none; border-color: #1d9bf0; }
+        .modal-body { padding: 16px 18px; }
+        .modal-footer { padding: 12px 18px; border-top: 1px solid #2f3942; display: flex; justify-content: flex-end; gap: 8px; }
+        .form-group { margin-bottom: 14px; }
+        .form-label { display: block; font-size: 11px; color: #8b98a5; margin-bottom: 4px; font-weight: 500; }
+        .form-input { width: 100%; padding: 8px 10px; background: #273340; border: 1px solid #3d5466; border-radius: 5px; color: #e7e9ea; font-size: 12px; transition: border-color 0.15s, box-shadow 0.15s; }
+        .form-input:focus { outline: none; border-color: #1d9bf0; box-shadow: 0 0 0 2px rgba(29,155,240,0.15); }
+        .form-input::placeholder { color: #536471; }
+        select.form-input { appearance: auto; }
 
         /* Autocomplete */
         .autocomplete-wrap { position: relative; }
-        .autocomplete-results { position: absolute; top: 100%; left: 0; right: 0; background: #273340; border: 1px solid #3d5466; border-top: none; border-radius: 0 0 6px 6px; max-height: 320px; overflow-y: auto; z-index: 10; display: none; }
+        .autocomplete-results { position: absolute; top: 100%; left: 0; right: 0; background: #273340; border: 1px solid #3d5466; border-top: none; border-radius: 0 0 6px 6px; max-height: 250px; overflow-y: auto; z-index: 10; display: none; }
         .autocomplete-results.show { display: block; }
-        .autocomplete-item { padding: 8px 12px; cursor: pointer; font-size: 13px; border-bottom: 1px solid #2f3942; }
-        .autocomplete-item:hover { background: #1d3a4d; }
-        .autocomplete-item:last-child { border-bottom: none; }
-        .autocomplete-item .sub { font-size: 11px; color: #8b98a5; }
+        .ac-item { padding: 7px 10px; cursor: pointer; font-size: 12px; border-bottom: 1px solid #2f3942; }
+        .ac-item:hover { background: #1d3a4d; }
+        .ac-item .sub { font-size: 10px; color: #8b98a5; }
 
         /* Toast */
-        .toast { position: fixed; bottom: 24px; right: 24px; padding: 12px 20px; border-radius: 8px; font-size: 13px; font-weight: 500; z-index: 2000; transform: translateY(80px); opacity: 0; transition: all 0.3s ease; }
+        .toast { position: fixed; bottom: 20px; right: 20px; padding: 10px 18px; border-radius: 8px; font-size: 12px; font-weight: 500; z-index: 2000; transform: translateY(80px); opacity: 0; transition: all 0.3s cubic-bezier(0.4,0,0.2,1); box-shadow: 0 4px 16px rgba(0,0,0,0.3); }
         .toast.show { transform: translateY(0); opacity: 1; }
         .toast.success { background: #00ba7c; color: #fff; }
         .toast.error { background: #f4212e; color: #fff; }
+        .toast.info { background: #1d9bf0; color: #fff; }
 
-        /* POI Search */
-        .poi-search-bar { display: flex; gap: 8px; margin-bottom: 16px; }
-        .poi-search-bar input { flex: 1; }
-        .poi-results { margin-top: 16px; }
+        /* Config grid */
+        .config-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .config-item { padding: 8px 0; }
+        .config-item .label { font-size: 10px; color: #8b98a5; text-transform: uppercase; margin-bottom: 2px; }
+        .config-item .value { font-size: 13px; }
+
+        /* Campaign setup status grid */
+        .campaign-grid { display: grid; grid-template-columns: 1fr; gap: 8px; }
+        .campaign-card { background: #16202a; border-radius: 8px; padding: 12px 14px; border: 1px solid #2f3942; }
+        .campaign-card:hover { border-color: #3d5466; }
+        .campaign-name { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+        .campaign-meta { font-size: 11px; color: #8b98a5; display: flex; gap: 12px; margin-bottom: 8px; }
+
+        /* File upload area */
+        .upload-area { border: 2px dashed #3d5466; border-radius: 8px; padding: 24px; text-align: center; cursor: pointer; transition: border-color 0.2s, background 0.2s; }
+        .upload-area:hover { border-color: #1d9bf0; background: rgba(29,155,240,0.03); }
+        .upload-area.dragover { border-color: #1d9bf0; background: rgba(29,155,240,0.08); }
+        .upload-area input { display: none; }
+
+        /* Loading skeleton */
+        .skeleton { background: linear-gradient(90deg, #1e2732 25%, #273340 50%, #1e2732 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite; border-radius: 4px; }
+        @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+        .skel-line { height: 12px; margin-bottom: 8px; }
+        .skel-line:last-child { width: 60%; }
+
+        /* Responsive: narrow screens */
+        @media (max-width: 900px) {
+            .sidebar { width: 320px; min-width: 320px; }
+        }
+        @media (max-width: 700px) {
+            .sidebar { width: 280px; min-width: 280px; }
+            .summary-row { flex-wrap: wrap; }
+            .summary-card { min-width: calc(50% - 6px); }
+        }
     </style>
 </head>
 <body>
@@ -135,216 +241,233 @@
         <!-- Top Bar -->
         <div class="top-bar">
             <div class="top-bar-left">
+                <button class="btn btn-secondary btn-sm" onclick="toggleSidebar()" title="Toggle sidebar (⌘\)" style="font-size:14px;padding:4px 8px;line-height:1;">☰</button>
                 <a href="/" class="back-link">← Optimizer</a>
-                <img src="/quorum-logo.png" alt="Quorum" style="max-height:28px;margin-right:12px;">
-                <div class="top-bar-title"><span>Config</span> Admin</div>
+                <a href="/"><img src="/quorum-logo.png" alt="Quorum" style="max-height:26px;"></a>
+                <div class="top-bar-title"><span>Advertiser</span> Hub</div>
             </div>
             <div class="top-bar-right">
-                <span class="last-update" id="lastUpdate"></span>
-                <button class="refresh-btn" onclick="loadScorecard(); loadActivePanel();">↻ Refresh</button>
+                <div class="user-info" id="userInfo"></div>
+                <button class="btn btn-secondary" onclick="location.href='/'" style="font-size:11px">Dashboard</button>
             </div>
         </div>
 
-        <!-- Scorecard -->
-        <div class="scorecard" id="scorecard">
-            <div class="score-card">
-                <div class="score-label">Store Visit Attribution</div>
-                <div class="score-value green" id="scStoreVisit">—</div>
-                <div class="score-sub" id="scStoreVisitSub"></div>
-                <div class="score-bar"><div class="score-bar-fill green" id="scStoreVisitBar" style="width:0%"></div></div>
-            </div>
-            <div class="score-card">
-                <div class="score-label">Web Visit Attribution</div>
-                <div class="score-value blue" id="scWebVisit">—</div>
-                <div class="score-sub" id="scWebVisitSub"></div>
-                <div class="score-bar"><div class="score-bar-fill blue" id="scWebVisitBar" style="width:0%"></div></div>
-            </div>
-            <div class="score-card">
-                <div class="score-label">Impression Tracking</div>
-                <div class="score-value yellow" id="scImpression">—</div>
-                <div class="score-sub" id="scImpressionSub"></div>
-                <div class="score-bar"><div class="score-bar-fill yellow" id="scImpressionBar" style="width:0%"></div></div>
-            </div>
-            <div class="score-card">
-                <div class="score-label">Active Configs</div>
-                <div class="score-value" id="scActive">—</div>
-                <div class="score-sub" id="scActiveSub"></div>
-            </div>
-            <div class="score-card">
-                <div class="score-label">Unmapped Impressions</div>
-                <div class="score-value yellow" id="scUnmapped">—</div>
-                <div class="score-sub">campaigns needing attention</div>
-            </div>
-        </div>
-
-        <!-- Tabs -->
-        <div class="tab-bar">
-            <button class="tab active" data-panel="unmapped" onclick="switchTab(this)">Unmapped Activity <span class="badge" id="unmappedBadge" style="display:none"></span></button>
-            <button class="tab" data-panel="poi" onclick="switchTab(this)">POI Assignment</button>
-            <button class="tab" data-panel="campaigns" onclick="switchTab(this)">Campaigns</button>
-            <button class="tab" data-panel="config" onclick="switchTab(this)">Advertiser Config</button>
-        </div>
-
-        <!-- Content Panels -->
-        <div class="content">
-            <!-- Panel 1: Unmapped Activity -->
-            <div class="panel active" id="panel-unmapped">
-                <!-- Unmapped Ad Impressions -->
-                <div class="table-section" id="unmappedImpressions">
-                    <div class="table-header">
-                        Unmapped Ad Impressions (30-day)
-                        <span class="count" id="unmappedImprCount"></span>
-                    </div>
-                    <div class="table-filters">
-                        <select class="filter-select" id="imprAgencyFilter" onchange="loadUnmappedImpressions()">
+        <div class="main">
+            <!-- Left Sidebar: Advertiser List -->
+            <div class="sidebar">
+                <div class="sidebar-header">
+                    <h3>Advertisers <span id="advCount" class="text-muted" style="font-weight:normal;font-size:11px"></span></h3>
+                    <div class="sidebar-filters">
+                        <select class="agency-select" id="agencyFilter" onchange="loadAdvertiserList()">
                             <option value="">All Agencies</option>
                         </select>
-                        <input type="number" class="filter-input" id="imprMinFilter" placeholder="Min impressions" value="100" style="width:130px" onchange="loadUnmappedImpressions()">
                     </div>
-                    <div id="unmappedImprBody">
-                        <div class="loading"><div class="spinner"></div> Loading unmapped impressions...</div>
+                    <div class="search-wrap" id="searchWrap">
+                        <span class="search-icon">⌕</span>
+                        <input type="text" class="sidebar-search" id="advSearch" placeholder="Search advertisers..." oninput="handleSearchInput()">
+                        <button class="search-clear" onclick="clearSearch()" title="Clear">&times;</button>
+                        <span class="search-kbd">⌘K</span>
                     </div>
                 </div>
-
-                <!-- Unmapped Web Pixels -->
-                <div class="table-section" id="unmappedPixels">
-                    <div class="table-header">
-                        Unmapped Web Pixels (7-day)
-                        <span class="count" id="unmappedPixelCount"></span>
-                    </div>
-                    <div class="table-filters">
-                        <select class="filter-select" id="pixelAgencyFilter" onchange="loadUnmappedWebPixels()">
-                            <option value="">Select agency...</option>
-                            <option value="1202">LotLinx (1202)</option>
-                            <option value="1480" selected>Paramount / ViacomCBS (1480)</option>
-                            <option value="1978">LeadVenture (1978)</option>
-                            <option value="1565">NPRP Media (1565)</option>
-                            <option value="1448">Quan Media Group (1448)</option>
-                            <option value="2744">Parallel Path (2744)</option>
-                            <option value="1950">ByRider (1950)</option>
-                            <option value="2624">Pulse Signal (2624)</option>
-                            <option value="2234">Magnite (2234)</option>
-                        </select>
-                    </div>
-                    <div id="unmappedPixelBody">
-                        <div class="loading"><div class="spinner"></div> Loading unmapped web pixels...</div>
-                    </div>
+                <div class="sidebar-list" id="advList">
+                    <div class="loading"><div class="spinner"></div> Loading...</div>
+                </div>
+                <div class="sidebar-footer">
+                    <button class="btn btn-primary" onclick="openCreateAdvertiser()" style="flex:1">+ New Advertiser</button>
+                    <button class="btn btn-secondary" onclick="openDiscovery()" title="Search impression logs to find unmapped advertisers">🔍 Discovery</button>
                 </div>
             </div>
 
-            <!-- Panel 2: POI Assignment -->
-            <div class="panel" id="panel-poi">
-                <div class="table-section">
-                    <div class="table-header">POI Brand Search</div>
-                    <div style="padding: 18px;">
-                        <div class="poi-search-bar">
-                            <input type="text" class="form-input" id="poiBrandSearch" placeholder="Search brand name (e.g. Starbucks, Target, Dunkin)..." onkeydown="if(event.key==='Enter') searchPOI()">
-                            <input type="text" class="form-input" id="poiDmaSearch" placeholder="DMA (optional)" style="max-width:200px" onkeydown="if(event.key==='Enter') searchPOI()">
-                            <button class="btn btn-primary" onclick="searchPOI()">Search</button>
-                        </div>
-                        <div id="poiResults" class="poi-results">
-                            <div class="empty">Search for a brand to find store locations for assignment.</div>
-                        </div>
-                    </div>
+            <!-- Right Content: Advertiser Detail -->
+            <div class="content" id="contentArea">
+                <div class="content-empty" id="emptyState">
+                    <div class="empty-icon">⚡</div>
+                    <div>Select an advertiser to view details</div>
+                    <div style="font-size:12px;color:#536471;">Or create a new one from the sidebar</div>
                 </div>
-            </div>
-
-            <!-- Panel 3: Campaigns -->
-            <div class="panel" id="panel-campaigns">
-                <div class="table-section">
-                    <div class="table-header">
-                        Campaign Mappings
-                        <span class="count" id="campaignCount"></span>
-                    </div>
-                    <div class="table-filters">
-                        <select class="filter-select" id="campAgencyFilter" onchange="loadCampaignMappings()">
-                            <option value="">All Agencies</option>
-                        </select>
-                        <label style="font-size:12px; color:#8b98a5; display:flex; align-items:center; gap:4px;">
-                            <input type="checkbox" id="campUnmappedOnly" onchange="loadCampaignMappings()"> Unmapped only
-                        </label>
-                    </div>
-                    <div id="campaignBody">
-                        <div class="loading"><div class="spinner"></div> Loading campaign mappings...</div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Panel 4: Advertiser Config -->
-            <div class="panel" id="panel-config">
-                <div class="table-section">
-                    <div class="table-header">Advertiser Configuration Lookup</div>
-                    <div style="padding: 18px;">
-                        <div style="display:flex; gap:8px; margin-bottom:10px;">
-                            <div class="autocomplete-wrap" style="flex:1;">
-                                <input type="text" class="form-input" id="cfgAdvertiserSearch" placeholder="Search advertiser by name..." oninput="searchAdvertisers('cfg')" onkeydown="if(event.key==='Enter') loadAdvertiserConfig()">
-                                <div class="autocomplete-results" id="cfgAutocomplete"></div>
-                            </div>
-                            <input type="hidden" id="cfgAdvertiserId">
-                            <input type="hidden" id="cfgAgencyId">
-                            <input type="number" class="form-input" id="cfgAgencyFilter" placeholder="Agency ID" style="max-width:130px" value="1480">
-                            <button class="btn btn-primary" onclick="loadAdvertiserConfig()">Search</button>
+                <div id="detailView" style="display:none; flex-direction:column;">
+                    <div class="content-header">
+                        <div>
+                            <h2 id="detailName">—</h2>
+                            <span class="text-muted" style="font-size:11px" id="detailMeta"></span>
                         </div>
-                        <div style="display:flex; gap:12px; margin-bottom:16px; align-items:center;">
-                            <label style="font-size:12px; color:#8b98a5; display:flex; align-items:center; gap:4px;">
-                                <input type="checkbox" id="cfgReportingReady" checked> Reporting-ready only (has web pixel or POI)
-                            </label>
-                        </div>
-                        <div id="cfgSelectedAdvertiser" style="margin-bottom:12px; font-size:13px; color:#00ba7c; display:none;"></div>
-                        <div id="cfgResults">
-                            <div class="empty">Search for an advertiser to view and edit their configuration.</div>
+                        <div class="btn-group">
+                            <button class="btn btn-secondary btn-sm" onclick="openEditConfig()">Edit Config</button>
+                            <button class="btn btn-secondary btn-sm" onclick="refreshDetail()">↻</button>
                         </div>
                     </div>
-                </div>
 
-                <!-- Config detail/editor (hidden until advertiser selected) -->
-                <div class="table-section" id="cfgDetailSection" style="display:none;">
-                    <div class="table-header">
-                        <span id="cfgDetailTitle">Advertiser Configuration</span>
-                        <button class="btn btn-sm btn-secondary" onclick="toggleConfigEdit()">Edit</button>
+                    <div class="content-tabs">
+                        <button class="ctab active" data-tab="overview" onclick="switchContentTab(this)">Overview</button>
+                        <button class="ctab" data-tab="campaigns" onclick="switchContentTab(this)">Campaigns <span class="count" id="tabCampaignCount">0</span></button>
+                        <button class="ctab" data-tab="pois" onclick="switchContentTab(this)">POI Locations <span class="count" id="tabPoiCount">0</span></button>
+                        <button class="ctab" data-tab="discovery" onclick="switchContentTab(this)">Discovery</button>
                     </div>
-                    <div style="padding: 18px;">
-                        <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 16px;" id="cfgDetailGrid"></div>
 
-                        <!-- Edit form (hidden until Edit clicked) -->
-                        <div id="cfgEditForm" style="display:none; margin-top:20px; padding-top:16px; border-top:1px solid #2f3942;">
-                            <div style="font-weight:600; margin-bottom:12px;">Edit Configuration</div>
-                            <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 12px;">
-                                <div class="form-group">
-                                    <div class="form-label">Attribution Window (days)</div>
-                                    <input type="number" class="form-input" id="cfgEditAttrWindow" min="1" max="90">
-                                </div>
-                                <div class="form-group">
-                                    <div class="form-label">Match Strategy</div>
-                                    <select class="form-input" id="cfgEditMatchStrategy">
-                                        <option value="HOUSEHOLD">HOUSEHOLD</option>
-                                        <option value="DEVICE">DEVICE</option>
-                                        <option value="IP_ONLY">IP_ONLY</option>
-                                    </select>
-                                </div>
-                                <div class="form-group">
-                                    <div class="form-label">Impression Join Strategy <span style="font-weight:normal; color:#8b98a5; font-size:11px;" title="How this advertiser's impressions are matched to campaign mappings in AD_IMPRESSION_LOG_V2">(?)</span></div>
-                                    <select class="form-input" id="cfgEditImprStrategy">
-                                        <option value="PCM_4KEY">PCM_4KEY — Match on Platform + DSP Adv + IO + Line Item</option>
-                                        <option value="ADM_PREFIX">ADM_PREFIX — Match via Advertiser Domain Mapping prefix</option>
-                                        <option value="DIRECT_AG">DIRECT_AG — Match directly by Agency ID</option>
-                                    </select>
-                                </div>
-                                <div class="form-group">
-                                    <div class="form-label">Config Status</div>
-                                    <select class="form-input" id="cfgEditStatus">
-                                        <option value="ACTIVE">ACTIVE</option>
-                                        <option value="INACTIVE">INACTIVE</option>
-                                        <option value="PENDING">PENDING</option>
-                                    </select>
+                    <!-- Overview Tab -->
+                    <div class="cpanel active" id="tab-overview">
+                        <!-- Setup Progress -->
+                        <div class="card" style="margin-bottom:14px">
+                            <div class="card-header">Setup Progress</div>
+                            <div class="card-body">
+                                <div class="setup-bar" id="setupBar"></div>
+                                <div id="setupSteps" style="margin-top:8px;font-size:11px;color:#8b98a5;"></div>
+                            </div>
+                        </div>
+
+                        <!-- Summary Cards -->
+                        <div class="summary-row" id="summaryRow">
+                            <div class="summary-card">
+                                <div class="summary-label">Campaigns</div>
+                                <div class="summary-value text-blue" id="sumCampaigns">0</div>
+                                <div class="summary-sub" id="sumImpressions"></div>
+                            </div>
+                            <div class="summary-card">
+                                <div class="summary-label">Web Pixel URLs</div>
+                                <div class="summary-value text-cyan" id="sumDomains">0</div>
+                                <div class="summary-sub" id="sumDomainsSub"></div>
+                            </div>
+                            <div class="summary-card">
+                                <div class="summary-label">POI Locations</div>
+                                <div class="summary-value text-green" id="sumPois">0</div>
+                                <div class="summary-sub" id="sumPoisSub"></div>
+                            </div>
+                            <div class="summary-card">
+                                <div class="summary-label">Attribution Window</div>
+                                <div class="summary-value" id="sumWindow">30d</div>
+                                <div class="summary-sub" id="sumStrategy"></div>
+                            </div>
+                        </div>
+
+                        <!-- Domains Section -->
+                        <div class="card">
+                            <div class="card-header">
+                                Web Pixel Domains
+                                <button class="btn btn-sm btn-primary" onclick="openAddDomain()">+ Add Domain</button>
+                            </div>
+                            <div class="card-body" id="domainsList">
+                                <div class="empty">No domains configured</div>
+                            </div>
+                        </div>
+
+                        <!-- Config Details -->
+                        <div class="card">
+                            <div class="card-header">Configuration</div>
+                            <div class="card-body">
+                                <div class="config-grid" id="configGrid"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Campaigns Tab -->
+                    <div class="cpanel" id="tab-campaigns">
+                        <div class="card">
+                            <div class="card-header">
+                                Campaigns & Line Items
+                                <span class="text-muted" style="font-size:11px" id="campaignInfo"></span>
+                            </div>
+                            <div class="card-body-compact" id="campaignsList">
+                                <div class="loading"><div class="spinner"></div> Loading...</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- POI Tab -->
+                    <div class="cpanel" id="tab-pois">
+                        <!-- POI Summary -->
+                        <div class="summary-row" id="poiSummaryRow">
+                            <div class="summary-card">
+                                <div class="summary-label">Total Segments</div>
+                                <div class="summary-value text-green" id="poiTotalSegs">0</div>
+                            </div>
+                            <div class="summary-card">
+                                <div class="summary-label">Brands</div>
+                                <div class="summary-value" id="poiBrandCount">0</div>
+                            </div>
+                            <div class="summary-card">
+                                <div class="summary-label">DMAs</div>
+                                <div class="summary-value" id="poiDmaCount">0</div>
+                            </div>
+                            <div class="summary-card">
+                                <div class="summary-label">Total Locations</div>
+                                <div class="summary-value" id="poiLocCount">0</div>
+                            </div>
+                        </div>
+
+                        <!-- POI Actions -->
+                        <div class="card">
+                            <div class="card-header">
+                                Assigned POIs
+                                <div class="btn-group">
+                                    <button class="btn btn-sm btn-primary" onclick="openPoiSearch()">+ Search & Add</button>
+                                    <button class="btn btn-sm btn-secondary" onclick="openStoreUpload()">Upload Store List</button>
                                 </div>
                             </div>
-                            <div style="margin-top:12px; padding:10px 12px; background:#16202a; border-radius:6px; font-size:11px; color:#8b98a5;">
-                                <strong style="color:#e7e9ea;">Auto-derived from assignments:</strong> Exposure source, attribution flags, and pixel type are set automatically based on campaign mappings, POI segments, and web pixel URLs configured for this advertiser.
+                            <div class="card-body-compact" id="poiList">
+                                <div class="loading"><div class="spinner"></div> Loading...</div>
                             </div>
-                            <div style="margin-top:16px; display:flex; gap:8px; justify-content:flex-end;">
-                                <button class="btn btn-secondary" onclick="toggleConfigEdit()">Cancel</button>
-                                <button class="btn btn-success" onclick="submitUpdateConfig()">Save Changes</button>
+                        </div>
+
+                        <!-- POI Search (hidden until opened) -->
+                        <div class="card" id="poiSearchCard" style="display:none">
+                            <div class="card-header">
+                                Brand Search
+                                <button class="btn btn-sm btn-secondary" onclick="document.getElementById('poiSearchCard').style.display='none'">Close</button>
+                            </div>
+                            <div class="card-body">
+                                <div style="display:flex;gap:6px;margin-bottom:10px;">
+                                    <input type="text" class="form-input" id="poiBrandInput" placeholder="Brand name (e.g. Starbucks, Target...)" onkeydown="if(event.key==='Enter') searchBrands()">
+                                    <input type="text" class="form-input" id="poiDmaInput" placeholder="DMA (optional)" style="max-width:160px" onkeydown="if(event.key==='Enter') searchBrands()">
+                                    <button class="btn btn-primary" onclick="searchBrands()">Search</button>
+                                </div>
+                                <div id="poiSearchResults">
+                                    <div class="empty">Search for a brand to find locations.</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Store List Upload (hidden until opened) -->
+                        <div class="card" id="storeUploadCard" style="display:none">
+                            <div class="card-header">
+                                Upload Store List
+                                <button class="btn btn-sm btn-secondary" onclick="document.getElementById('storeUploadCard').style.display='none'">Close</button>
+                            </div>
+                            <div class="card-body">
+                                <p style="font-size:12px;color:#8b98a5;margin-bottom:12px;">Upload a CSV with store addresses. This will be sent to cs@quorum.inc for processing via PolyPak.</p>
+                                <div class="upload-area" id="uploadArea" onclick="document.getElementById('storeFileInput').click()" ondragover="event.preventDefault();this.classList.add('dragover')" ondragleave="this.classList.remove('dragover')" ondrop="handleFileDrop(event)">
+                                    <input type="file" id="storeFileInput" accept=".csv,.xlsx,.xls,.tsv" onchange="handleFileSelect(this)">
+                                    <div style="font-size:13px;margin-bottom:4px;">Drop CSV here or click to browse</div>
+                                    <div style="font-size:11px;color:#8b98a5;">Accepted: .csv, .xlsx, .xls, .tsv</div>
+                                </div>
+                                <div id="uploadStatus" style="margin-top:10px;display:none;"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Discovery Tab -->
+                    <div class="cpanel" id="tab-discovery">
+                        <div class="card">
+                            <div class="card-header">
+                                Impression Log Search
+                                <span class="text-muted" style="font-size:11px;">Discover new advertisers from ad impressions</span>
+                            </div>
+                            <div class="card-body">
+                                <div style="display:flex;gap:6px;margin-bottom:12px;">
+                                    <select class="form-input" id="discAgency" style="max-width:200px">
+                                        <option value="">Select agency...</option>
+                                    </select>
+                                    <select class="form-input" id="discDays" style="max-width:120px">
+                                        <option value="7">Last 7 days</option>
+                                        <option value="14">Last 14 days</option>
+                                        <option value="30" selected>Last 30 days</option>
+                                        <option value="60">Last 60 days</option>
+                                    </select>
+                                    <input type="number" class="form-input" id="discMinImpr" value="100" placeholder="Min impressions" style="max-width:130px">
+                                    <button class="btn btn-primary" onclick="searchImpressions()">Search</button>
+                                </div>
+                                <div id="discoveryResults">
+                                    <div class="empty">Select an agency and search to discover new advertisers from impression logs.</div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -353,126 +476,136 @@
         </div>
     </div>
 
-    <!-- Modal: Map Campaign -->
-    <div class="modal-overlay" id="modalMapCampaign">
+    <!-- Modal: Create Advertiser -->
+    <div class="modal-overlay" id="modalCreate">
+        <div class="modal">
+            <div class="modal-header">
+                <div class="modal-title">Create New Advertiser</div>
+                <button class="modal-close" onclick="closeModal('modalCreate')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <div class="form-label">Advertiser Name</div>
+                    <input type="text" class="form-input" id="createName" placeholder="e.g. Acme Corporation">
+                </div>
+                <div class="form-group">
+                    <div class="form-label">Agency</div>
+                    <select class="form-input" id="createAgency"></select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('modalCreate')">Cancel</button>
+                <button class="btn btn-success" onclick="submitCreateAdvertiser()">Create Advertiser</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Add Domain -->
+    <div class="modal-overlay" id="modalDomain">
+        <div class="modal">
+            <div class="modal-header">
+                <div class="modal-title">Add Web Pixel Domain</div>
+                <button class="modal-close" onclick="closeModal('modalDomain')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <div class="form-label">Domain URL</div>
+                    <input type="text" class="form-input" id="addDomainUrl" placeholder="e.g. www.example.com">
+                </div>
+                <div class="form-group">
+                    <div class="form-label">Is this a POI/store locator URL?</div>
+                    <select class="form-input" id="addDomainIsPoi">
+                        <option value="false">No — Web pixel tracking</option>
+                        <option value="true">Yes — Store locator page</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('modalDomain')">Cancel</button>
+                <button class="btn btn-success" onclick="submitAddDomain()">Add Domain</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Edit Config -->
+    <div class="modal-overlay" id="modalConfig">
+        <div class="modal">
+            <div class="modal-header">
+                <div class="modal-title">Edit Configuration</div>
+                <button class="modal-close" onclick="closeModal('modalConfig')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                    <div class="form-group">
+                        <div class="form-label">Attribution Window (days)</div>
+                        <input type="number" class="form-input" id="editAttrWindow" min="1" max="90">
+                    </div>
+                    <div class="form-group">
+                        <div class="form-label">Match Strategy</div>
+                        <select class="form-input" id="editMatchStrategy">
+                            <option value="HOUSEHOLD">HOUSEHOLD</option>
+                            <option value="DEVICE">DEVICE</option>
+                            <option value="IP_ONLY">IP_ONLY</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <div class="form-label">Impression Join Strategy</div>
+                        <select class="form-input" id="editImprStrategy">
+                            <option value="PCM_4KEY">PCM_4KEY — 4-Key Match</option>
+                            <option value="ADM_PREFIX">ADM_PREFIX — Domain Mapping</option>
+                            <option value="DIRECT_AG">DIRECT_AG — Agency Match</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <div class="form-label">Config Status</div>
+                        <select class="form-input" id="editStatus">
+                            <option value="ACTIVE">ACTIVE</option>
+                            <option value="INACTIVE">INACTIVE</option>
+                            <option value="PENDING">PENDING</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('modalConfig')">Cancel</button>
+                <button class="btn btn-success" onclick="submitEditConfig()">Save Changes</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Map Campaign (from discovery) -->
+    <div class="modal-overlay" id="modalMap">
         <div class="modal">
             <div class="modal-header">
                 <div class="modal-title">Map Campaign to Advertiser</div>
-                <button class="modal-close" onclick="closeModal('modalMapCampaign')">&times;</button>
+                <button class="modal-close" onclick="closeModal('modalMap')">&times;</button>
             </div>
             <div class="modal-body">
-                <div class="form-group">
-                    <div class="form-label">Agency</div>
-                    <div class="form-value" id="mcAgency"></div>
-                </div>
-                <div class="form-group">
-                    <div class="form-label">Platform / PT Code</div>
-                    <div class="form-value" id="mcPlatform"></div>
-                </div>
                 <div class="form-group">
                     <div class="form-label">DSP Advertiser</div>
-                    <div class="form-value" id="mcDspAdvertiser"></div>
+                    <div style="font-size:13px;padding:6px 0;" id="mapDspName"></div>
                 </div>
                 <div class="form-group">
-                    <div class="form-label">30-day Impressions</div>
-                    <div class="form-value" id="mcImpressions"></div>
+                    <div class="form-label">Platform</div>
+                    <div style="font-size:13px;padding:6px 0;" id="mapPlatform"></div>
+                </div>
+                <div class="form-group">
+                    <div class="form-label">Impressions</div>
+                    <div style="font-size:13px;padding:6px 0;color:#f7931a" id="mapImpressions"></div>
                 </div>
                 <div class="form-group">
                     <div class="form-label">Map to Quorum Advertiser</div>
                     <div class="autocomplete-wrap">
-                        <input type="text" class="form-input" id="mcAdvertiserSearch" placeholder="Search advertiser name..." oninput="searchAdvertisers('mc')">
-                        <div class="autocomplete-results" id="mcAutocomplete"></div>
+                        <input type="text" class="form-input" id="mapAdvSearch" placeholder="Search advertiser..." oninput="searchAdvForMap()">
+                        <div class="autocomplete-results" id="mapAdvResults"></div>
                     </div>
-                    <input type="hidden" id="mcAdvertiserId">
-                    <div id="mcSelectedAdvertiser" style="margin-top:8px; font-size:13px; color:#00ba7c; display:none;"></div>
+                    <input type="hidden" id="mapAdvId">
+                    <div id="mapAdvSelected" style="margin-top:6px;font-size:12px;color:#00ba7c;display:none"></div>
                 </div>
             </div>
             <div class="modal-footer">
-                <button class="btn btn-secondary" onclick="closeModal('modalMapCampaign')">Cancel</button>
-                <button class="btn btn-success" id="mcSubmit" onclick="submitMapCampaign()">Map Campaign</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Modal: Configure Domain -->
-    <div class="modal-overlay" id="modalConfigDomain">
-        <div class="modal">
-            <div class="modal-header">
-                <div class="modal-title">Configure Web Pixel Domain</div>
-                <button class="modal-close" onclick="closeModal('modalConfigDomain')">&times;</button>
-            </div>
-            <div class="modal-body">
-                <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-bottom:16px;">
-                    <div class="form-group">
-                        <div class="form-label">Domain</div>
-                        <div class="form-value" id="cdDomain" style="font-weight:600;font-size:15px"></div>
-                    </div>
-                    <div class="form-group">
-                        <div class="form-label">7-day Events</div>
-                        <div class="form-value" id="cdEvents"></div>
-                    </div>
-                </div>
-
-                <!-- Event preview -->
-                <div id="cdPreview" style="margin-bottom:16px;">
-                    <div class="form-label" style="margin-bottom:6px">Event Activity</div>
-                    <div id="cdPreviewBody" style="background:#0f1419; border:1px solid #2f3942; border-radius:6px; padding:10px; font-size:12px; max-height:180px; overflow-y:auto;">
-                        <div class="loading"><div class="spinner"></div> Loading preview...</div>
-                    </div>
-                </div>
-
-                <div class="form-group">
-                    <div class="form-label">Detected Tag Type</div>
-                    <div class="form-value" id="cdTagType" style="font-size:13px"></div>
-                </div>
-
-                <div class="form-group" style="margin-top:12px; padding-top:12px; border-top:1px solid #2f3942;">
-                    <div class="form-label">Map to Quorum Advertiser</div>
-                    <div class="autocomplete-wrap">
-                        <input type="text" class="form-input" id="cdAdvertiserSearch" placeholder="Search advertiser name..." oninput="searchAdvertisers('cd')">
-                        <div class="autocomplete-results" id="cdAutocomplete"></div>
-                    </div>
-                    <input type="hidden" id="cdAdvertiserId">
-                    <div id="cdSelectedAdvertiser" style="margin-top:8px; font-size:13px; color:#00ba7c; display:none;"></div>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button class="btn btn-secondary" onclick="closeModal('modalConfigDomain')">Cancel</button>
-                <button class="btn btn-success" id="cdSubmit" onclick="submitConfigDomain()">Configure Domain</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Modal: Assign POI -->
-    <div class="modal-overlay" id="modalAssignPoi">
-        <div class="modal">
-            <div class="modal-header">
-                <div class="modal-title">Assign POI Segments</div>
-                <button class="modal-close" onclick="closeModal('modalAssignPoi')">&times;</button>
-            </div>
-            <div class="modal-body">
-                <div class="form-group">
-                    <div class="form-label">Brand</div>
-                    <div class="form-value" id="poiBrand"></div>
-                </div>
-                <div class="form-group">
-                    <div class="form-label">Selected Locations</div>
-                    <div class="form-value" id="poiLocationCount"></div>
-                </div>
-                <div class="form-group">
-                    <div class="form-label">Assign to Advertiser</div>
-                    <div class="autocomplete-wrap">
-                        <input type="text" class="form-input" id="poiAdvertiserSearch" placeholder="Search advertiser name..." oninput="searchAdvertisers('poi')">
-                        <div class="autocomplete-results" id="poiAutocomplete"></div>
-                    </div>
-                    <input type="hidden" id="poiAdvertiserId">
-                    <input type="hidden" id="poiAgencyId">
-                    <div id="poiSelectedAdvertiser" style="margin-top:8px; font-size:13px; color:#00ba7c; display:none;"></div>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button class="btn btn-secondary" onclick="closeModal('modalAssignPoi')">Cancel</button>
-                <button class="btn btn-success" onclick="submitAssignPoi()">Assign Segments</button>
+                <button class="btn btn-secondary" onclick="closeModal('modalMap')">Cancel</button>
+                <button class="btn btn-success" onclick="submitMapCampaign()">Map Campaign</button>
             </div>
         </div>
     </div>
@@ -481,864 +614,922 @@
     <div class="toast" id="toast"></div>
 
     <script>
-        // =====================================================
-        // CONFIG
-        // =====================================================
-        const API = window.location.origin;
-        const fmt = n => n != null ? Number(n).toLocaleString() : '0';
+    // =========================================================================
+    // STATE
+    // =========================================================================
+    const API = window.location.origin;
+    const fmt = n => n != null ? Number(n).toLocaleString() : '0';
+    const esc = s => s == null ? '' : String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 
-        // --- Clerk Auth ---
-        let _clerk = null;
-        let _authToken = null;
+    let _clerk = null, _authToken = null, _userRole = 'agency', _userAgencyId = null;
+    let currentAdvId = null, currentAgencyId = null, currentDetail = null;
+    let agencies = [];
+    let _mapData = {};
 
-        async function initAuth() {
-            try {
-                const cfgRes = await fetch(API + '/api/auth/config');
-                const cfg = await cfgRes.json();
-                if (!cfg.auth_enabled) return;
-                // Derive Clerk Frontend API URL from publishable key
-                function getFapiUrl(pk) {
-                    const encoded = pk.replace('pk_test_', '').replace('pk_live_', '');
-                    try { return atob(encoded).replace(/\$$/, ''); } catch(e) { return null; }
-                }
-                const fapiUrl = getFapiUrl(cfg.publishable_key);
-                if (!fapiUrl) { console.warn('[Auth] Invalid publishable key'); return; }
-                // Load Clerk JS SDK from Clerk's own CDN
-                await new Promise((resolve, reject) => {
-                    const s = document.createElement('script');
-                    s.src = `https://${fapiUrl}/npm/@clerk/clerk-js@5/dist/clerk.browser.js`;
-                    s.crossOrigin = 'anonymous';
-                    s.setAttribute('data-clerk-publishable-key', cfg.publishable_key);
-                    s.onload = resolve;
-                    s.onerror = reject;
-                    document.head.appendChild(s);
-                });
-                _clerk = window.Clerk;
-                if (!_clerk) { console.warn('[Auth] Clerk not loaded'); return; }
-                if (typeof _clerk.load === 'function') await _clerk.load();
-                if (!_clerk.user) { window.location.href = '/login'; return; }
-                _authToken = await _clerk.session.getToken();
-                setInterval(async () => {
-                    if (_clerk.session) _authToken = await _clerk.session.getToken();
-                }, 50000);
-                // Check admin role
-                const meRes = await authFetch(API + '/api/auth/me');
-                if (meRes.ok) {
-                    const me = await meRes.json();
-                    if (me.role !== 'admin') {
-                        document.body.innerHTML = '<div style="padding:40px;text-align:center;color:#f4212e;">Admin access required. <a href="/" style="color:#1d9bf0;">Back to dashboard</a></div>';
-                        return;
-                    }
-                }
-            } catch (e) {
-                console.warn('[Auth] Init failed:', e);
+    // =========================================================================
+    // AUTH
+    // =========================================================================
+    async function initAuth() {
+        try {
+            const cfgRes = await fetch(API + '/api/auth/config');
+            const cfg = await cfgRes.json();
+            if (!cfg.auth_enabled) return;
+
+            function getFapiUrl(pk) {
+                const encoded = pk.replace('pk_test_', '').replace('pk_live_', '');
+                try { return atob(encoded).replace(/\$$/, ''); } catch(e) { return null; }
             }
-        }
+            const fapiUrl = getFapiUrl(cfg.publishable_key);
+            if (!fapiUrl) return;
 
-        // Wrap fetch to inject auth token
-        const _origFetch = window.fetch;
-        function authFetch(url, opts = {}) {
-            if (_authToken) {
-                opts.headers = opts.headers || {};
-                if (opts.headers instanceof Headers) {
-                    opts.headers.set('Authorization', 'Bearer ' + _authToken);
-                } else {
-                    opts.headers['Authorization'] = 'Bearer ' + _authToken;
-                }
-            }
-            return _origFetch(url, opts);
-        }
+            await new Promise((resolve, reject) => {
+                const s = document.createElement('script');
+                s.src = `https://${fapiUrl}/npm/@clerk/clerk-js@5/dist/clerk.browser.js`;
+                s.crossOrigin = 'anonymous';
+                s.setAttribute('data-clerk-publishable-key', cfg.publishable_key);
+                s.onload = resolve; s.onerror = reject;
+                document.head.appendChild(s);
+            });
+            _clerk = window.Clerk;
+            if (!_clerk) return;
+            if (typeof _clerk.load === 'function') await _clerk.load();
+            if (!_clerk.user) { window.location.href = '/login'; return; }
+            _authToken = await _clerk.session.getToken();
+            setInterval(async () => { if (_clerk?.session) _authToken = await _clerk.session.getToken(); }, 50000);
 
-        // Override global fetch for API calls
-        const _realFetch = window.fetch;
-        window.fetch = function(url, opts) {
-            const urlStr = typeof url === 'string' ? url : url.toString();
-            if (urlStr.includes('/api/') && _authToken) {
-                opts = opts || {};
-                opts.headers = opts.headers || {};
-                if (typeof opts.headers === 'object' && !(opts.headers instanceof Headers)) {
-                    opts.headers['Authorization'] = 'Bearer ' + _authToken;
-                }
-            }
-            return _realFetch(url, opts);
-        };
+            // Check role
+            const meRes = await authFetch(API + '/api/auth/me');
+            if (meRes.ok) {
+                const me = await meRes.json();
+                _userRole = me.role || 'agency';
+                _userAgencyId = me.agency_id;
+                document.getElementById('userInfo').innerHTML =
+                    `${esc(me.email || '')} <span class="role">${esc(me.role || '')}</span>`;
 
-        // State for modals
-        let mapCampaignData = {};
-        let configDomainData = {};
-        let poiSelectedMd5s = [];
-        let poiBrandName = '';
-        let poiDmaName = '';
-
-        // =====================================================
-        // TABS
-        // =====================================================
-        function switchTab(el) {
-            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-            el.classList.add('active');
-            const panelId = 'panel-' + el.dataset.panel;
-            document.getElementById(panelId).classList.add('active');
-            loadActivePanel();
-        }
-
-        function loadActivePanel() {
-            const active = document.querySelector('.tab.active');
-            if (!active) return;
-            const panel = active.dataset.panel;
-            if (panel === 'unmapped') { loadUnmappedImpressions(); loadUnmappedWebPixels(); }
-            else if (panel === 'poi') { /* POI loads on search */ }
-            else if (panel === 'campaigns') { loadCampaignMappings(); }
-            else if (panel === 'config') { /* Config loads on search */ }
-        }
-
-        // =====================================================
-        // MODAL HELPERS
-        // =====================================================
-        function openModal(id) {
-            document.getElementById(id).classList.add('active');
-        }
-        function closeModal(id) {
-            document.getElementById(id).classList.remove('active');
-        }
-
-        function showToast(msg, type = 'success') {
-            const t = document.getElementById('toast');
-            t.textContent = msg;
-            t.className = 'toast ' + type + ' show';
-            setTimeout(() => t.classList.remove('show'), 4000);
-        }
-
-        // =====================================================
-        // SCORECARD
-        // =====================================================
-        async function loadScorecard() {
-            try {
-                const res = await fetch(`${API}/api/config/scorecard`);
-                const json = await res.json();
-                if (!json.success) return;
-                const d = json.data;
-                const active = d.ACTIVE_CONFIGS || 1;
-
-                const svPct = ((d.STORE_VISIT_CONFIGURED / active) * 100).toFixed(1);
-                const wvPct = ((d.WEB_VISIT_CONFIGURED / active) * 100).toFixed(1);
-                const imPct = ((d.IMPRESSION_CONFIGURED / active) * 100).toFixed(1);
-
-                document.getElementById('scStoreVisit').textContent = fmt(d.STORE_VISIT_CONFIGURED);
-                document.getElementById('scStoreVisitSub').textContent = `${svPct}% of ${fmt(active)} active | ${fmt(d.POI_ASSIGNED || 0)} POI total`;
-                document.getElementById('scStoreVisitBar').style.width = svPct + '%';
-
-                document.getElementById('scWebVisit').textContent = fmt(d.WEB_VISIT_CONFIGURED);
-                document.getElementById('scWebVisitSub').textContent = `${wvPct}% of ${fmt(active)} active`;
-                document.getElementById('scWebVisitBar').style.width = wvPct + '%';
-
-                document.getElementById('scImpression').textContent = fmt(d.IMPRESSION_CONFIGURED);
-                document.getElementById('scImpressionSub').textContent = `${imPct}% of ${fmt(active)} active`;
-                document.getElementById('scImpressionBar').style.width = imPct + '%';
-
-                document.getElementById('scActive').textContent = fmt(d.ACTIVE_CONFIGS);
-                document.getElementById('scActiveSub').textContent = `across ${fmt(d.AGENCY_COUNT)} agencies (w/ campaigns or web pixels)`;
-
-                document.getElementById('scUnmapped').textContent = fmt(d.UNMAPPED_IMPRESSIONS);
-
-                if (d.UNMAPPED_IMPRESSIONS > 0) {
-                    const badge = document.getElementById('unmappedBadge');
-                    badge.textContent = d.UNMAPPED_IMPRESSIONS;
-                    badge.style.display = 'inline';
-                }
-
-                if (d.LAST_CONFIG_UPDATE) {
-                    document.getElementById('lastUpdate').textContent = 'Last update: ' + new Date(d.LAST_CONFIG_UPDATE).toLocaleString();
-                }
-            } catch (e) {
-                console.error('Scorecard error:', e);
-            }
-        }
-
-        // =====================================================
-        // PANEL 1a: UNMAPPED IMPRESSIONS
-        // =====================================================
-        async function loadUnmappedImpressions() {
-            const container = document.getElementById('unmappedImprBody');
-            container.innerHTML = '<div class="loading"><div class="spinner"></div> Loading...</div>';
-
-            try {
-                const agencyId = document.getElementById('imprAgencyFilter').value;
-                const minImpr = document.getElementById('imprMinFilter').value || 100;
-                let url = `${API}/api/config/unmapped-impressions?min_impressions=${minImpr}`;
-                if (agencyId) url += `&agency_id=${agencyId}`;
-
-                const res = await fetch(url);
-                const json = await res.json();
-                if (!json.success) { container.innerHTML = `<div class="empty">Error: ${json.error}</div>`; return; }
-
-                document.getElementById('unmappedImprCount').textContent = `${json.count} campaigns`;
-
-                if (json.count === 0) {
-                    container.innerHTML = '<div class="empty">No unmapped impressions found. All caught up!</div>';
+                if (!['admin', 'account_admin'].includes(_userRole)) {
+                    document.body.innerHTML = '<div style="padding:40px;text-align:center;color:#f4212e;">Access requires admin or account admin role. <a href="/" style="color:#1d9bf0;">Back to dashboard</a></div>';
                     return;
                 }
+            }
+        } catch (e) {
+            console.warn('[Auth] Init failed:', e);
+        }
+    }
 
-                // Collect agencies for filter dropdown
-                const agencies = [...new Set(json.data.map(r => JSON.stringify({ id: r.AGENCY_ID, name: r.AGENCY_NAME })))].map(s => JSON.parse(s));
-                populateAgencyFilter('imprAgencyFilter', agencies);
+    function authFetch(url, opts = {}) {
+        if (_authToken) {
+            opts.headers = opts.headers || {};
+            opts.headers['Authorization'] = 'Bearer ' + _authToken;
+        }
+        return fetch(url, opts);
+    }
 
-                let html = '<table><thead><tr><th>Agency</th><th>Platform</th><th>DSP Advertiser</th><th class="text-right">Impressions</th><th>Active Days</th><th>Status</th><th></th></tr></thead><tbody>';
-                json.data.forEach(r => {
-                    html += `<tr class="clickable" onclick='openMapCampaignModal(${JSON.stringify(r).replace(/'/g, "&#39;")})'>
-                        <td>${esc(r.AGENCY_NAME || r.AGENCY_ID)}</td>
-                        <td>${esc(r.PLATFORM_NAME || '')} (${r.PLATFORM_TYPE_ID || ''})</td>
-                        <td><span class="truncate">${esc(r.DSP_ADVERTISER_NAME || 'Unknown')}</span></td>
-                        <td class="text-right text-yellow">${fmt(r.IMPRESSIONS_30D)}</td>
-                        <td>${r.ACTIVE_DAYS || ''}</td>
-                        <td><span class="status-badge warning">Unmapped</span></td>
-                        <td><button class="btn btn-sm btn-primary">Map</button></td>
-                    </tr>`;
-                });
-                html += '</tbody></table>';
-                container.innerHTML = html;
-            } catch (e) {
-                container.innerHTML = `<div class="empty">Failed to load: ${e.message}</div>`;
+    // Override fetch for API calls
+    const _realFetch = window.fetch;
+    window.fetch = function(url, opts) {
+        const urlStr = typeof url === 'string' ? url : url.toString();
+        if (urlStr.includes('/api/') && _authToken) {
+            opts = opts || {};
+            opts.headers = opts.headers || {};
+            if (typeof opts.headers === 'object' && !(opts.headers instanceof Headers)) {
+                opts.headers['Authorization'] = 'Bearer ' + _authToken;
             }
         }
+        return _realFetch(url, opts);
+    };
 
-        // =====================================================
-        // PANEL 1b: UNMAPPED WEB PIXELS
-        // =====================================================
-        async function loadUnmappedWebPixels() {
-            const container = document.getElementById('unmappedPixelBody');
-            container.innerHTML = '<div class="loading"><div class="spinner"></div> Loading...</div>';
+    // =========================================================================
+    // HELPERS
+    // =========================================================================
+    let _searchTimer = null;
+    function handleSearchInput() {
+        const wrap = document.getElementById('searchWrap');
+        const val = document.getElementById('advSearch').value;
+        wrap.classList.toggle('has-value', val.length > 0);
+        clearTimeout(_searchTimer);
+        _searchTimer = setTimeout(() => loadAdvertiserList(), 300);
+    }
+    function clearSearch() {
+        document.getElementById('advSearch').value = '';
+        document.getElementById('searchWrap').classList.remove('has-value');
+        loadAdvertiserList();
+        document.getElementById('advSearch').focus();
+    }
+    function toggleSidebar() {
+        document.querySelector('.sidebar').classList.toggle('collapsed');
+    }
+    function openModal(id) { document.getElementById(id).classList.add('active'); }
+    function closeModal(id) { document.getElementById(id).classList.remove('active'); }
+    function showToast(msg, type='success') {
+        const t = document.getElementById('toast');
+        t.textContent = msg; t.className = 'toast ' + type + ' show';
+        setTimeout(() => t.classList.remove('show'), 4000);
+    }
 
-            try {
-                const agencyId = document.getElementById('pixelAgencyFilter').value;
-                let url = `${API}/api/config/unmapped-webpixels`;
-                if (agencyId) url += `?agency_id=${agencyId}`;
-
-                const res = await fetch(url);
-                const json = await res.json();
-                if (!json.success) { container.innerHTML = `<div class="empty">Error: ${json.error}</div>`; return; }
-
-                document.getElementById('unmappedPixelCount').textContent = `${json.count} domains`;
-
-                if (json.warning) {
-                    container.innerHTML = `<div class="empty" style="color:#b45309">⚠ ${esc(json.warning)}</div>`;
-                    document.getElementById('unmappedPixelCount').textContent = 'timeout';
-                    return;
-                }
-
-                if (json.count === 0) {
-                    container.innerHTML = '<div class="empty">No unmapped web pixels found.</div>';
-                    return;
-                }
-
-                const agencies = [...new Set(json.data.filter(r => r.AGENCY_ID).map(r => JSON.stringify({ id: r.AGENCY_ID, name: r.AGENCY_NAME || r.AGENCY_ID })))].map(s => JSON.parse(s));
-                populateAgencyFilter('pixelAgencyFilter', agencies);
-
-                const platformColors = { SHOPIFY:'#96bf48', SQUARESPACE:'#222', WIX:'#0C6EFC', TICKETMASTER:'#026CDF', SQUARE:'#006aff', WOOCOMMERCE:'#7f54b3', GTM:'#4285f4', BIGCOMMERCE:'#34313f', SFCC:'#00a1e0', STANDARD:'#3d5466' };
-
-                // Summary stats
-                const platforms = {};
-                let totalPurchases = 0, totalLeads = 0, totalRevenue = 0;
-                json.data.forEach(r => {
-                    const p = r.DETECTED_PLATFORM || 'STANDARD';
-                    platforms[p] = (platforms[p] || 0) + 1;
-                    totalPurchases += (r.PURCHASES_7D || 0);
-                    totalLeads += (r.LEADS_7D || 0);
-                    totalRevenue += (r.REVENUE_7D || 0);
-                });
-                let summaryHtml = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">';
-                Object.entries(platforms).sort((a,b) => b[1]-a[1]).forEach(([p, count]) => {
-                    summaryHtml += `<span style="background:${platformColors[p]||platformColors.STANDARD};color:#fff;padding:3px 8px;border-radius:4px;font-size:11px;font-weight:600">${p} (${count})</span>`;
-                });
-                if (totalPurchases > 0) summaryHtml += `<span style="background:#065f46;color:#fff;padding:3px 8px;border-radius:4px;font-size:11px">Purchases: ${fmt(totalPurchases)}</span>`;
-                if (totalLeads > 0) summaryHtml += `<span style="background:#92400e;color:#fff;padding:3px 8px;border-radius:4px;font-size:11px">Leads: ${fmt(totalLeads)}</span>`;
-                if (totalRevenue > 0) summaryHtml += `<span style="background:#065f46;color:#fff;padding:3px 8px;border-radius:4px;font-size:11px">Revenue: $${fmt(Math.round(totalRevenue))}</span>`;
-                summaryHtml += '</div>';
-
-                let html = summaryHtml + '<table><thead><tr><th>Base Domain</th><th class="text-right">Events</th><th class="text-right">Purchases</th><th class="text-right">Leads</th><th class="text-right">Revenue</th><th>Platform</th><th></th></tr></thead><tbody>';
-                json.data.forEach(r => {
-                    const platform = r.DETECTED_PLATFORM || 'STANDARD';
-                    const pColor = platformColors[platform] || platformColors.STANDARD;
-                    const rev = (r.REVENUE_7D || 0) > 0 ? '$' + fmt(Math.round(r.REVENUE_7D)) : '—';
-                    html += `<tr class="clickable" onclick='openConfigDomainModal(${JSON.stringify(r).replace(/'/g, "&#39;")})'>
-                        <td><span class="truncate">${esc(r.BASE_DOMAIN || '')}</span></td>
-                        <td class="text-right text-blue">${fmt(r.EVENT_COUNT_7D)}</td>
-                        <td class="text-right" style="color:${r.PURCHASES_7D > 0 ? '#059669' : '#8b98a5'}">${r.PURCHASES_7D > 0 ? fmt(r.PURCHASES_7D) : '—'}</td>
-                        <td class="text-right" style="color:${r.LEADS_7D > 0 ? '#d97706' : '#8b98a5'}">${r.LEADS_7D > 0 ? fmt(r.LEADS_7D) : '—'}</td>
-                        <td class="text-right" style="color:${(r.REVENUE_7D||0) > 0 ? '#059669' : '#8b98a5'}">${rev}</td>
-                        <td><span class="status-badge" style="background:${pColor};color:#fff;font-size:10px;padding:2px 6px;border-radius:3px">${platform}</span></td>
-                        <td><button class="btn btn-sm btn-primary">Configure</button></td>
-                    </tr>`;
-                });
-                html += '</tbody></table>';
-                container.innerHTML = html;
-            } catch (e) {
-                container.innerHTML = `<div class="empty">Failed to load: ${e.message}</div>`;
-            }
+    // Keyboard shortcuts
+    document.addEventListener('keydown', e => {
+        // Cmd/Ctrl+K → focus search
+        if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+            e.preventDefault();
+            const sidebar = document.querySelector('.sidebar');
+            if (sidebar.classList.contains('collapsed')) sidebar.classList.remove('collapsed');
+            document.getElementById('advSearch').focus();
+            document.getElementById('advSearch').select();
         }
+        // Cmd/Ctrl+\ → toggle sidebar
+        if ((e.metaKey || e.ctrlKey) && e.key === '\\') {
+            e.preventDefault();
+            toggleSidebar();
+        }
+        // Escape → close modals
+        if (e.key === 'Escape') {
+            document.querySelectorAll('.modal-overlay.active').forEach(m => m.classList.remove('active'));
+        }
+    });
 
-        // =====================================================
-        // PANEL 2: POI SEARCH
-        // =====================================================
-        async function searchPOI() {
-            const brand = document.getElementById('poiBrandSearch').value.trim();
-            const dma = document.getElementById('poiDmaSearch').value.trim();
-            const container = document.getElementById('poiResults');
+    // =========================================================================
+    // AGENCIES LOAD
+    // =========================================================================
+    async function loadAgencies() {
+        try {
+            const res = await fetch(API + '/api/config/agencies');
+            const json = await res.json();
+            if (json.success) {
+                agencies = json.data;
+                const selectors = ['agencyFilter', 'createAgency', 'discAgency'];
+                selectors.forEach(selId => {
+                    const sel = document.getElementById(selId);
+                    if (!sel) return;
+                    const firstOpt = sel.options[0]?.outerHTML || '';
+                    sel.innerHTML = firstOpt;
+                    agencies.forEach(a => {
+                        const opt = document.createElement('option');
+                        opt.value = a.AGENCY_ID;
+                        opt.textContent = `${a.AGENCY_NAME || ''} (${a.AGENCY_ID})`;
+                        sel.appendChild(opt);
+                    });
+                });
+                // If user is agency-locked, set and disable filter
+                if (_userAgencyId && _userRole !== 'admin') {
+                    document.getElementById('agencyFilter').value = _userAgencyId;
+                    document.getElementById('agencyFilter').disabled = true;
+                }
+            }
+        } catch(e) { console.error('Failed to load agencies:', e); }
+    }
 
-            if (!brand && !dma) {
-                container.innerHTML = '<div class="empty">Enter a brand name or DMA to search.</div>';
+    // =========================================================================
+    // ADVERTISER LIST (sidebar)
+    // =========================================================================
+    async function loadAdvertiserList() {
+        const container = document.getElementById('advList');
+        container.innerHTML = Array(6).fill(`<div style="padding:12px 14px;border-bottom:1px solid #1e2732;">
+            <div class="skeleton skel-line" style="width:70%"></div>
+            <div class="skeleton skel-line" style="width:40%;height:10px;"></div>
+            <div class="skeleton skel-line" style="width:90%;height:10px;"></div>
+        </div>`).join('');
+
+        try {
+            const agencyId = document.getElementById('agencyFilter').value || (_userAgencyId || '');
+            const search = document.getElementById('advSearch').value.trim();
+            let url = API + '/api/config/advertiser-hub?limit=200';
+            if (agencyId) url += `&agency_id=${agencyId}`;
+            if (search) url += `&search=${encodeURIComponent(search)}`;
+
+            const res = await fetch(url);
+            const json = await res.json();
+            if (!json.success) { container.innerHTML = `<div class="empty">${esc(json.error)}</div>`; return; }
+
+            document.getElementById('advCount').textContent = `(${json.count})`;
+
+            if (json.count === 0) {
+                container.innerHTML = '<div class="empty">No advertisers found. Create one or adjust filters.</div>';
                 return;
             }
 
-            container.innerHTML = '<div class="loading"><div class="spinner"></div> Searching brand library...</div>';
+            container.innerHTML = json.data.map(r => {
+                const isActive = currentAdvId === r.ADVERTISER_ID;
+                const setupScore = r.SETUP_SCORE || 0;
+                const domains = (r.DOMAINS || '').split(', ').filter(Boolean).slice(0, 2);
+                const domainChips = domains.map(d =>
+                    `<span style="display:inline-block;padding:1px 6px;background:rgba(108,223,229,0.08);border-radius:3px;font-size:10px;color:#6cdfe5;margin-right:3px;">${esc(d)}</span>`
+                ).join('') + (r.DOMAIN_COUNT > 2 ? `<span style="font-size:10px;color:#536471;">+${r.DOMAIN_COUNT - 2}</span>` : '');
 
-            try {
-                let url = `${API}/api/config/poi-brands?`;
-                if (brand) url += `search=${encodeURIComponent(brand)}`;
-                if (dma) url += `${brand ? '&' : ''}dma=${encodeURIComponent(dma)}`;
-
-                const res = await fetch(url);
-                const json = await res.json();
-                if (!json.success) { container.innerHTML = `<div class="empty">Error: ${json.error}</div>`; return; }
-                if (json.count === 0) { container.innerHTML = '<div class="empty">No matching brands found.</div>'; return; }
-
-                let html = `<div class="table-section"><div class="table-header">Results: ${json.count} locations found
-                    <div class="btn-group"><button class="btn btn-sm btn-secondary" onclick="selectAllPOI()">Select All</button>
-                    <button class="btn btn-sm btn-success" onclick="openAssignPoiModal()">Assign Selected</button></div></div>`;
-                html += '<table><thead><tr><th style="width:40px"><input type="checkbox" id="poiSelectAll" onchange="toggleAllPOI(this)"></th><th>Brand</th><th>Category</th><th>DMA</th><th class="text-right">Locations</th><th class="text-right">Zips</th></tr></thead><tbody>';
-                json.data.forEach((r, i) => {
-                    const md5 = r.SEGMENT_MD5 || r.MD5 || r.LOCATION_MD5 || `row_${i}`;
-                    const brandName = r.BRAND || r.BRAND_NAME || '';
-                    const dmaName = r.DMA_NAME || r.DMA || '';
-                    html += `<tr>
-                        <td><input type="checkbox" class="poi-check" value="${esc(md5)}" data-brand="${esc(brandName)}" data-dma="${esc(dmaName)}"></td>
-                        <td>${esc(brandName)}</td>
-                        <td class="text-muted">${esc(r.CATEGORY || '')}</td>
-                        <td>${esc(dmaName)}</td>
-                        <td class="text-right">${fmt(r.UNIQUE_LOCATIONS || r.LOCATION_COUNT || 1)}</td>
-                        <td class="text-right text-muted">${fmt(r.ZIP_CODES || r.ZIP_COUNT || '')}</td>
-                    </tr>`;
-                });
-                html += '</tbody></table></div>';
-                container.innerHTML = html;
-            } catch (e) {
-                container.innerHTML = `<div class="empty">Search failed: ${e.message}</div>`;
-            }
-        }
-
-        function toggleAllPOI(el) {
-            document.querySelectorAll('.poi-check').forEach(cb => cb.checked = el.checked);
-        }
-        function selectAllPOI() {
-            document.querySelectorAll('.poi-check').forEach(cb => cb.checked = true);
-            const sa = document.getElementById('poiSelectAll');
-            if (sa) sa.checked = true;
-        }
-
-        function openAssignPoiModal() {
-            const checked = document.querySelectorAll('.poi-check:checked');
-            if (checked.length === 0) { showToast('Select at least one location to assign.', 'error'); return; }
-
-            poiSelectedMd5s = Array.from(checked).map(cb => cb.value);
-            poiBrandName = checked[0].dataset.brand || '';
-            poiDmaName = checked[0].dataset.dma || '';
-
-            document.getElementById('poiBrand').textContent = poiBrandName || 'Mixed brands';
-            document.getElementById('poiLocationCount').textContent = `${checked.length} segments selected`;
-            document.getElementById('poiAdvertiserSearch').value = '';
-            document.getElementById('poiAdvertiserId').value = '';
-            document.getElementById('poiAgencyId').value = '';
-            document.getElementById('poiSelectedAdvertiser').style.display = 'none';
-            openModal('modalAssignPoi');
-        }
-
-        async function submitAssignPoi() {
-            const advertiserId = document.getElementById('poiAdvertiserId').value;
-            const agencyId = document.getElementById('poiAgencyId').value;
-            if (!advertiserId) { showToast('Select an advertiser first.', 'error'); return; }
-
-            try {
-                const res = await fetch(`${API}/api/config/assign-poi`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        advertiser_id: parseInt(advertiserId),
-                        agency_id: parseInt(agencyId),
-                        segment_md5s: poiSelectedMd5s,
-                        brand_name: poiBrandName,
-                        dma: poiDmaName
-                    })
-                });
-                const json = await res.json();
-                closeModal('modalAssignPoi');
-                if (json.success) {
-                    showToast(`Assigned ${json.inserted} segments. ${json.skipped || 0} already existed.`);
-                    loadScorecard();
-                } else {
-                    showToast('Error: ' + json.error, 'error');
-                }
-            } catch (e) {
-                showToast('Request failed: ' + e.message, 'error');
-            }
-        }
-
-        // =====================================================
-        // PANEL 3: CAMPAIGN MAPPINGS
-        // =====================================================
-        async function loadCampaignMappings() {
-            const container = document.getElementById('campaignBody');
-            container.innerHTML = '<div class="loading"><div class="spinner"></div> Loading...</div>';
-
-            try {
-                const agencyId = document.getElementById('campAgencyFilter').value;
-                const unmappedOnly = document.getElementById('campUnmappedOnly').checked;
-                let url = `${API}/api/config/campaign-mappings?unmapped_only=${unmappedOnly}`;
-                if (agencyId) url += `&agency_id=${agencyId}`;
-
-                const res = await fetch(url);
-                const json = await res.json();
-                if (!json.success) { container.innerHTML = `<div class="empty">Error: ${json.error}</div>`; return; }
-
-                document.getElementById('campaignCount').textContent = `${json.count} mappings`;
-
-                if (json.count === 0) {
-                    container.innerHTML = '<div class="empty">No campaign mappings found.</div>';
-                    return;
-                }
-
-                let html = '<table><thead><tr><th>Campaign / Line Item</th><th>Platform</th><th>Quorum Advertiser</th><th class="text-right">Impressions (14d)</th><th class="text-right">Reach (14d)</th><th>Last Seen</th><th>Status</th></tr></thead><tbody>';
-                json.data.forEach(r => {
-                    const mapped = r.QUORUM_ADVERTISER_ID != null;
-                    const campaignName = r.CAMPAIGN_NAME_MANUAL || r.INSERTION_ORDER_NAME_FROM_DSP || r.LINE_ITEM_NAME_FROM_DSP || r.ADVERTISER_NAME_FROM_DSP || '—';
-                    const platformName = r.PLATFORM_NAME || r.DATA_SOURCE || '—';
-                    const quorumName = mapped ? (r.QUORUM_ADVERTISER_NAME || `ID ${r.QUORUM_ADVERTISER_ID}`) : '—';
-                    const impressions = r.IMPRESSIONS_14DAY_ROLLING || r.IMPRESSION_COUNT || 0;
-                    html += `<tr>
-                        <td><span class="truncate" title="${esc(campaignName)}">${esc(campaignName)}</span></td>
-                        <td>${esc(platformName)}</td>
-                        <td>${mapped ? `<span class="text-green">${esc(quorumName)}</span>` : '<span class="text-muted">—</span>'}</td>
-                        <td class="text-right">${fmt(impressions)}</td>
-                        <td class="text-right text-muted">${fmt(r.REACH_14DAY_ROLLING || 0)}</td>
-                        <td class="text-muted">${r.LAST_IMPRESSION_TIMESTAMP ? new Date(r.LAST_IMPRESSION_TIMESTAMP).toLocaleDateString() : '—'}</td>
-                        <td>${mapped ? '<span class="status-badge success">Mapped</span>' : '<span class="status-badge warning">Unmapped</span>'}</td>
-                    </tr>`;
-                });
-                html += '</tbody></table>';
-                container.innerHTML = html;
-            } catch (e) {
-                container.innerHTML = `<div class="empty">Failed to load: ${e.message}</div>`;
-            }
-        }
-
-        // =====================================================
-        // MAP CAMPAIGN MODAL
-        // =====================================================
-        function openMapCampaignModal(row) {
-            mapCampaignData = row;
-            document.getElementById('mcAgency').textContent = (row.AGENCY_NAME || '') + ' (' + (row.AGENCY_ID || '') + ')';
-            document.getElementById('mcPlatform').textContent = (row.PLATFORM_NAME || '') + ' (PT=' + (row.PLATFORM_TYPE_ID || '') + ')';
-            document.getElementById('mcDspAdvertiser').textContent = (row.DSP_ADVERTISER_NAME || 'Unknown') + ' (ID=' + (row.DSP_ADVERTISER_ID || '') + ')';
-            document.getElementById('mcImpressions').textContent = fmt(row.IMPRESSIONS_30D);
-            document.getElementById('mcAdvertiserSearch').value = '';
-            document.getElementById('mcAdvertiserId').value = '';
-            document.getElementById('mcSelectedAdvertiser').style.display = 'none';
-            document.getElementById('mcAutocomplete').classList.remove('show');
-            openModal('modalMapCampaign');
-        }
-
-        async function submitMapCampaign() {
-            const advertiserId = document.getElementById('mcAdvertiserId').value;
-            if (!advertiserId) { showToast('Select an advertiser first.', 'error'); return; }
-
-            try {
-                const res = await fetch(`${API}/api/config/map-campaign`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        dsp_advertiser_id: mapCampaignData.DSP_ADVERTISER_ID,
-                        platform_type: mapCampaignData.PLATFORM_TYPE_ID,
-                        quorum_advertiser_id: parseInt(advertiserId),
-                        agency_id: mapCampaignData.AGENCY_ID,
-                        dsp_advertiser_name: mapCampaignData.DSP_ADVERTISER_NAME
-                    })
-                });
-                const json = await res.json();
-                closeModal('modalMapCampaign');
-                if (json.success) {
-                    showToast('Campaign mapped successfully! Impressions will flow on next refresh.');
-                    loadUnmappedImpressions();
-                    loadScorecard();
-                } else {
-                    showToast('Error: ' + json.error, 'error');
-                }
-            } catch (e) {
-                showToast('Request failed: ' + e.message, 'error');
-            }
-        }
-
-        // =====================================================
-        // CONFIGURE DOMAIN MODAL
-        // =====================================================
-        function openConfigDomainModal(row) {
-            configDomainData = row;
-            const domain = row.BASE_DOMAIN || row.DOMAIN || row.URL || '';
-            document.getElementById('cdDomain').textContent = domain;
-            document.getElementById('cdEvents').textContent = fmt(row.EVENT_COUNT_7D || row.EVENTS_30D) + ' events / ' + fmt(row.UNIQUE_DEVICES_7D || 0) + ' unique IPs';
-            document.getElementById('cdTagType').innerHTML = '<span style="color:#8b98a5">Loading...</span>';
-            document.getElementById('cdPreviewBody').innerHTML = '<div class="loading"><div class="spinner"></div> Loading preview...</div>';
-            document.getElementById('cdAdvertiserSearch').value = '';
-            document.getElementById('cdAdvertiserId').value = '';
-            document.getElementById('cdSelectedAdvertiser').style.display = 'none';
-            document.getElementById('cdAutocomplete').classList.remove('show');
-            openModal('modalConfigDomain');
-
-            // Fetch preview data
-            const agencyId = row.AGENCY_ID || document.getElementById('pixelAgencyFilter').value;
-            fetch(`${API}/api/config/pixel-preview?agency_id=${agencyId}&domain=${encodeURIComponent(domain)}`)
-                .then(r => r.json())
-                .then(json => {
-                    if (!json.success) { document.getElementById('cdPreviewBody').innerHTML = `<div style="color:#b45309">${json.error}</div>`; return; }
-
-                    // Tag type badge
-                    const tagColors = { SHOPIFY:'#96bf48', SFCC:'#00a1e0', GTM:'#4285f4', WOOCOMMERCE:'#7f54b3', SQUARESPACE:'#222', WIX:'#0C6EFC', TICKETMASTER:'#026CDF', STANDARD:'#3d5466' };
-                    const tag = json.detected_tag || 'STANDARD';
-                    document.getElementById('cdTagType').innerHTML = `<span style="background:${tagColors[tag]||tagColors.STANDARD};color:#fff;padding:3px 8px;border-radius:4px;font-size:11px;font-weight:600">${tag}</span>`;
-
-                    // Event type breakdown
-                    let html = '<div style="margin-bottom:8px">';
-                    json.event_types.forEach(e => {
-                        const pct = json.total_events_7d > 0 ? Math.round(e.count * 100 / json.total_events_7d) : 0;
-                        html += `<span style="display:inline-block;margin-right:12px;margin-bottom:4px"><span style="color:#1d9bf0;font-weight:600">${e.event_type}</span> <span style="color:#8b98a5">${fmt(e.count)} (${pct}%)</span></span>`;
-                    });
-                    html += '</div>';
-
-                    // Sample rows
-                    if (json.samples.length > 0) {
-                        html += '<table style="width:100%;font-size:11px"><thead><tr><th style="text-align:left;color:#8b98a5;padding:2px 4px">Time</th><th style="text-align:left;color:#8b98a5;padding:2px 4px">Page</th><th style="text-align:left;color:#8b98a5;padding:2px 4px">Event</th><th style="text-align:left;color:#8b98a5;padding:2px 4px">UTM Source</th></tr></thead><tbody>';
-                        json.samples.forEach(s => {
-                            const time = s.EVENT_TIMESTAMP ? new Date(s.EVENT_TIMESTAMP).toLocaleString() : '—';
-                            const page = (s.PAGE_URL || '').replace(/^https?:\/\/[^/]+/, '').substring(0, 60) || '/';
-                            html += `<tr><td style="padding:2px 4px;color:#8b98a5;white-space:nowrap">${time}</td><td style="padding:2px 4px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(s.PAGE_URL || '')}">${esc(page)}</td><td style="padding:2px 4px;color:#1d9bf0">${esc(s.EVENT_TYPE || '—')}</td><td style="padding:2px 4px">${esc(s.UTM_SOURCE || '—')}</td></tr>`;
-                        });
-                        html += '</tbody></table>';
-                    }
-
-                    document.getElementById('cdPreviewBody').innerHTML = html;
-                })
-                .catch(e => {
-                    document.getElementById('cdPreviewBody').innerHTML = `<div style="color:#b45309">Preview unavailable</div>`;
-                    document.getElementById('cdTagType').innerHTML = '<span style="color:#8b98a5">Unknown</span>';
-                });
-        }
-
-        async function submitConfigDomain() {
-            const advertiserId = document.getElementById('cdAdvertiserId').value;
-            if (!advertiserId) { showToast('Select an advertiser first.', 'error'); return; }
-
-            try {
-                const res = await fetch(`${API}/api/config/configure-domain`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        agency_id: configDomainData.AGENCY_ID,
-                        advertiser_id: parseInt(advertiserId),
-                        url: configDomainData.BASE_DOMAIN || configDomainData.DOMAIN || configDomainData.URL,
-                        is_poi: false
-                    })
-                });
-                const json = await res.json();
-                closeModal('modalConfigDomain');
-                if (json.success) {
-                    showToast('Domain configured! Web visit attribution enabled.');
-                    loadUnmappedWebPixels();
-                    loadScorecard();
-                } else {
-                    showToast('Error: ' + json.error, 'error');
-                }
-            } catch (e) {
-                showToast('Request failed: ' + e.message, 'error');
-            }
-        }
-
-        // =====================================================
-        // ADVERTISER AUTOCOMPLETE
-        // =====================================================
-        let searchTimeout = null;
-        async function searchAdvertisers(prefix) {
-            const input = document.getElementById(prefix + 'AdvertiserSearch');
-            const dropdown = document.getElementById(prefix + 'Autocomplete');
-            const q = input.value.trim();
-
-            // Clear stale selection when user starts typing a new search
-            const hiddenId = document.getElementById(prefix + 'AdvertiserId');
-            if (hiddenId && hiddenId.value) {
-                hiddenId.value = '';
-                const selDiv = document.getElementById(prefix + 'SelectedAdvertiser');
-                if (selDiv) { selDiv.style.display = 'none'; selDiv.textContent = ''; }
-                // Config-specific: clear detail panel and cached data
-                if (prefix === 'cfg') {
-                    cfgCurrentData = null;
-                    const detail = document.getElementById('cfgDetailSection');
-                    if (detail) detail.style.display = 'none';
-                    const results = document.getElementById('cfgResults');
-                    if (results) results.innerHTML = '<div class="empty">Search for an advertiser to view and edit their configuration.</div>';
-                }
-            }
-
-            if (q.length < 2) { dropdown.classList.remove('show'); return; }
-
-            clearTimeout(searchTimeout);
-            searchTimeout = setTimeout(async () => {
-                try {
-                    // Grab agency_id from context if available
-                    let agencyParam = '';
-                    if (prefix === 'mc' && mapCampaignData.AGENCY_ID) agencyParam = `&agency_id=${mapCampaignData.AGENCY_ID}`;
-                    if (prefix === 'cd' && configDomainData.AGENCY_ID) agencyParam = `&agency_id=${configDomainData.AGENCY_ID}`;
-                    if (prefix === 'cfg') { const af = document.getElementById('cfgAgencyFilter').value; if (af) agencyParam = `&agency_id=${af}`; }
-
-                    let reportingParam = '';
-                    if (prefix === 'cfg') { const rr = document.getElementById('cfgReportingReady'); if (rr && rr.checked) reportingParam = '&reporting_ready=true'; }
-
-                    const res = await fetch(`${API}/api/config/search-advertisers?q=${encodeURIComponent(q)}${agencyParam}${reportingParam}`);
-                    const json = await res.json();
-                    if (!json.success || json.count === 0) { dropdown.classList.remove('show'); return; }
-
-                    dropdown.innerHTML = json.data.map(r => `
-                        <div class="autocomplete-item" onclick="selectAdvertiser('${prefix}', ${r.ADVERTISER_ID}, ${r.AGENCY_ID || 0}, '${esc(r.ADVERTISER_NAME || '')}')">
-                            <div>${esc(r.ADVERTISER_NAME || '')} <span class="text-muted">(ID: ${r.ADVERTISER_ID})</span></div>
-                            <div class="sub">${esc(r.AGENCY_NAME || 'Agency ' + (r.AGENCY_ID || '—'))} | ${r.CONFIG_STATUS || 'No config'}</div>
+                return `<div class="adv-item ${isActive ? 'active' : ''}" onclick="selectAdvertiser(${r.ADVERTISER_ID}, ${r.AGENCY_ID})">
+                    <div class="adv-name">
+                        ${esc(r.ADVERTISER_NAME || 'Unknown')}
+                        <div class="setup-dots" title="${setupScore}/3 setup steps complete">
+                            <div class="setup-dot ${r.CAMPAIGN_COUNT > 0 ? 'on' : 'off'}" title="Campaigns"></div>
+                            <div class="setup-dot ${r.DOMAIN_COUNT > 0 ? 'on' : 'off'}" title="Domains"></div>
+                            <div class="setup-dot ${r.POI_COUNT > 0 ? 'on' : 'off'}" title="POIs"></div>
                         </div>
-                    `).join('');
-                    dropdown.classList.add('show');
-                } catch (e) {
-                    dropdown.classList.remove('show');
-                }
-            }, 300);
+                    </div>
+                    <div class="adv-agency">${esc(r.AGENCY_NAME || '')} · ID ${r.ADVERTISER_ID}</div>
+                    ${domains.length > 0 ? `<div style="margin:3px 0;">${domainChips}</div>` : ''}
+                    <div class="adv-meta">
+                        ${r.CAMPAIGN_COUNT > 0 ? `<span class="chip chip-blue">${r.CAMPAIGN_COUNT} camp</span>` : ''}
+                        ${r.POI_COUNT > 0 ? `<span class="chip chip-green">${r.POI_COUNT} POIs</span>` : ''}
+                        ${r.TOTAL_IMPRESSIONS_14D > 0 ? `<span class="chip chip-yellow">${fmt(r.TOTAL_IMPRESSIONS_14D)} impr</span>` : ''}
+                        ${!r.CAMPAIGN_COUNT && !r.POI_COUNT ? `<span class="chip chip-muted">Needs setup</span>` : ''}
+                    </div>
+                </div>`;
+            }).join('');
+
+        } catch(e) {
+            container.innerHTML = `<div class="empty">Error: ${e.message}</div>`;
+        }
+    }
+
+    // =========================================================================
+    // SELECT ADVERTISER → Load Detail
+    // =========================================================================
+    async function selectAdvertiser(advId, agencyId) {
+        currentAdvId = advId;
+        currentAgencyId = agencyId;
+
+        // Highlight in sidebar
+        document.querySelectorAll('.adv-item').forEach(el => el.classList.remove('active'));
+        event?.target?.closest?.('.adv-item')?.classList?.add('active');
+
+        // Show detail view
+        document.getElementById('emptyState').style.display = 'none';
+        document.getElementById('detailView').style.display = 'flex';
+
+        // Restore all tabs (in case Discovery mode hid them)
+        document.querySelectorAll('.ctab').forEach(t => { t.classList.remove('active'); t.style.display = ''; });
+        document.querySelectorAll('.cpanel').forEach(p => p.classList.remove('active'));
+        document.querySelector('.ctab[data-tab="overview"]').classList.add('active');
+        document.getElementById('tab-overview').classList.add('active');
+
+        await loadDetail(advId, agencyId);
+    }
+
+    async function loadDetail(advId, agencyId) {
+        try {
+            const res = await fetch(`${API}/api/config/advertiser-detail?advertiser_id=${advId}&agency_id=${agencyId}`);
+            const json = await res.json();
+            if (!json.success) { showToast(json.error, 'error'); return; }
+
+            currentDetail = json;
+            const cfg = json.config || {};
+
+            // Header
+            document.getElementById('detailName').textContent = cfg.ADVERTISER_NAME || 'Unknown';
+            document.getElementById('detailMeta').textContent =
+                `ID: ${cfg.ADVERTISER_ID} · Agency: ${cfg.AGENCY_NAME || cfg.AGENCY_ID} · Status: ${cfg.CONFIG_STATUS || 'UNCONFIGURED'}`;
+
+            // Tab counts
+            document.getElementById('tabCampaignCount').textContent = json.campaigns?.length || 0;
+            document.getElementById('tabPoiCount').textContent = json.pois?.length || 0;
+
+            // Setup progress
+            renderSetupProgress(json);
+
+            // Summary cards
+            document.getElementById('sumCampaigns').textContent = json.campaigns?.length || 0;
+            const totalImpr = json.campaigns?.reduce((s, c) => s + (c.IMPRESSIONS_14DAY_ROLLING || 0), 0) || 0;
+            document.getElementById('sumImpressions').textContent = totalImpr > 0 ? `${fmt(totalImpr)} impr (14d)` : 'No recent impressions';
+
+            document.getElementById('sumDomains').textContent = json.domains?.length || 0;
+            document.getElementById('sumDomainsSub').textContent = json.domains?.length > 0 ? 'Web visit attribution enabled' : 'No domains configured';
+
+            const poiSum = json.poi_summary || {};
+            document.getElementById('sumPois').textContent = poiSum.total_segments || 0;
+            document.getElementById('sumPoisSub').textContent = poiSum.unique_brands > 0
+                ? `${poiSum.unique_brands} brands · ${poiSum.unique_dmas} DMAs · ${fmt(poiSum.total_locations)} locations`
+                : 'No POIs assigned';
+
+            document.getElementById('sumWindow').textContent = (cfg.ATTRIBUTION_WINDOW_DAYS || 30) + 'd';
+            document.getElementById('sumStrategy').textContent = cfg.MATCH_STRATEGY || 'HOUSEHOLD';
+
+            // Domains list
+            renderDomains(json.domains || []);
+
+            // Config grid
+            renderConfigGrid(cfg);
+
+            // Campaigns
+            renderCampaigns(json.campaigns || []);
+
+            // POIs
+            renderPois(json.pois || [], poiSum);
+
+        } catch(e) {
+            showToast('Failed to load: ' + e.message, 'error');
+        }
+    }
+
+    function refreshDetail() {
+        if (currentAdvId) loadDetail(currentAdvId, currentAgencyId);
+    }
+
+    // =========================================================================
+    // RENDER: Setup Progress
+    // =========================================================================
+    function renderSetupProgress(detail) {
+        const campaigns = detail.campaigns?.length > 0;
+        const domains = detail.domains?.length > 0;
+        const pois = detail.pois?.length > 0;
+        const steps = [
+            { label: 'Campaign Mappings', done: campaigns, action: 'Map campaigns from impression logs' },
+            { label: 'Web Pixel URLs', done: domains, action: 'Add website domains for web visit tracking' },
+            { label: 'POI Locations', done: pois, action: 'Assign store/location segments for foot traffic' },
+        ];
+
+        const bar = document.getElementById('setupBar');
+        bar.innerHTML = steps.map(s => `<div class="setup-step ${s.done ? 'done' : ''}"></div>`).join('') +
+            `<span class="setup-label">${steps.filter(s => s.done).length}/3 complete</span>`;
+
+        const stepsDiv = document.getElementById('setupSteps');
+        const incomplete = steps.filter(s => !s.done);
+        if (incomplete.length > 0) {
+            stepsDiv.innerHTML = '<strong style="color:#f7931a">Next steps:</strong> ' +
+                incomplete.map(s => s.action).join(' → ');
+        } else {
+            stepsDiv.innerHTML = '<span style="color:#00ba7c">All setup steps complete!</span>';
+        }
+    }
+
+    // =========================================================================
+    // RENDER: Domains
+    // =========================================================================
+    function renderDomains(domains) {
+        const el = document.getElementById('domainsList');
+        if (!domains.length) {
+            el.innerHTML = '<div class="empty">No domains configured. Add a web pixel domain to enable web visit attribution.</div>';
+            return;
+        }
+        el.innerHTML = domains.map(d => `
+            <span class="domain-tag">
+                ${esc(d.url)}${d.is_poi ? ' <span style="color:#f7931a;font-size:10px">POI</span>' : ''}
+                <span class="remove" onclick="removeDomain('${esc(d.url)}')" title="Remove domain">&times;</span>
+            </span>
+        `).join('');
+    }
+
+    async function removeDomain(url) {
+        if (!confirm(`Remove domain "${url}" from this advertiser?`)) return;
+        try {
+            const res = await fetch(API + '/api/config/remove-domain', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({ advertiser_id: currentAdvId, agency_id: currentAgencyId, url })
+            });
+            const json = await res.json();
+            if (json.success) { showToast('Domain removed'); refreshDetail(); }
+            else showToast(json.error, 'error');
+        } catch(e) { showToast(e.message, 'error'); }
+    }
+
+    // =========================================================================
+    // RENDER: Config Grid
+    // =========================================================================
+    function renderConfigGrid(cfg) {
+        const strategyLabels = { PCM_4KEY: 'PCM 4-Key', ADM_PREFIX: 'Domain Mapping', DIRECT_AG: 'Agency Match' };
+        const statusColors = { ACTIVE: 'text-green', INACTIVE: 'text-red', PENDING: 'text-yellow' };
+        const boolItem = (label, val) => [label, val
+            ? '<span class="text-green" style="font-size:12px;">● Enabled</span>'
+            : '<span class="text-muted" style="font-size:12px;">○ Disabled</span>', true];
+        const items = [
+            ['Config Status', `<span class="${statusColors[cfg.CONFIG_STATUS] || 'text-muted'}">${cfg.CONFIG_STATUS || 'UNCONFIGURED'}</span>`, true],
+            ['Attribution Window', (cfg.ATTRIBUTION_WINDOW_DAYS || 30) + ' days'],
+            ['Match Strategy', cfg.MATCH_STRATEGY || 'HOUSEHOLD'],
+            ['Impression Join', strategyLabels[cfg.IMPRESSION_JOIN_STRATEGY] || cfg.IMPRESSION_JOIN_STRATEGY || '—'],
+            ['Exposure Source', cfg.EXPOSURE_SOURCE || '—'],
+            ['Web Pixel Type', cfg.WEB_PIXEL_INTEGRATION_TYPE || '—'],
+            boolItem('Store Visit', cfg.HAS_STORE_VISIT_ATTRIBUTION),
+            boolItem('Web Visit', cfg.HAS_WEB_VISIT_ATTRIBUTION),
+            boolItem('Impressions', cfg.HAS_IMPRESSION_TRACKING),
+            ['Last Updated', cfg.UPDATED_AT ? new Date(cfg.UPDATED_AT).toLocaleString() : '—'],
+        ];
+        document.getElementById('configGrid').innerHTML = items.map(([label, val, isHtml]) => `
+            <div class="config-item">
+                <div class="label">${label}</div>
+                <div class="value">${isHtml ? val : esc(String(val))}</div>
+            </div>
+        `).join('');
+    }
+
+    // =========================================================================
+    // RENDER: Campaigns
+    // =========================================================================
+    function renderCampaigns(campaigns) {
+        const el = document.getElementById('campaignsList');
+        document.getElementById('campaignInfo').textContent = `${campaigns.length} campaign mappings`;
+
+        if (!campaigns.length) {
+            el.innerHTML = '<div class="empty">No campaign mappings. Go to Discovery tab to find and map campaigns.</div>';
+            return;
         }
 
-        function selectAdvertiser(prefix, id, agencyId, name) {
-            document.getElementById(prefix + 'AdvertiserId').value = id;
-            document.getElementById(prefix + 'AdvertiserSearch').value = name;
-            document.getElementById(prefix + 'Autocomplete').classList.remove('show');
+        let html = '<table><thead><tr><th>Campaign / Line Item</th><th>Platform</th><th class="text-right">Impressions (14d)</th><th class="text-right">Reach (14d)</th><th>Last Seen</th><th>Status</th></tr></thead><tbody>';
+        campaigns.forEach(c => {
+            const name = c.CAMPAIGN_NAME_MANUAL || c.INSERTION_ORDER_NAME_FROM_DSP || c.LINE_ITEM_NAME_FROM_DSP || c.ADVERTISER_NAME_FROM_DSP || '—';
+            const impr = c.IMPRESSIONS_14DAY_ROLLING || 0;
+            const reach = c.REACH_14DAY_ROLLING || 0;
+            const lastSeen = c.LAST_IMPRESSION_TIMESTAMP ? new Date(c.LAST_IMPRESSION_TIMESTAMP).toLocaleDateString() : '—';
+            const hasImpr = impr > 0;
+            const hasDates = c.CAMPAIGN_START_DATE && c.CAMPAIGN_END_DATE;
+            let status = 'Active', statusClass = 'badge-green';
+            if (!hasImpr) { status = 'No data'; statusClass = 'badge-muted'; }
 
-            const selDiv = document.getElementById(prefix + 'SelectedAdvertiser');
-            selDiv.textContent = `✓ ${name} (ID: ${id})`;
-            selDiv.style.display = 'block';
+            html += `<tr>
+                <td><span class="truncate" title="${esc(name)}">${esc(name)}</span></td>
+                <td class="text-muted">${esc(c.DATA_SOURCE || c.DSP_PLATFORM_TYPE || '—')}</td>
+                <td class="text-right ${hasImpr ? 'text-yellow' : 'text-muted'}">${fmt(impr)}</td>
+                <td class="text-right text-muted">${fmt(reach)}</td>
+                <td class="text-muted">${lastSeen}</td>
+                <td><span class="badge ${statusClass}">${status}</span></td>
+            </tr>`;
+        });
+        html += '</tbody></table>';
+        el.innerHTML = html;
+    }
 
-            // Store agency where needed
-            if (prefix === 'poi') {
-                document.getElementById('poiAgencyId').value = agencyId;
-            }
-            if (prefix === 'cfg') {
-                document.getElementById('cfgAgencyId').value = agencyId;
-                loadAdvertiserConfig();
-            }
+    // =========================================================================
+    // RENDER: POIs
+    // =========================================================================
+    function renderPois(pois, summary) {
+        // Summary cards
+        document.getElementById('poiTotalSegs').textContent = summary.total_segments || 0;
+        document.getElementById('poiBrandCount').textContent = summary.unique_brands || 0;
+        document.getElementById('poiDmaCount').textContent = summary.unique_dmas || 0;
+        document.getElementById('poiLocCount').textContent = fmt(summary.total_locations || 0);
+
+        const el = document.getElementById('poiList');
+        if (!pois.length) {
+            el.innerHTML = '<div class="empty">No POI segments assigned. Search and add brands, or upload a store list.</div>';
+            return;
         }
 
-        // Close autocomplete on outside click
-        document.addEventListener('click', (e) => {
-            if (!e.target.closest('.autocomplete-wrap')) {
-                document.querySelectorAll('.autocomplete-results').forEach(d => d.classList.remove('show'));
-            }
+        // Group by brand
+        const byBrand = {};
+        pois.forEach(p => {
+            const brand = p.BRAND || 'Unknown';
+            if (!byBrand[brand]) byBrand[brand] = [];
+            byBrand[brand].push(p);
         });
 
-        // =====================================================
-        // AGENCY FILTER HELPER
-        // =====================================================
-        function populateAgencyFilter(selectId, agencies) {
-            const sel = document.getElementById(selectId);
-            const current = sel.value;
-            // Only add new options if not already populated beyond default
-            if (sel.options.length <= 1) {
-                agencies.forEach(a => {
-                    const opt = document.createElement('option');
-                    opt.value = a.id;
-                    opt.textContent = a.name || a.id;
-                    sel.appendChild(opt);
-                });
+        let html = '<table><thead><tr><th><input type="checkbox" id="poiSelectAll" onchange="togglePoiCheckboxes(this)"></th><th>Brand</th><th>DMA</th><th class="text-right">Locations</th><th class="text-right">Zips</th><th></th></tr></thead><tbody>';
+        pois.forEach(p => {
+            html += `<tr>
+                <td><input type="checkbox" class="poi-cb" value="${esc(p.SEGMENT_MD5 || '')}"></td>
+                <td>${esc(p.BRAND || 'Unknown')}</td>
+                <td class="text-muted">${esc(p.DMA_NAME || '—')}</td>
+                <td class="text-right">${fmt(p.LOCATIONS || 1)}</td>
+                <td class="text-right text-muted">${fmt(p.ZIP_CODES || 0)}</td>
+                <td><button class="btn btn-sm btn-danger" onclick="removePoi('${esc(p.SEGMENT_MD5)}')">Remove</button></td>
+            </tr>`;
+        });
+        html += '</tbody></table>';
+
+        // Add bulk remove button
+        html = `<div style="padding:8px 14px;display:flex;justify-content:flex-end;gap:6px;border-bottom:1px solid #2f3942;">
+            <button class="btn btn-sm btn-danger" onclick="removeSelectedPois()">Remove Selected</button>
+        </div>` + html;
+
+        el.innerHTML = html;
+    }
+
+    function togglePoiCheckboxes(el) {
+        document.querySelectorAll('.poi-cb').forEach(cb => cb.checked = el.checked);
+    }
+
+    async function removePoi(md5) {
+        if (!confirm('Remove this POI segment?')) return;
+        try {
+            const res = await fetch(API + '/api/config/remove-poi', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({ advertiser_id: currentAdvId, agency_id: currentAgencyId, segment_md5s: [md5] })
+            });
+            const json = await res.json();
+            if (json.success) { showToast('POI removed'); refreshDetail(); }
+            else showToast(json.error, 'error');
+        } catch(e) { showToast(e.message, 'error'); }
+    }
+
+    async function removeSelectedPois() {
+        const checked = document.querySelectorAll('.poi-cb:checked');
+        if (!checked.length) { showToast('Select POIs to remove', 'error'); return; }
+        if (!confirm(`Remove ${checked.length} selected POI segments?`)) return;
+        const md5s = Array.from(checked).map(cb => cb.value);
+        try {
+            const res = await fetch(API + '/api/config/remove-poi', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({ advertiser_id: currentAdvId, agency_id: currentAgencyId, segment_md5s: md5s })
+            });
+            const json = await res.json();
+            if (json.success) { showToast(`Removed ${json.deleted} POIs`); refreshDetail(); }
+            else showToast(json.error, 'error');
+        } catch(e) { showToast(e.message, 'error'); }
+    }
+
+    // =========================================================================
+    // CONTENT TABS
+    // =========================================================================
+    function switchContentTab(el) {
+        document.querySelectorAll('.ctab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.cpanel').forEach(p => p.classList.remove('active'));
+        el.classList.add('active');
+        document.getElementById('tab-' + el.dataset.tab).classList.add('active');
+
+        // Load discovery agency dropdown from current context
+        if (el.dataset.tab === 'discovery' && currentAgencyId) {
+            document.getElementById('discAgency').value = currentAgencyId;
+        }
+    }
+
+    // =========================================================================
+    // CREATE ADVERTISER
+    // =========================================================================
+    function openCreateAdvertiser() {
+        document.getElementById('createName').value = '';
+        const agencyVal = document.getElementById('agencyFilter').value;
+        if (agencyVal) document.getElementById('createAgency').value = agencyVal;
+        openModal('modalCreate');
+    }
+
+    async function submitCreateAdvertiser() {
+        const name = document.getElementById('createName').value.trim();
+        const agencyId = document.getElementById('createAgency').value;
+        if (!name) { showToast('Enter advertiser name', 'error'); return; }
+        if (!agencyId) { showToast('Select an agency', 'error'); return; }
+
+        try {
+            const res = await fetch(API + '/api/config/create-advertiser', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({ advertiser_name: name, agency_id: parseInt(agencyId) })
+            });
+            const json = await res.json();
+            closeModal('modalCreate');
+            if (json.success) {
+                showToast(json.message);
+                loadAdvertiserList();
+                // Select the new advertiser
+                setTimeout(() => selectAdvertiser(json.advertiser_id, parseInt(agencyId)), 500);
+            } else {
+                showToast(json.error, 'error');
             }
-            sel.value = current;
+        } catch(e) { showToast(e.message, 'error'); }
+    }
+
+    // =========================================================================
+    // ADD DOMAIN
+    // =========================================================================
+    function openAddDomain() {
+        document.getElementById('addDomainUrl').value = '';
+        document.getElementById('addDomainIsPoi').value = 'false';
+        openModal('modalDomain');
+    }
+
+    async function submitAddDomain() {
+        const url = document.getElementById('addDomainUrl').value.trim();
+        if (!url) { showToast('Enter a domain URL', 'error'); return; }
+
+        try {
+            const res = await fetch(API + '/api/config/configure-domain', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({
+                    advertiser_id: currentAdvId,
+                    agency_id: currentAgencyId,
+                    url: url,
+                    is_poi: document.getElementById('addDomainIsPoi').value === 'true'
+                })
+            });
+            const json = await res.json();
+            closeModal('modalDomain');
+            if (json.success) { showToast('Domain added'); refreshDetail(); loadAdvertiserList(); }
+            else showToast(json.error, 'error');
+        } catch(e) { showToast(e.message, 'error'); }
+    }
+
+    // =========================================================================
+    // EDIT CONFIG
+    // =========================================================================
+    function openEditConfig() {
+        if (!currentDetail?.config) return;
+        const cfg = currentDetail.config;
+        document.getElementById('editAttrWindow').value = cfg.ATTRIBUTION_WINDOW_DAYS || 30;
+        document.getElementById('editMatchStrategy').value = cfg.MATCH_STRATEGY || 'HOUSEHOLD';
+        document.getElementById('editImprStrategy').value = cfg.IMPRESSION_JOIN_STRATEGY || 'PCM_4KEY';
+        document.getElementById('editStatus').value = cfg.CONFIG_STATUS || 'ACTIVE';
+        openModal('modalConfig');
+    }
+
+    async function submitEditConfig() {
+        try {
+            const res = await fetch(API + '/api/config/update-config', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({
+                    advertiser_id: currentAdvId,
+                    agency_id: currentAgencyId,
+                    attribution_window_days: parseInt(document.getElementById('editAttrWindow').value) || 30,
+                    match_strategy: document.getElementById('editMatchStrategy').value,
+                    impression_join_strategy: document.getElementById('editImprStrategy').value,
+                    config_status: document.getElementById('editStatus').value,
+                })
+            });
+            const json = await res.json();
+            closeModal('modalConfig');
+            if (json.success) { showToast('Config updated'); refreshDetail(); }
+            else showToast(json.error, 'error');
+        } catch(e) { showToast(e.message, 'error'); }
+    }
+
+    // =========================================================================
+    // POI SEARCH
+    // =========================================================================
+    function openPoiSearch() {
+        document.getElementById('poiSearchCard').style.display = 'block';
+        document.getElementById('poiBrandInput').focus();
+    }
+
+    async function searchBrands() {
+        const brand = document.getElementById('poiBrandInput').value.trim();
+        const dma = document.getElementById('poiDmaInput').value.trim();
+        const container = document.getElementById('poiSearchResults');
+
+        if (!brand && !dma) { container.innerHTML = '<div class="empty">Enter a brand name.</div>'; return; }
+        container.innerHTML = '<div class="loading"><div class="spinner"></div> Searching...</div>';
+
+        try {
+            let url = `${API}/api/config/poi-brands?`;
+            if (brand) url += `search=${encodeURIComponent(brand)}`;
+            if (dma) url += `${brand ? '&' : ''}dma=${encodeURIComponent(dma)}`;
+
+            const res = await fetch(url);
+            const json = await res.json();
+            if (!json.success) { container.innerHTML = `<div class="empty">${json.error}</div>`; return; }
+            if (json.count === 0) { container.innerHTML = '<div class="empty">No matching brands found.</div>'; return; }
+
+            let html = `<div style="margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;">
+                <span class="text-muted" style="font-size:11px">${json.count} results</span>
+                <div class="btn-group">
+                    <button class="btn btn-sm btn-secondary" onclick="document.querySelectorAll('.brand-cb').forEach(c=>c.checked=true)">Select All</button>
+                    <button class="btn btn-sm btn-success" onclick="assignSelectedBrands()">Assign Selected</button>
+                </div>
+            </div>`;
+            html += '<table><thead><tr><th style="width:30px"><input type="checkbox" onchange="document.querySelectorAll(\'.brand-cb\').forEach(c=>c.checked=this.checked)"></th><th>Brand</th><th>Category</th><th>DMA</th><th class="text-right">Locations</th></tr></thead><tbody>';
+            json.data.forEach(r => {
+                const md5 = r.SEGMENT_MD5 || r.MD5 || '';
+                html += `<tr>
+                    <td><input type="checkbox" class="brand-cb" value="${esc(md5)}" data-brand="${esc(r.BRAND || '')}" data-dma="${esc(r.DMA_NAME || '')}"></td>
+                    <td>${esc(r.BRAND || '')}</td>
+                    <td class="text-muted">${esc(r.CATEGORY || '')}</td>
+                    <td>${esc(r.DMA_NAME || '')}</td>
+                    <td class="text-right">${fmt(r.UNIQUE_LOCATIONS || 1)}</td>
+                </tr>`;
+            });
+            html += '</tbody></table>';
+            container.innerHTML = html;
+        } catch(e) {
+            container.innerHTML = `<div class="empty">Error: ${e.message}</div>`;
         }
+    }
 
-        // =====================================================
-        // UTIL
-        // =====================================================
-        function esc(str) {
-            if (str == null) return '';
-            return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    async function assignSelectedBrands() {
+        const checked = document.querySelectorAll('.brand-cb:checked');
+        if (!checked.length) { showToast('Select at least one brand', 'error'); return; }
+
+        const md5s = Array.from(checked).map(cb => cb.value);
+        const brandName = checked[0].dataset.brand || '';
+        const dma = checked[0].dataset.dma || '';
+
+        try {
+            const res = await fetch(API + '/api/config/assign-poi', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({
+                    advertiser_id: currentAdvId,
+                    agency_id: currentAgencyId,
+                    segment_md5s: md5s,
+                    brand_name: brandName,
+                    dma: dma
+                })
+            });
+            const json = await res.json();
+            if (json.success) {
+                showToast(`Assigned ${json.inserted} segments (${json.skipped} already existed)`);
+                refreshDetail();
+                document.getElementById('poiSearchCard').style.display = 'none';
+            } else {
+                showToast(json.error, 'error');
+            }
+        } catch(e) { showToast(e.message, 'error'); }
+    }
+
+    // =========================================================================
+    // STORE LIST UPLOAD
+    // =========================================================================
+    function openStoreUpload() {
+        document.getElementById('storeUploadCard').style.display = 'block';
+        document.getElementById('uploadStatus').style.display = 'none';
+    }
+
+    function handleFileDrop(e) {
+        e.preventDefault();
+        document.getElementById('uploadArea').classList.remove('dragover');
+        if (e.dataTransfer.files.length > 0) uploadStoreFile(e.dataTransfer.files[0]);
+    }
+
+    function handleFileSelect(input) {
+        if (input.files.length > 0) uploadStoreFile(input.files[0]);
+    }
+
+    async function uploadStoreFile(file) {
+        const status = document.getElementById('uploadStatus');
+        status.style.display = 'block';
+        status.innerHTML = '<div class="loading"><div class="spinner"></div> Uploading...</div>';
+
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('advertiser_id', currentAdvId);
+        formData.append('agency_id', currentAgencyId);
+        formData.append('advertiser_name', currentDetail?.config?.ADVERTISER_NAME || '');
+
+        try {
+            const res = await fetch(API + '/api/config/upload-storelist', {
+                method: 'POST',
+                body: formData
+            });
+            const json = await res.json();
+            if (json.success) {
+                const emailNote = json.email_sent
+                    ? '<span class="text-green">Email sent to cs@quorum.inc</span>'
+                    : `<span class="text-yellow">Email not configured (SMTP not set up). Please manually notify cs@quorum.inc.</span>`;
+                status.innerHTML = `<div style="padding:10px;background:#16202a;border-radius:6px;font-size:12px;">
+                    <strong class="text-green">Uploaded: ${esc(json.filename)}</strong> (${json.rows} rows)<br>
+                    ${emailNote}
+                </div>`;
+                showToast('Store list uploaded');
+            } else {
+                status.innerHTML = `<div class="text-red" style="font-size:12px">${json.error}</div>`;
+            }
+        } catch(e) {
+            status.innerHTML = `<div class="text-red" style="font-size:12px">Upload failed: ${e.message}</div>`;
         }
+    }
 
-        // =====================================================
-        // PANEL 4: ADVERTISER CONFIG
-        // =====================================================
-        let cfgCurrentData = null;
+    // =========================================================================
+    // DISCOVERY: Impression Log Search
+    // =========================================================================
+    function openDiscovery() {
+        // If an advertiser is selected, switch to its discovery tab
+        if (currentAdvId) {
+            const tab = document.querySelector('.ctab[data-tab="discovery"]');
+            switchContentTab(tab);
+        } else {
+            // Show detail view with just the discovery panel
+            document.getElementById('emptyState').style.display = 'none';
+            const dv = document.getElementById('detailView');
+            dv.style.display = 'flex';
+            document.getElementById('detailName').textContent = 'Discovery Mode';
+            document.getElementById('detailMeta').textContent = 'Search impression logs to find and map new advertisers';
+            document.querySelectorAll('.ctab').forEach(t => { t.classList.remove('active'); t.style.display = 'none'; });
+            const discTab = document.querySelector('.ctab[data-tab="discovery"]');
+            discTab.style.display = ''; discTab.classList.add('active');
+            document.querySelectorAll('.cpanel').forEach(p => p.classList.remove('active'));
+            document.getElementById('tab-discovery').classList.add('active');
+        }
+    }
 
-        async function loadAdvertiserConfig() {
-            const advId = document.getElementById('cfgAdvertiserId').value;
-            const searchText = document.getElementById('cfgAdvertiserSearch').value.trim();
-            const agencyFilter = document.getElementById('cfgAgencyFilter').value;
+    async function searchImpressions() {
+        const agencyId = document.getElementById('discAgency').value;
+        if (!agencyId) { showToast('Select an agency', 'error'); return; }
+        const days = document.getElementById('discDays').value;
+        const minImpr = document.getElementById('discMinImpr').value || 100;
+        const container = document.getElementById('discoveryResults');
+        container.innerHTML = '<div class="loading"><div class="spinner"></div> Searching impression logs...</div>';
 
-            if (!advId && !searchText) { showToast('Enter an advertiser name or select from autocomplete', 'error'); return; }
+        try {
+            const res = await fetch(`${API}/api/config/impression-search?agency_id=${agencyId}&days=${days}&min_impressions=${minImpr}`);
+            const json = await res.json();
+            if (!json.success) { container.innerHTML = `<div class="empty">${json.error}</div>`; return; }
+            if (json.count === 0) { container.innerHTML = '<div class="empty">No impressions found matching criteria.</div>'; return; }
 
-            const resultsDiv = document.getElementById('cfgResults');
-            resultsDiv.innerHTML = '<div class="empty">Loading...</div>';
+            let html = `<div style="margin-bottom:8px;font-size:11px;color:#8b98a5;">
+                Found ${json.count} DSP advertisers: <span class="text-green">${json.mapped_count} mapped</span> · <span class="text-yellow">${json.unmapped_count} unmapped</span>
+            </div>`;
+            html += '<table><thead><tr><th>DSP Advertiser</th><th>Platform</th><th class="text-right">Impressions</th><th>Active Days</th><th>Status</th><th></th></tr></thead><tbody>';
+            json.data.forEach(r => {
+                const isMapped = r.STATUS === 'MAPPED';
+                html += `<tr>
+                    <td>${esc(r.DSP_ADVERTISER_NAME || 'Unknown')} <span class="text-muted">(${r.DSP_ADVERTISER_ID})</span></td>
+                    <td class="text-muted">${esc(r.PLATFORM_NAME || '')} (${r.PLATFORM_TYPE_ID || ''})</td>
+                    <td class="text-right text-yellow">${fmt(r.IMPRESSIONS)}</td>
+                    <td class="text-muted">${r.ACTIVE_DAYS || '—'}</td>
+                    <td>${isMapped
+                        ? `<span class="badge badge-green">Mapped</span> <span class="text-muted" style="font-size:10px">${esc(r.QUORUM_ADVERTISER_NAME || '')}</span>`
+                        : '<span class="badge badge-yellow">Unmapped</span>'
+                    }</td>
+                    <td>${!isMapped ? `<button class="btn btn-sm btn-primary" onclick='openMapModal(${JSON.stringify(r).replace(/'/g,"&#39;")})'>Map</button>` : ''}</td>
+                </tr>`;
+            });
+            html += '</tbody></table>';
+            container.innerHTML = html;
+        } catch(e) {
+            container.innerHTML = `<div class="empty">Error: ${e.message}</div>`;
+        }
+    }
 
+    // =========================================================================
+    // MAP CAMPAIGN MODAL (from discovery)
+    // =========================================================================
+    function openMapModal(row) {
+        _mapData = row;
+        document.getElementById('mapDspName').textContent = `${row.DSP_ADVERTISER_NAME || 'Unknown'} (ID: ${row.DSP_ADVERTISER_ID})`;
+        document.getElementById('mapPlatform').textContent = `${row.PLATFORM_NAME || ''} (PT: ${row.PLATFORM_TYPE_ID || ''})`;
+        document.getElementById('mapImpressions').textContent = fmt(row.IMPRESSIONS);
+        document.getElementById('mapAdvSearch').value = '';
+        document.getElementById('mapAdvId').value = '';
+        document.getElementById('mapAdvSelected').style.display = 'none';
+        document.getElementById('mapAdvResults').classList.remove('show');
+        openModal('modalMap');
+    }
+
+    let _mapSearchTimer = null;
+    async function searchAdvForMap() {
+        const q = document.getElementById('mapAdvSearch').value.trim();
+        const dropdown = document.getElementById('mapAdvResults');
+        if (q.length < 2) { dropdown.classList.remove('show'); return; }
+        clearTimeout(_mapSearchTimer);
+        _mapSearchTimer = setTimeout(async () => {
             try {
-                // If no advertiser selected yet, search by name first
-                if (!advId && searchText) {
-                    let searchUrl = `${API}/api/config/search-advertisers?q=${encodeURIComponent(searchText)}`;
-                    if (agencyFilter) searchUrl += `&agency_id=${agencyFilter}`;
-                    const searchRes = await fetch(searchUrl);
-                    const searchJson = await searchRes.json();
-                    if (!searchJson.success || searchJson.count === 0) {
-                        resultsDiv.innerHTML = '<div class="empty">No advertisers found matching that name.</div>';
-                        return;
-                    }
-                    // If exactly one result, use it; otherwise show matches
-                    if (searchJson.count === 1) {
-                        const match = searchJson.data[0];
-                        document.getElementById('cfgAdvertiserId').value = match.ADVERTISER_ID;
-                        document.getElementById('cfgAgencyId').value = match.AGENCY_ID || '';
-                        document.getElementById('cfgSelectedAdvertiser').textContent = `✓ ${match.ADVERTISER_NAME} (ID: ${match.ADVERTISER_ID})`;
-                        document.getElementById('cfgSelectedAdvertiser').style.display = 'block';
-                    } else {
-                        // Multiple matches — show list for user to pick
-                        resultsDiv.innerHTML = searchJson.data.map(r => `
-                            <div style="padding:10px 14px; border-bottom:1px solid #1e2732; cursor:pointer; transition:background 0.2s;"
-                                 onmouseover="this.style.background='#1e2732'" onmouseout="this.style.background=''"
-                                 onclick="selectAdvertiser('cfg', ${r.ADVERTISER_ID}, ${r.AGENCY_ID || 0}, '${esc(r.ADVERTISER_NAME || '')}')">
-                                <div style="font-weight:500;">${esc(r.ADVERTISER_NAME || '')} <span class="text-muted">(ID: ${r.ADVERTISER_ID})</span></div>
-                                <div style="font-size:11px; color:#8b98a5;">Agency: ${r.AGENCY_ID || '—'} | ${r.CONFIG_STATUS || 'No config'}</div>
-                            </div>
-                        `).join('');
-                        return;
-                    }
-                }
-
-                const finalAdvId = document.getElementById('cfgAdvertiserId').value;
-                const res = await fetch(`${API}/api/config/advertiser-config?advertiser_id=${finalAdvId}&active_only=false`);
+                const agencyId = _mapData.AGENCY_ID || currentAgencyId || '';
+                const res = await fetch(`${API}/api/config/search-advertisers?q=${encodeURIComponent(q)}&agency_id=${agencyId}`);
                 const json = await res.json();
-                if (!json.success) { resultsDiv.innerHTML = `<div class="empty error">${json.error || 'Not found'}</div>`; return; }
-
-                cfgCurrentData = Array.isArray(json.data) ? json.data[0] : json.data;
-                if (!cfgCurrentData) { resultsDiv.innerHTML = '<div class="empty">No config found for this advertiser.</div>'; return; }
-                resultsDiv.innerHTML = '';
-                document.getElementById('cfgDetailSection').style.display = 'block';
-                document.getElementById('cfgDetailTitle').textContent = `Config: ${cfgCurrentData.ADVERTISER_NAME || ''} (ID: ${cfgCurrentData.ADVERTISER_ID})`;
-                document.getElementById('cfgEditForm').style.display = 'none';
-
-                // Build detail grid
-                const grid = document.getElementById('cfgDetailGrid');
-                const strategyLabels = { 'PCM_4KEY': 'PCM 4-Key (Platform + DSP Adv + IO + Line Item)', 'ADM_PREFIX': 'ADM Prefix (Domain Mapping)', 'DIRECT_AG': 'Direct Agency Match' };
-                const exposureLabels = { 'IMPRESSION': 'Ad Impressions (V2)', 'WEB': 'Web Pixel Events', 'OOH': 'Out-of-Home' };
-                const fields = [
-                    ['Advertiser ID', cfgCurrentData.ADVERTISER_ID],
-                    ['Agency', (cfgCurrentData.AGENCY_NAME || '') + ' (' + cfgCurrentData.AGENCY_ID + ')'],
-                    ['Advertiser Name', cfgCurrentData.ADVERTISER_NAME],
-                    ['Config Status', cfgCurrentData.CONFIG_STATUS],
-                    ['Impression Join Strategy', strategyLabels[cfgCurrentData.IMPRESSION_JOIN_STRATEGY] || cfgCurrentData.IMPRESSION_JOIN_STRATEGY || '—'],
-                    ['Match Strategy', cfgCurrentData.MATCH_STRATEGY],
-                    ['Attribution Window', cfgCurrentData.ATTRIBUTION_WINDOW_DAYS ? cfgCurrentData.ATTRIBUTION_WINDOW_DAYS + ' days' : '—'],
-                    ['Exposure Source', exposureLabels[cfgCurrentData.EXPOSURE_SOURCE] || cfgCurrentData.EXPOSURE_SOURCE || '—'],
-                    ['Store Visit Attribution', cfgCurrentData.HAS_STORE_VISIT_ATTRIBUTION ? '✓ Yes' : '✗ No'],
-                    ['Web Visit Attribution', cfgCurrentData.HAS_WEB_VISIT_ATTRIBUTION ? '✓ Yes' : '✗ No'],
-                    ['Impression Tracking', cfgCurrentData.HAS_IMPRESSION_TRACKING ? '✓ Yes' : '✗ No'],
-                    ['Web Pixel Integration', cfgCurrentData.WEB_PIXEL_INTEGRATION_TYPE || '—'],
-                    ['POI Segments Assigned', cfgCurrentData.SEGMENT_COUNT > 0 ? `✓ ${cfgCurrentData.SEGMENT_COUNT} segments` : '✗ None'],
-                    ['Campaign Mappings', cfgCurrentData.CAMPAIGN_MAPPING_COUNT > 0 ? `✓ ${cfgCurrentData.CAMPAIGN_MAPPING_COUNT} mappings` : '✗ None'],
-                    ['Web Pixel URLs', cfgCurrentData.WEB_PIXEL_URL_COUNT > 0 ? `✓ ${cfgCurrentData.WEB_PIXEL_URL_COUNT} URLs <span id="cfgMappedUrls" style="color:#8b98a5;font-size:12px">loading...</span>` : '✗ None', true],
-                    ['Platforms', cfgCurrentData.PLATFORM_TYPE_IDS || '—'],
-                    ['Last Updated', cfgCurrentData.UPDATED_AT || cfgCurrentData.CREATED_AT || '—'],
-                ];
-                grid.innerHTML = fields.map(([label, val, raw]) => `
-                    <div style="padding:8px 0; border-bottom:1px solid #1e2732;">
-                        <div style="font-size:11px; color:#8b98a5; text-transform:uppercase; margin-bottom:2px;">${label}</div>
-                        <div style="font-size:14px;">${val != null ? (raw ? String(val) : esc(String(val))) : '—'}</div>
+                if (!json.success || json.count === 0) { dropdown.classList.remove('show'); return; }
+                dropdown.innerHTML = json.data.map(r => `
+                    <div class="ac-item" onclick="selectMapAdv(${r.ADVERTISER_ID}, '${esc(r.ADVERTISER_NAME || '')}')">
+                        ${esc(r.ADVERTISER_NAME || '')} <span class="text-muted">(ID: ${r.ADVERTISER_ID})</span>
                     </div>
                 `).join('');
+                dropdown.classList.add('show');
+            } catch(e) { dropdown.classList.remove('show'); }
+        }, 300);
+    }
 
-                // Fetch mapped URLs if any exist
-                if (cfgCurrentData.WEB_PIXEL_URL_COUNT > 0) {
-                    fetch(`${API}/api/config/mapped-urls?agency_id=${cfgCurrentData.AGENCY_ID}&advertiser_id=${cfgCurrentData.ADVERTISER_ID}`)
-                        .then(r => r.json())
-                        .then(json => {
-                            const el = document.getElementById('cfgMappedUrls');
-                            if (!el) return;
-                            if (json.success && json.urls.length > 0) {
-                                el.innerHTML = '<br>' + json.urls.map(u =>
-                                    `<div style="margin:2px 0;padding:3px 6px;background:#1e2732;border-radius:3px;font-size:12px;display:inline-block;margin-right:4px">${esc(u.url)}${u.is_poi ? ' <span style="color:#d97706">POI</span>' : ''}</div>`
-                                ).join('');
-                            } else {
-                                el.textContent = '';
-                            }
-                        }).catch(() => {});
-                }
+    function selectMapAdv(id, name) {
+        document.getElementById('mapAdvId').value = id;
+        document.getElementById('mapAdvSearch').value = name;
+        document.getElementById('mapAdvResults').classList.remove('show');
+        document.getElementById('mapAdvSelected').textContent = `✓ ${name} (ID: ${id})`;
+        document.getElementById('mapAdvSelected').style.display = 'block';
+    }
 
-            } catch (e) {
-                resultsDiv.innerHTML = `<div class="empty error">Error: ${e.message}</div>`;
-            }
-        }
+    async function submitMapCampaign() {
+        const advId = document.getElementById('mapAdvId').value;
+        if (!advId) { showToast('Select an advertiser', 'error'); return; }
+        try {
+            const res = await fetch(API + '/api/config/map-campaign', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({
+                    dsp_advertiser_id: _mapData.DSP_ADVERTISER_ID,
+                    platform_type: _mapData.PLATFORM_TYPE_ID,
+                    quorum_advertiser_id: parseInt(advId),
+                    agency_id: _mapData.AGENCY_ID,
+                    dsp_advertiser_name: _mapData.DSP_ADVERTISER_NAME
+                })
+            });
+            const json = await res.json();
+            closeModal('modalMap');
+            if (json.success) {
+                showToast('Campaign mapped!');
+                searchImpressions();
+                if (currentAdvId) refreshDetail();
+            } else showToast(json.error, 'error');
+        } catch(e) { showToast(e.message, 'error'); }
+    }
 
-        function toggleConfigEdit() {
-            const form = document.getElementById('cfgEditForm');
-            if (form.style.display === 'none') {
-                // Populate form with current values
-                if (cfgCurrentData) {
-                    document.getElementById('cfgEditAttrWindow').value = cfgCurrentData.ATTRIBUTION_WINDOW_DAYS || 30;
-                    document.getElementById('cfgEditMatchStrategy').value = cfgCurrentData.MATCH_STRATEGY || 'HOUSEHOLD';
-                    document.getElementById('cfgEditImprStrategy').value = cfgCurrentData.IMPRESSION_JOIN_STRATEGY || 'ADM_PREFIX';
-                    document.getElementById('cfgEditStatus').value = cfgCurrentData.CONFIG_STATUS || 'ACTIVE';
-                }
-                form.style.display = 'block';
-            } else {
-                form.style.display = 'none';
-            }
-        }
+    // Close autocomplete on outside click
+    document.addEventListener('click', e => {
+        if (!e.target.closest('.autocomplete-wrap'))
+            document.querySelectorAll('.autocomplete-results').forEach(d => d.classList.remove('show'));
+    });
 
-        async function submitUpdateConfig() {
-            if (!cfgCurrentData) return;
-
-            const payload = {
-                advertiser_id: cfgCurrentData.ADVERTISER_ID,
-                agency_id: cfgCurrentData.AGENCY_ID,
-                attribution_window_days: parseInt(document.getElementById('cfgEditAttrWindow').value) || 30,
-                match_strategy: document.getElementById('cfgEditMatchStrategy').value,
-                impression_join_strategy: document.getElementById('cfgEditImprStrategy').value,
-                config_status: document.getElementById('cfgEditStatus').value,
-            };
-
-            try {
-                const res = await fetch(`${API}/api/config/update-config`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload),
-                });
-                const json = await res.json();
-                if (json.success) {
-                    showToast('Configuration updated successfully');
-                    document.getElementById('cfgEditForm').style.display = 'none';
-                    loadAdvertiserConfig(); // Refresh detail view
-                    loadScorecard(); // Refresh scorecard counts
-                } else {
-                    showToast(`Error: ${json.error || 'Update failed'}`, 'error');
-                }
-            } catch (e) {
-                showToast(`Error: ${e.message}`, 'error');
-            }
-        }
-
-        // =====================================================
-        // INIT
-        // =====================================================
-        initAuth().then(() => {
-            loadScorecard();
-            loadUnmappedImpressions();
-            loadUnmappedWebPixels();
-        }).catch(() => {
-            loadScorecard();
-            loadUnmappedImpressions();
-            loadUnmappedWebPixels();
+    // Close modals on backdrop click
+    document.querySelectorAll('.modal-overlay').forEach(overlay => {
+        overlay.addEventListener('click', e => {
+            if (e.target === overlay) overlay.classList.remove('active');
         });
+    });
+
+    // =========================================================================
+    // INIT
+    // =========================================================================
+    initAuth().then(async () => {
+        await loadAgencies();
+        loadAdvertiserList();
+    }).catch(() => {
+        loadAgencies();
+        loadAdvertiserList();
+    });
     </script>
 </body>
 </html>
