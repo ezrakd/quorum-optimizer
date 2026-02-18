@@ -182,9 +182,8 @@ def enrich_web_visits_agency(cursor, start_date, end_date):
     try:
         cursor.execute("""
             SELECT a.AD_IMPRESSION_AGENCY_ID,
-                   COUNT(DISTINCT COALESCE(CAST(lk.HOUSEHOLD_ID AS VARCHAR), a.MAID) || '|' || a.WEB_VISIT_DATE) as WEB_VISITS
+                   COUNT(DISTINCT COALESCE(CAST(a.HOUSEHOLD_ID AS VARCHAR), a.MAID) || '|' || a.WEB_VISIT_DATE) as WEB_VISITS
             FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION a
-            LEFT JOIN QUORUMDB.HOUSEHOLD_CORE.MAID_HOUSEHOLD_LOOKUP lk ON a.MAID = lk.MAID
             WHERE a.WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
             GROUP BY a.AD_IMPRESSION_AGENCY_ID
         """, {'start_date': start_date, 'end_date': end_date})
@@ -197,9 +196,8 @@ def enrich_web_visits_advertiser(cursor, agency_id, advertiser_id, start_date, e
     """Return total web visits for a specific advertiser from the pre-matched table."""
     try:
         cursor.execute("""
-            SELECT COUNT(DISTINCT COALESCE(CAST(lk.HOUSEHOLD_ID AS VARCHAR), a.MAID) || '|' || a.WEB_VISIT_DATE) as WEB_VISITS
+            SELECT COUNT(DISTINCT COALESCE(CAST(a.HOUSEHOLD_ID AS VARCHAR), a.MAID) || '|' || a.WEB_VISIT_DATE) as WEB_VISITS
             FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION a
-            LEFT JOIN QUORUMDB.HOUSEHOLD_CORE.MAID_HOUSEHOLD_LOOKUP lk ON a.MAID = lk.MAID
             WHERE a.AD_IMPRESSION_AGENCY_ID = %(agency_id)s
               AND a.AD_IMPRESSION_ADVERTISER_ID = %(advertiser_id)s
               AND a.WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
@@ -215,9 +213,8 @@ def enrich_web_visits_timeseries(cursor, agency_id, advertiser_id, start_date, e
     """Return {date_str: web_visit_count} for timeseries enrichment."""
     try:
         cursor.execute("""
-            SELECT a.WEB_VISIT_DATE, COUNT(DISTINCT COALESCE(CAST(lk.HOUSEHOLD_ID AS VARCHAR), a.MAID)) as WEB_VISITS
+            SELECT a.WEB_VISIT_DATE, COUNT(DISTINCT COALESCE(CAST(a.HOUSEHOLD_ID AS VARCHAR), a.MAID)) as WEB_VISITS
             FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION a
-            LEFT JOIN QUORUMDB.HOUSEHOLD_CORE.MAID_HOUSEHOLD_LOOKUP lk ON a.MAID = lk.MAID
             WHERE a.AD_IMPRESSION_AGENCY_ID = %(agency_id)s
               AND a.AD_IMPRESSION_ADVERTISER_ID = %(advertiser_id)s
               AND a.WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
@@ -296,9 +293,8 @@ def enrich_web_visits_by_campaign(cursor, agency_id, advertiser_id, start_date, 
     try:
         cursor.execute("""
             SELECT a.INSERTION_ORDER_ID,
-                   COUNT(DISTINCT COALESCE(CAST(lk.HOUSEHOLD_ID AS VARCHAR), a.MAID) || '|' || a.WEB_VISIT_DATE) as WEB_VISITS
+                   COUNT(DISTINCT COALESCE(CAST(a.HOUSEHOLD_ID AS VARCHAR), a.MAID) || '|' || a.WEB_VISIT_DATE) as WEB_VISITS
             FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION a
-            LEFT JOIN QUORUMDB.HOUSEHOLD_CORE.MAID_HOUSEHOLD_LOOKUP lk ON a.MAID = lk.MAID
             WHERE a.AD_IMPRESSION_AGENCY_ID = %(agency_id)s
               AND a.AD_IMPRESSION_ADVERTISER_ID = %(advertiser_id)s
               AND a.WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
@@ -316,9 +312,8 @@ def enrich_web_visits_by_lineitem(cursor, agency_id, advertiser_id, start_date, 
     try:
         cursor.execute("""
             SELECT a.LINE_ITEM_ID,
-                   COUNT(DISTINCT COALESCE(CAST(lk.HOUSEHOLD_ID AS VARCHAR), a.MAID) || '|' || a.WEB_VISIT_DATE) as WEB_VISITS
+                   COUNT(DISTINCT COALESCE(CAST(a.HOUSEHOLD_ID AS VARCHAR), a.MAID) || '|' || a.WEB_VISIT_DATE) as WEB_VISITS
             FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION a
-            LEFT JOIN QUORUMDB.HOUSEHOLD_CORE.MAID_HOUSEHOLD_LOOKUP lk ON a.MAID = lk.MAID
             WHERE a.AD_IMPRESSION_AGENCY_ID = %(agency_id)s
               AND a.AD_IMPRESSION_ADVERTISER_ID = %(advertiser_id)s
               AND a.WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
@@ -546,9 +541,8 @@ def get_advertisers():
         try:
             cursor.execute("""
                 SELECT a.AD_IMPRESSION_ADVERTISER_ID,
-                       COUNT(DISTINCT COALESCE(CAST(lk.HOUSEHOLD_ID AS VARCHAR), a.MAID) || '|' || a.WEB_VISIT_DATE) as WEB_VISITS
+                       COUNT(DISTINCT COALESCE(CAST(a.HOUSEHOLD_ID AS VARCHAR), a.MAID) || '|' || a.WEB_VISIT_DATE) as WEB_VISITS
                 FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION a
-                LEFT JOIN QUORUMDB.HOUSEHOLD_CORE.MAID_HOUSEHOLD_LOOKUP lk ON a.MAID = lk.MAID
                 WHERE a.AD_IMPRESSION_AGENCY_ID = %(agency_id)s
                   AND a.WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
                 GROUP BY a.AD_IMPRESSION_ADVERTISER_ID
