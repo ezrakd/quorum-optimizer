@@ -394,7 +394,9 @@ def get_agencies():
         for row in cursor.fetchall():
             d = dict(zip(columns, row))
             agency_id = d['AGENCY_ID']
-            agency_cfg = config.get(agency_id, {})
+            agency_cfg = config.get(agency_id)
+            if not agency_cfg:
+                continue  # Skip agencies not in active config
             strategy = agency_cfg.get('impression_join_strategy', STRATEGY_PCM_4KEY)
             if strategy == STRATEGY_PCM_4KEY:
                 d['AGENCY_NAME'] = agency_cfg.get('name', f'Agency {agency_id}')
