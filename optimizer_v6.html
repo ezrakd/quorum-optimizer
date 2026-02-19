@@ -227,6 +227,17 @@
                     }
                 }, 50000);
 
+                // Refresh token when tab becomes visible again (setInterval is throttled in background tabs)
+                document.addEventListener('visibilitychange', async () => {
+                    if (!document.hidden && _clerk && _clerk.session) {
+                        try {
+                            _authToken = await _clerk.session.getToken();
+                        } catch (e) {
+                            console.warn('[Auth] Token refresh on visibility failed:', e);
+                        }
+                    }
+                });
+
                 // Show user info + logout button
                 showUserInfo(_clerk.user);
             } catch (e) {
@@ -258,6 +269,10 @@
             Object.entries(params).forEach(([k, v]) => v != null && url.searchParams.append(k, v));
             console.log('[API Request]', endpoint, params);
             try {
+                // Ensure fresh token before each API call (prevents stale token after tab switch)
+                if (_clerk && _clerk.session) {
+                    try { _authToken = await _clerk.session.getToken(); } catch(e) {}
+                }
                 const controller = new AbortController();
                 const timeout = setTimeout(() => controller.abort(), 90000);
                 const headers = {};
@@ -911,7 +926,8 @@
             } else if (tab === 'traffic') {
                 // Load traffic sources data (Paramount only)
                 content.innerHTML = '<div class="loading"><div class="spinner"></div> Loading traffic sources (this may take 30-60 seconds)...</div>';
-                const params = { 
+                const params = {
+                    agency_id: state.agencyId,
                     advertiser_id: state.advertiserId,
                     ...dates()
                 };

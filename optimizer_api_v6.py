@@ -1361,16 +1361,20 @@ def get_lift_analysis():
                     SELECT COUNT(DISTINCT CASE WHEN sv.device_id IS NOT NULL THEN e.device_id END) AS store_visitors
                     FROM exposed_devices e LEFT JOIN adv_store_visit_days sv ON sv.device_id = e.device_id
                 ),
+                web_visitor_set AS (
+                    SELECT DISTINCT device_id FROM adv_web_visit_days
+                ),
                 campaign_metrics AS (
                     SELECT {group_cols}, {name_cols}
                         COUNT(*) as IMPRESSIONS, COUNT(DISTINCT v.DEVICE_ID_RAW) as REACH,
-                        0 as WEB_VISITORS
+                        COUNT(DISTINCT CASE WHEN wvs.device_id IS NOT NULL THEN LOWER(REPLACE(v.DEVICE_ID_RAW,'-','')) END) as WEB_VISITORS
                     FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
                     JOIN (
                         SELECT DISTINCT DSP_ADVERTISER_ID, INSERTION_ORDER_ID, LINE_ITEM_ID
                         FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
                         WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
                     ) pcm ON v.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
+                    LEFT JOIN web_visitor_set wvs ON LOWER(REPLACE(v.DEVICE_ID_RAW,'-','')) = wvs.device_id
                     WHERE v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
                     GROUP BY {group_cols} HAVING COUNT(*) >= 1000
                 ),
