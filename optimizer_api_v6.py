@@ -286,18 +286,31 @@ def enrich_store_visits_timeseries(cursor, agency_id, advertiser_id, start_date,
 # =============================================================================
 
 def enrich_web_visits_by_campaign(cursor, agency_id, advertiser_id, start_date, end_date):
-    """Return {insertion_order_id: web_visit_count} for campaign-level enrichment."""
+    """Return {insertion_order_id: web_visit_count} for campaign-level enrichment.
+    Uses household-ID matching: resolves impression IPs to households via IP_HOUSEHOLD_LOOKUP,
+    then counts how many of those households also appear in web visit attribution."""
     try:
         cursor.execute("""
-            SELECT a.INSERTION_ORDER_ID,
-                   COUNT(DISTINCT COALESCE(CAST(a.HOUSEHOLD_ID AS VARCHAR), a.MAID) || '|' || a.WEB_VISIT_DATE) as WEB_VISITS
-            FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION a
-            WHERE a.AD_IMPRESSION_AGENCY_ID = %(agency_id)s
-              AND a.AD_IMPRESSION_ADVERTISER_ID = %(advertiser_id)s
-              AND a.WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
-              AND a.INSERTION_ORDER_ID IS NOT NULL
-            GROUP BY a.INSERTION_ORDER_ID
-        """, {'agency_id': agency_id, 'advertiser_id': advertiser_id,
+            WITH web_hh AS (
+                SELECT DISTINCT CAST(HOUSEHOLD_ID AS VARCHAR) as HH_ID
+                FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION
+                WHERE AD_IMPRESSION_ADVERTISER_ID = %(advertiser_id)s
+                  AND WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+                  AND HOUSEHOLD_ID IS NOT NULL
+            )
+            SELECT CAST(v.INSERTION_ORDER_ID AS VARCHAR) as IO_ID,
+                   COUNT(DISTINCT CASE WHEN wh.HH_ID IS NOT NULL THEN CAST(iph.HOUSEHOLD_ID AS VARCHAR) END) as WEB_VISITS
+            FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+            JOIN QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2 pcm
+              ON v.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
+              AND pcm.QUORUM_ADVERTISER_ID = %(advertiser_id)s
+            JOIN QUORUMDB.HOUSEHOLD_CORE.IP_HOUSEHOLD_LOOKUP iph
+              ON v.USER_IP_FROM_HTTP_REQUEST = iph.IP_ADDRESS
+            LEFT JOIN web_hh wh ON CAST(iph.HOUSEHOLD_ID AS VARCHAR) = wh.HH_ID
+            WHERE v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
+              AND v.INSERTION_ORDER_ID IS NOT NULL
+            GROUP BY v.INSERTION_ORDER_ID
+        """, {'advertiser_id': advertiser_id,
               'start_date': start_date, 'end_date': end_date})
         return {str(r[0]): int(r[1]) for r in cursor.fetchall()}
     except Exception:
@@ -305,18 +318,30 @@ def enrich_web_visits_by_campaign(cursor, agency_id, advertiser_id, start_date, 
 
 
 def enrich_web_visits_by_lineitem(cursor, agency_id, advertiser_id, start_date, end_date):
-    """Return {line_item_id: web_visit_count} for lineitem-level enrichment."""
+    """Return {line_item_id: web_visit_count} for lineitem-level enrichment.
+    Uses household-ID matching via impression IP → IP_HOUSEHOLD_LOOKUP → attribution HH."""
     try:
         cursor.execute("""
-            SELECT a.LINE_ITEM_ID,
-                   COUNT(DISTINCT COALESCE(CAST(a.HOUSEHOLD_ID AS VARCHAR), a.MAID) || '|' || a.WEB_VISIT_DATE) as WEB_VISITS
-            FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION a
-            WHERE a.AD_IMPRESSION_AGENCY_ID = %(agency_id)s
-              AND a.AD_IMPRESSION_ADVERTISER_ID = %(advertiser_id)s
-              AND a.WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
-              AND a.LINE_ITEM_ID IS NOT NULL
-            GROUP BY a.LINE_ITEM_ID
-        """, {'agency_id': agency_id, 'advertiser_id': advertiser_id,
+            WITH web_hh AS (
+                SELECT DISTINCT CAST(HOUSEHOLD_ID AS VARCHAR) as HH_ID
+                FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION
+                WHERE AD_IMPRESSION_ADVERTISER_ID = %(advertiser_id)s
+                  AND WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+                  AND HOUSEHOLD_ID IS NOT NULL
+            )
+            SELECT CAST(v.LINE_ITEM_ID AS VARCHAR) as LI_ID,
+                   COUNT(DISTINCT CASE WHEN wh.HH_ID IS NOT NULL THEN CAST(iph.HOUSEHOLD_ID AS VARCHAR) END) as WEB_VISITS
+            FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+            JOIN QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2 pcm
+              ON v.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
+              AND pcm.QUORUM_ADVERTISER_ID = %(advertiser_id)s
+            JOIN QUORUMDB.HOUSEHOLD_CORE.IP_HOUSEHOLD_LOOKUP iph
+              ON v.USER_IP_FROM_HTTP_REQUEST = iph.IP_ADDRESS
+            LEFT JOIN web_hh wh ON CAST(iph.HOUSEHOLD_ID AS VARCHAR) = wh.HH_ID
+            WHERE v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
+              AND v.LINE_ITEM_ID IS NOT NULL
+            GROUP BY v.LINE_ITEM_ID
+        """, {'advertiser_id': advertiser_id,
               'start_date': start_date, 'end_date': end_date})
         return {str(r[0]): int(r[1]) for r in cursor.fetchall()}
     except Exception:
@@ -636,19 +661,19 @@ def get_campaign_performance():
         columns = [desc[0] for desc in cursor.description]
         results = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
-        # Enrich with web visits - try direct IO grouping first, fall back to proportional
+        # Enrich with web visits - HH matching (ADM_PREFIX) or proportional fallback
         web_by_io = enrich_web_visits_by_campaign(cursor, agency_id, advertiser_id, start_date, end_date)
         io_key = 'INSERTION_ORDER_ID' if strategy == STRATEGY_ADM_PREFIX else 'IO_ID'
         direct_total = sum(web_by_io.values())
-        total_web = enrich_web_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
 
-        if direct_total > 0 and direct_total >= total_web * 0.5:
-            # Direct enrichment covers most visits — use it
+        if direct_total > 0:
+            # HH-matched campaign-level web visits — use directly
             for r in results:
                 io_id = str(r.get(io_key, ''))
                 r['WEB_VISITS'] = web_by_io.get(io_id, 0)
         else:
-            # IO column mostly null — proportional allocation
+            # No HH matches — proportional allocation
+            total_web = enrich_web_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
             total_store = enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
             enrich_visits_proportional(results, total_web, total_store)
 
@@ -734,17 +759,17 @@ def get_lineitem_performance():
         columns = [desc[0] for desc in cursor.description]
         results = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
-        # Enrich with web visits - try direct LI grouping first, fall back to proportional
+        # Enrich with web visits - HH matching or proportional fallback
         web_by_li = enrich_web_visits_by_lineitem(cursor, agency_id, advertiser_id, start_date, end_date)
         li_key = 'LINE_ITEM_ID' if strategy == STRATEGY_ADM_PREFIX else 'LINEITEM_ID'
         direct_total = sum(web_by_li.values())
-        total_web = enrich_web_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
 
-        if direct_total > 0 and direct_total >= total_web * 0.5:
+        if direct_total > 0:
             for r in results:
                 li_id = str(r.get(li_key, ''))
                 r['WEB_VISITS'] = web_by_li.get(li_id, 0)
         else:
+            total_web = enrich_web_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
             total_store = enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
             enrich_visits_proportional(results, total_web, total_store)
 
