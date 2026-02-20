@@ -1447,98 +1447,129 @@
         }
         
         function renderTrafficSources(data, available, error) {
-            // Normalize numeric fields
-            data = (data || []).map(d => ({
-                ...d,
-                IMPRESSIONS: parseInt(d.AVG_PAGES_CTV) || 0,      // repurposed field: total impressions
-                UNIQUE_DEVICES: parseInt(d.AVG_PAGES_NON_CTV) || 0, // repurposed field: unique devices
-                SITE_VISITS: parseInt(d.VISITOR_DAYS) || 0,
-                STORE_VISITS: parseInt(d.CTV_OVERLAP) || 0,
-                UNIQUE_VISITORS: parseInt(d.UNIQUE_VISITORS) || 0,
-                VISIT_RATE: parseFloat(d.CTV_OVERLAP_PCT) || 0,    // site visit rate %
-                VISITS_PER_VISITOR: parseFloat(d.AVG_PAGEVIEWS) || 0,
-            }));
             if (!available || !data || data.length === 0) {
                 const errorMsg = error ? `<div style="font-size: 12px; color: #f4212e; margin-top: 8px;">Error: ${error}</div>` : '';
                 return `
                     <div class="table-container">
-                        <div class="table-title">Traffic Source Analysis</div>
+                        <div class="table-title">Referral Traffic Analysis</div>
                         <div style="padding: 40px; text-align: center; color: #8b98a5;">
                             <div style="font-size: 48px; margin-bottom: 16px;">${error ? '⚠️' : '🌐'}</div>
-                            <div style="font-size: 16px; margin-bottom: 8px;">${error ? 'Traffic source analysis failed to load.' : 'Traffic source analysis not available for this advertiser.'}</div>
-                            <div style="font-size: 12px;">${error ? 'The query may have timed out. Try a shorter date range (30 days).' : 'This feature requires web pixel integration (currently Paramount only).'}</div>
+                            <div style="font-size: 16px; margin-bottom: 8px;">${error ? 'Traffic source analysis failed to load.' : 'Referral traffic data not available for this advertiser.'}</div>
+                            <div style="font-size: 12px;">${error ? 'The query may have timed out. Try a shorter date range.' : 'This feature requires web pixel integration. Only agencies with deployed pixels have referral data.'}</div>
                             ${errorMsg}
                         </div>
                     </div>
                 `;
             }
 
-            // Compute totals and averages for insight
-            const totalImps = data.reduce((s, d) => s + d.IMPRESSIONS, 0);
-            const totalSiteVisits = data.reduce((s, d) => s + d.SITE_VISITS, 0);
-            const totalStoreVisits = data.reduce((s, d) => s + d.STORE_VISITS, 0);
-            const avgVR = totalImps > 0 ? (totalSiteVisits / totalImps * 100) : 0;
-            const topPerformer = data.filter(d => d.IMPRESSIONS >= 10000).sort((a,b) => b.VISIT_RATE - a.VISIT_RATE)[0];
-            const worstPerformer = data.filter(d => d.IMPRESSIONS >= 10000).sort((a,b) => a.VISIT_RATE - b.VISIT_RATE)[0];
+            // Source type icons and colors
+            const sourceTypeInfo = {
+                'direct':        { icon: '🔗', label: 'Direct', color: '#8b98a5' },
+                'organic_search':{ icon: '🔍', label: 'Organic Search', color: '#00ba7c' },
+                'paid_search':   { icon: '💰', label: 'Paid Search', color: '#f7931a' },
+                'paid':          { icon: '📢', label: 'Paid', color: '#f7931a' },
+                'social':        { icon: '👥', label: 'Social', color: '#1d9bf0' },
+                'email':         { icon: '📧', label: 'Email', color: '#9b59b6' },
+                'referral':      { icon: '↗️', label: 'Referral', color: '#e0e0e0' },
+            };
 
+            // Totals
+            const totalVisits = data.reduce((s, d) => s + (d.WEB_VISITS || 0), 0);
+            const totalHH = data.reduce((s, d) => s + (d.UNIQUE_HOUSEHOLDS || 0), 0);
+            const totalConv = data.reduce((s, d) => s + (d.CONVERSIONS || 0), 0);
+            const totalConvVal = data.reduce((s, d) => s + (d.CONVERSION_VALUE || 0), 0);
+
+            // Source type rollups for the summary bar
+            const typeRollup = {};
+            data.forEach(d => {
+                const st = d.SOURCE_TYPE || 'referral';
+                if (!typeRollup[st]) typeRollup[st] = { visits: 0, hh: 0 };
+                typeRollup[st].visits += d.WEB_VISITS || 0;
+                typeRollup[st].hh += d.UNIQUE_HOUSEHOLDS || 0;
+            });
+
+            // Top source
+            const top = data[0];
+
+            // Insight box
             let insightHtml = `
                 <div style="background: #1e2732; border-left: 3px solid #1d9bf0; padding: 12px 16px; margin-bottom: 16px; border-radius: 0 8px 8px 0; font-size: 13px; line-height: 1.6;">
-                    <strong>Publisher Site Visit Attribution:</strong>
-                    ${fmt(totalImps)} impressions across ${data.length} publishers drove <strong style="color: #1d9bf0;">${fmt(totalSiteVisits)}</strong> site visits (avg <strong>${avgVR.toFixed(2)}%</strong> VR).
-                    ${topPerformer ? `<br><strong style="color: #00ba7c;">Best:</strong> ${topPerformer.TRAFFIC_SOURCE} at <strong>${topPerformer.VISIT_RATE.toFixed(1)}%</strong> VR (${fmt(topPerformer.SITE_VISITS)} visits from ${fmt(topPerformer.IMPRESSIONS)} imps).` : ''}
-                    ${worstPerformer && topPerformer && worstPerformer.TRAFFIC_SOURCE !== topPerformer.TRAFFIC_SOURCE ? `<br><strong style="color: #f4212e;">Weakest:</strong> ${worstPerformer.TRAFFIC_SOURCE} at <strong>${worstPerformer.VISIT_RATE.toFixed(1)}%</strong> VR.` : ''}
-                    ${totalStoreVisits > 0 ? `<br><strong>Store Visits:</strong> ${fmt(totalStoreVisits)} total across all publishers.` : ''}
+                    <strong>Referral Traffic Analysis:</strong>
+                    <strong style="color: #1d9bf0;">${fmt(totalVisits)}</strong> attributed web visits from <strong>${fmt(totalHH)}</strong> unique households across ${data.length} traffic sources.
+                    ${top ? `<br><strong style="color: #00ba7c;">Top source:</strong> ${top.TRAFFIC_SOURCE} (${top.VISIT_SHARE}% of visits, ${fmt(top.WEB_VISITS)} visits).` : ''}
+                    ${totalConv > 0 ? `<br><strong>Conversions:</strong> ${fmt(totalConv)} total` + (totalConvVal > 0 ? ` ($${fmt(Math.round(totalConvVal))} value).` : '.') : ''}
                 </div>
             `;
 
-            // Visit rate bar
-            const maxVR = Math.max(...data.map(d => d.VISIT_RATE || 0), 1);
-            const vrClass = (vr) => vr >= avgVR * 1.2 ? 'text-green' : vr >= avgVR * 0.8 ? 'text-yellow' : 'text-red';
+            // Source type summary chips
+            const chipOrder = ['direct', 'organic_search', 'paid_search', 'paid', 'social', 'email', 'referral'];
+            let chipsHtml = '<div style="display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px;">';
+            for (const st of chipOrder) {
+                const info = sourceTypeInfo[st] || sourceTypeInfo['referral'];
+                const roll = typeRollup[st];
+                if (!roll) continue;
+                const pct = totalVisits > 0 ? Math.round(roll.visits * 100 / totalVisits) : 0;
+                chipsHtml += `
+                    <div style="background: #1e2732; border: 1px solid #2f3942; border-radius: 8px; padding: 8px 12px; font-size: 12px;">
+                        ${info.icon} <strong style="color: ${info.color};">${info.label}</strong>
+                        <span class="text-muted" style="margin-left: 4px;">${fmt(roll.visits)} visits (${pct}%)</span>
+                    </div>`;
+            }
+            chipsHtml += '</div>';
+
+            // Visit share bar
+            const maxVisits = Math.max(...data.map(d => d.WEB_VISITS || 0), 1);
 
             const tableRows = data.map(d => {
-                const barWidth = Math.max(5, (d.VISIT_RATE / maxVR) * 100);
-                const idx = avgVR > 0 ? Math.round(d.VISIT_RATE / avgVR * 100) : 0;
-                const idxClass = idx >= 120 ? 'text-green' : idx >= 80 ? 'text-yellow' : 'text-red';
+                const st = sourceTypeInfo[d.SOURCE_TYPE] || sourceTypeInfo['referral'];
+                const barWidth = Math.max(3, ((d.WEB_VISITS || 0) / maxVisits) * 100);
+                const convRate = d.CONVERSION_RATE || 0;
+                const convClass = convRate >= 5 ? 'text-green' : convRate >= 1 ? 'text-yellow' : 'text-muted';
 
                 return `
                     <tr>
-                        <td><strong>${d.TRAFFIC_SOURCE}</strong></td>
-                        <td class="text-right">${fmt(d.IMPRESSIONS)}</td>
-                        <td class="text-right">${fmt(d.UNIQUE_DEVICES)}</td>
-                        <td class="text-right text-blue">${fmt(d.SITE_VISITS)}</td>
-                        <td class="text-right text-green">${fmt(d.STORE_VISITS)}</td>
+                        <td>
+                            <span title="${st.label}">${st.icon}</span>
+                            <strong>${d.TRAFFIC_SOURCE}</strong>
+                            ${d.TRAFFIC_MEDIUM && d.TRAFFIC_MEDIUM !== 'unknown' ? `<span class="text-muted" style="font-size:10px;margin-left:4px;">/ ${d.TRAFFIC_MEDIUM}</span>` : ''}
+                        </td>
+                        <td class="text-right text-blue">${fmt(d.WEB_VISITS)}</td>
+                        <td class="text-right">${fmt(d.UNIQUE_HOUSEHOLDS)}</td>
                         <td class="text-right">
                             <div style="display: flex; align-items: center; justify-content: flex-end; gap: 8px;">
                                 <div style="width: 60px; height: 6px; background: #2f3942; border-radius: 3px; overflow: hidden;">
-                                    <div style="width: ${barWidth}%; height: 100%; background: #1d9bf0; border-radius: 3px;"></div>
+                                    <div style="width: ${barWidth}%; height: 100%; background: ${st.color}; border-radius: 3px;"></div>
                                 </div>
-                                <span class="${vrClass(d.VISIT_RATE)}" style="min-width: 40px; text-align: right;">${d.VISIT_RATE.toFixed(1)}%</span>
+                                <span style="min-width: 36px; text-align: right;">${d.VISIT_SHARE}%</span>
                             </div>
                         </td>
-                        <td class="text-right"><span class="${idxClass}">${idx}</span></td>
-                        <td class="text-right">${d.VISITS_PER_VISITOR.toFixed(2)}</td>
+                        <td class="text-right">${fmt(d.TOTAL_IMPRESSIONS)}</td>
+                        <td class="text-right text-muted">${d.AVG_DAYS_TO_VISIT}</td>
+                        <td class="text-right ${convClass}">${d.CONVERSIONS > 0 ? fmt(d.CONVERSIONS) : '—'}</td>
+                        <td class="text-right">${d.CONVERSION_VALUE > 0 ? '$' + fmt(Math.round(d.CONVERSION_VALUE)) : '—'}</td>
                     </tr>
                 `;
             }).join('');
 
             return `
                 ${insightHtml}
+                ${chipsHtml}
                 <div class="table-container">
                     <div class="table-title">
-                        Publisher Attribution — Site Visit Performance
-                        <span class="table-note">Which ad publishers drive the most website visits?</span>
+                        Referral Traffic — How Users Reach the Website
+                        <span class="table-note">Traffic sources for web visits attributed to ad-exposed households</span>
                     </div>
                     <table>
                         <thead>
                             <tr>
-                                <th>Publisher</th>
+                                <th>Source / Medium</th>
+                                <th class="text-right">Visits</th>
+                                <th class="text-right">Households</th>
+                                <th class="text-right">Share</th>
                                 <th class="text-right">Impressions</th>
-                                <th class="text-right">Devices</th>
-                                <th class="text-right">Site Visits</th>
-                                <th class="text-right">Store Visits</th>
-                                <th class="text-right">Site VR</th>
-                                <th class="text-right">Index</th>
-                                <th class="text-right">Visits/Visitor</th>
+                                <th class="text-right">Avg Days</th>
+                                <th class="text-right">Conversions</th>
+                                <th class="text-right">Conv. Value</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -1546,10 +1577,11 @@
                         </tbody>
                     </table>
                     <div style="font-size: 12px; color: #8b98a5; padding: 12px 16px; border-top: 1px solid #2f3942;">
-                        <strong>Publisher:</strong> Ad exchange / site where impressions were served.<br>
-                        <strong>Site VR:</strong> % of impressions that resulted in a website visit (IS_SITE_VISIT flag).<br>
-                        <strong>Index:</strong> Visit rate vs advertiser average (100 = average, >120 = strong, <80 = weak).<br>
-                        <strong>Store Visits:</strong> Impressions from this publisher that also resulted in a store visit.
+                        <strong>Source:</strong> How the user arrived at the website (UTM source, referrer URL, or direct).<br>
+                        <strong>Visits:</strong> Web visits from ad-exposed households attributed via household-level matching.<br>
+                        <strong>Share:</strong> % of total attributed visits from this source.<br>
+                        <strong>Avg Days:</strong> Average days between ad impression and web visit.<br>
+                        <strong>Conversions:</strong> Pixel events tagged as purchase, sale, conversion, or lead submission.
                     </div>
                 </div>
             `;

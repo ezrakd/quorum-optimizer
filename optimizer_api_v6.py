@@ -1881,7 +1881,19 @@ def get_lift_analysis():
 
 
 # =============================================================================
-# TRAFFIC SOURCES (row-level agencies only — requires web visitor log)
+# TRAFFIC SOURCES — Referral traffic from WEBPIXEL_EVENTS
+# =============================================================================
+# CONCEPT: How users ARRIVE at the advertiser's website (google, facebook,
+# direct, utm-tagged campaigns). This is REFERRAL TRAFFIC, NOT ad publishers.
+#
+# ARCHITECTURE:
+#   AD_TO_WEB_VISIT_ATTRIBUTION (pre-matched attributed web visits)
+#     → JOIN WEBPIXEL_EVENTS on WEB_VISIT_UUID = UUID (referral dimensions)
+#     → GROUP BY resolved traffic source
+#
+# AD_TO_WEB_VISIT_ATTRIBUTION has ~230K rows (small, pre-matched).
+# The UUID join to WEBPIXEL_EVENTS pulls referral columns only for
+# visits we've already attributed — no full 3.2B row scan.
 # =============================================================================
 @app.route('/api/v6/traffic-sources', methods=['GET'])
 def get_traffic_sources():
@@ -1908,87 +1920,192 @@ def get_traffic_sources():
 
         start_date, end_date = get_date_range()
 
-        cache_key = f"traffic-sources:{advertiser_id}:{start_date}:{end_date}"
+        cache_key = f"traffic-sources:{advertiser_id}:{agency_id}:{start_date}:{end_date}"
         cached = cache_get(cache_key)
         if cached is not None:
-            return jsonify({'success': True, 'data': cached, 'cached': True, 'strategy': strategy})
+            return jsonify({
+                'success': True, 'data': cached['rows'], 'summary': cached['summary'],
+                'cached': True, 'available': True, 'strategy': strategy
+            })
 
         cursor = conn.cursor()
         agency_id = int(agency_id)
 
         # =============================================================
-        # TRAFFIC SOURCES — Block 1 HH join (canonical tables only)
+        # Step 1: Get attributed web visits with referral context
         # =============================================================
-        # Shows publisher effectiveness at driving site visits.
-        # Uses impression SITE_DOMAIN + HH-join to get real per-publisher
-        # web and store visit rates. No PARAMOUNT_IMPRESSIONS_REPORT.
+        # Join AD_TO_WEB_VISIT_ATTRIBUTION → WEBPIXEL_EVENTS via UUID
+        # to pull UTM_SOURCE, CLIENT_REFERRER_URL, etc.
         #
-        # Canonical tables: AD_IMPRESSION_LOG_V2, IP_HOUSEHOLD_LOOKUP,
-        # AD_TO_WEB_VISIT_ATTRIBUTION, WEB_TO_STORE_VISIT_ATTRIBUTION,
-        # STORE_VISITS, MAID_HOUSEHOLD_LOOKUP, PIXEL_CAMPAIGN_MAPPING_V2
-
-        # Step 1: Get impression counts by publisher (Tier 1 + Tier 2)
-        query = """
+        # Resolve traffic source in priority order:
+        #   1. UTM_SOURCE (explicit campaign tagging)
+        #   2. TRAFFIC_SOURCE (pixel-reported source param)
+        #   3. CLIENT_REFERRER_URL domain (browser referrer)
+        #   4. 'direct' (no referrer = direct/bookmarked)
+        cursor.execute("""
+            WITH attributed_visits AS (
+                SELECT
+                    a.HOUSEHOLD_ID,
+                    a.WEB_VISIT_UUID,
+                    a.WEB_VISIT_DATE,
+                    a.AD_IMPRESSION_COUNT,
+                    a.DAYS_TO_WEB_VISIT,
+                    -- Referral dimensions from web pixel
+                    we.UTM_SOURCE,
+                    we.UTM_MEDIUM,
+                    we.UTM_CAMPAIGN,
+                    we.TRAFFIC_SOURCE AS PIXEL_SOURCE,
+                    we.TRAFFIC_MEDIUM AS PIXEL_MEDIUM,
+                    we.CLIENT_REFERRER_URL,
+                    we.EVENT_TYPE,
+                    we.CONVERSION_VALUE,
+                    -- Resolve to a single traffic source label
+                    COALESCE(
+                        NULLIF(LOWER(TRIM(we.UTM_SOURCE)), ''),
+                        NULLIF(LOWER(TRIM(we.TRAFFIC_SOURCE)), ''),
+                        CASE
+                            WHEN we.CLIENT_REFERRER_URL IS NOT NULL
+                                 AND we.CLIENT_REFERRER_URL != ''
+                            THEN LOWER(
+                                SPLIT_PART(
+                                    SPLIT_PART(
+                                        REGEXP_REPLACE(we.CLIENT_REFERRER_URL, '^https?://', ''),
+                                        '/', 1
+                                    ),
+                                    '?', 1
+                                )
+                            )
+                            ELSE NULL
+                        END,
+                        'direct'
+                    ) AS RESOLVED_SOURCE,
+                    -- Resolve traffic medium
+                    COALESCE(
+                        NULLIF(LOWER(TRIM(we.UTM_MEDIUM)), ''),
+                        NULLIF(LOWER(TRIM(we.TRAFFIC_MEDIUM)), ''),
+                        'unknown'
+                    ) AS RESOLVED_MEDIUM
+                FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION a
+                LEFT JOIN QUORUMDB.DERIVED_TABLES.WEBPIXEL_EVENTS we
+                    ON a.WEB_VISIT_UUID = we.UUID
+                WHERE a.AD_IMPRESSION_AGENCY_ID = %(agency_id)s
+                  AND a.AD_IMPRESSION_ADVERTISER_ID = %(advertiser_id)s
+                  AND a.WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+            )
             SELECT
-                v.SITE_DOMAIN as TRAFFIC_SOURCE,
-                COUNT(*) as IMPRESSIONS,
-                COUNT(DISTINCT v.DEVICE_ID_RAW) as UNIQUE_DEVICES
-            FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
-            JOIN (
-                SELECT DISTINCT DSP_ADVERTISER_ID
-                FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
-                WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
-                  AND AGENCY_ID = %(agency_id)s
-            ) pcm ON v.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
-            WHERE v.AGENCY_ID = %(agency_id)s
-              AND v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
-              AND v.SITE_DOMAIN IS NOT NULL
-            GROUP BY v.SITE_DOMAIN
-            HAVING COUNT(*) >= 100
-            ORDER BY 2 DESC LIMIT 50
-        """
-        cursor.execute(query, {
-            'advertiser_id': int(advertiser_id), 'agency_id': agency_id,
-            'start_date': start_date, 'end_date': end_date
+                RESOLVED_SOURCE AS TRAFFIC_SOURCE,
+                RESOLVED_MEDIUM AS TRAFFIC_MEDIUM,
+                COUNT(*) AS WEB_VISITS,
+                COUNT(DISTINCT HOUSEHOLD_ID) AS UNIQUE_HOUSEHOLDS,
+                SUM(AD_IMPRESSION_COUNT) AS TOTAL_IMPRESSIONS,
+                AVG(DAYS_TO_WEB_VISIT) AS AVG_DAYS_TO_VISIT,
+                -- Event type breakdown
+                SUM(CASE WHEN EVENT_TYPE IN ('purchase', 'sale', 'conversion', 'submit_lead')
+                         THEN 1 ELSE 0 END) AS CONVERSIONS,
+                SUM(CASE WHEN CONVERSION_VALUE IS NOT NULL AND TRY_TO_DOUBLE(CONVERSION_VALUE) > 0
+                         THEN TRY_TO_DOUBLE(CONVERSION_VALUE) ELSE 0 END) AS TOTAL_CONVERSION_VALUE,
+                -- UUID match rate (how many visits had pixel data)
+                SUM(CASE WHEN UTM_SOURCE IS NOT NULL OR TRAFFIC_SOURCE IS NOT NULL
+                              OR CLIENT_REFERRER_URL IS NOT NULL
+                         THEN 1 ELSE 0 END) AS VISITS_WITH_REFERRAL_DATA
+            FROM attributed_visits
+            GROUP BY RESOLVED_SOURCE, RESOLVED_MEDIUM
+            HAVING COUNT(*) >= 2
+            ORDER BY COUNT(*) DESC
+            LIMIT 100
+        """, {
+            'agency_id': agency_id,
+            'advertiser_id': int(advertiser_id),
+            'start_date': start_date,
+            'end_date': end_date,
         })
 
         columns = [desc[0] for desc in cursor.description]
-        imp_results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        raw_results = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
-        # Step 2: HH-join enrichment for per-publisher visit rates (Block 1)
-        hh_visits = enrich_visits_by_hh_join(
-            cursor, agency_id, advertiser_id, start_date, end_date,
-            group_by_col='v.SITE_DOMAIN', result_key='TRAFFIC_SOURCE'
-        )
+        # =============================================================
+        # Step 2: Classify source types
+        # =============================================================
+        search_engines = {'google.com', 'bing.com', 'yahoo.com', 'duckduckgo.com',
+                          'google', 'bing', 'yahoo', 'duckduckgo', 'baidu.com', 'yandex.com'}
+        social_platforms = {'facebook.com', 'facebook', 'instagram.com', 'instagram',
+                            'twitter.com', 'x.com', 'linkedin.com', 'linkedin',
+                            'pinterest.com', 'tiktok.com', 'snapchat.com', 'youtube.com',
+                            'fb', 'ig', 'meta', 'reddit.com'}
+        paid_mediums = {'cpc', 'ppc', 'cpm', 'paid', 'paid_social', 'display', 'retargeting',
+                        'banner', 'paid-search', 'paidsocial', 'paid_search'}
 
-        # Step 3: Merge and compute traffic source metrics
         results = []
-        for r in imp_results:
-            pub = str(r['TRAFFIC_SOURCE'])
-            hh = hh_visits.get(pub, {})
-            web_visits = hh.get('WEB_VISITS', 0)
-            store_visits = hh.get('STORE_VISITS', 0)
-            exposed_hh = hh.get('EXPOSED_HH', 0)
-            imps = int(r['IMPRESSIONS'])
-            devices = int(r['UNIQUE_DEVICES'])
+        total_visits = sum(int(r.get('WEB_VISITS', 0)) for r in raw_results)
+
+        for r in raw_results:
+            source = str(r['TRAFFIC_SOURCE'])
+            medium = str(r.get('TRAFFIC_MEDIUM', 'unknown'))
+            visits = int(r.get('WEB_VISITS', 0))
+            households = int(r.get('UNIQUE_HOUSEHOLDS', 0))
+            impressions = int(r.get('TOTAL_IMPRESSIONS', 0))
+            conversions = int(r.get('CONVERSIONS', 0))
+            conv_value = float(r.get('TOTAL_CONVERSION_VALUE', 0))
+            avg_days = float(r.get('AVG_DAYS_TO_VISIT', 0))
+            referral_data = int(r.get('VISITS_WITH_REFERRAL_DATA', 0))
+
+            # Classify the source
+            source_lower = source.lower().strip()
+            if source_lower == 'direct':
+                source_type = 'direct'
+            elif medium in paid_mediums:
+                source_type = 'paid'
+            elif source_lower in search_engines or any(se in source_lower for se in search_engines):
+                source_type = 'organic_search' if medium not in paid_mediums else 'paid_search'
+            elif source_lower in social_platforms or any(sp in source_lower for sp in social_platforms):
+                source_type = 'social'
+            elif source_lower in ('email', 'newsletter', 'mailchimp', 'sendgrid', 'hubspot'):
+                source_type = 'email'
+            else:
+                source_type = 'referral'
 
             results.append({
-                'TRAFFIC_SOURCE': pub,
-                'SOURCE_TYPE': 'publisher',
-                'IMPRESSIONS': imps,
-                'UNIQUE_DEVICES': devices,
-                'EXPOSED_HH': exposed_hh,
-                'SITE_VISITS': web_visits,
-                'STORE_VISITS': store_visits,
-                'SITE_VR': round(web_visits * 100.0 / exposed_hh, 3) if exposed_hh > 0 else 0,
-                'STORE_VR': round(store_visits * 100.0 / exposed_hh, 3) if exposed_hh > 0 else 0,
+                'TRAFFIC_SOURCE': source,
+                'TRAFFIC_MEDIUM': medium,
+                'SOURCE_TYPE': source_type,
+                'WEB_VISITS': visits,
+                'UNIQUE_HOUSEHOLDS': households,
+                'TOTAL_IMPRESSIONS': impressions,
+                'VISIT_SHARE': round(visits * 100.0 / total_visits, 1) if total_visits > 0 else 0,
+                'AVG_DAYS_TO_VISIT': round(avg_days, 1),
+                'CONVERSIONS': conversions,
+                'CONVERSION_VALUE': round(conv_value, 2),
+                'CONVERSION_RATE': round(conversions * 100.0 / visits, 1) if visits > 0 else 0,
+                'VISITS_WITH_REFERRAL': referral_data,
             })
+
+        # Sort by visits descending
+        results.sort(key=lambda x: x['WEB_VISITS'], reverse=True)
+
+        # Summary stats for the response
+        summary = {
+            'total_visits': total_visits,
+            'total_households': sum(r['UNIQUE_HOUSEHOLDS'] for r in results),
+            'total_conversions': sum(r['CONVERSIONS'] for r in results),
+            'total_conversion_value': round(sum(r['CONVERSION_VALUE'] for r in results), 2),
+            'source_count': len(results),
+            'source_type_breakdown': {},
+        }
+        for r in results:
+            st = r['SOURCE_TYPE']
+            if st not in summary['source_type_breakdown']:
+                summary['source_type_breakdown'][st] = {'visits': 0, 'households': 0}
+            summary['source_type_breakdown'][st]['visits'] += r['WEB_VISITS']
+            summary['source_type_breakdown'][st]['households'] += r['UNIQUE_HOUSEHOLDS']
 
         cursor.close()
         conn.close()
-        cache_set(cache_key, results)
+        cache_set(cache_key, {'rows': results, 'summary': summary})
 
-        return jsonify({'success': True, 'data': results, 'available': True, 'strategy': strategy})
+        return jsonify({
+            'success': True, 'data': results, 'summary': summary,
+            'available': True, 'strategy': strategy
+        })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
