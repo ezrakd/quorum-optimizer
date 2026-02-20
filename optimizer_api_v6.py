@@ -378,8 +378,8 @@ def enrich_web_visits_by_lineitem(cursor, agency_id, advertiser_id, start_date, 
 
 def enrich_visits_proportional(results, total_web_visits, total_store_visits=0):
     """Distribute total web/store visits proportionally by impression share.
-    Used for dimensions (publisher, creative, zip, dma) where attribution
-    table doesn't have a direct join key."""
+    LEGACY FALLBACK — only used for PCM_4KEY agencies that lack row-level impressions.
+    ADM_PREFIX agencies should use enrich_visits_by_hh_join() instead."""
     total_imps = sum(r.get('IMPRESSIONS', 0) for r in results)
     if total_imps == 0:
         return results
@@ -388,6 +388,136 @@ def enrich_visits_proportional(results, total_web_visits, total_store_visits=0):
         r['WEB_VISITS'] = round(total_web_visits * share)
         if total_store_visits > 0:
             r['STORE_VISITS'] = round(total_store_visits * share)
+    return results
+
+
+# =============================================================================
+# BLOCK 1: HOUSEHOLD-LEVEL VISIT ENRICHMENT BY DIMENSION
+# =============================================================================
+# The foundational building block. Resolves impression IPs to households via
+# IP_HOUSEHOLD_LOOKUP, then counts how many of those households also appear
+# in web visit attribution (AD_TO_WEB_VISIT_ATTRIBUTION) and/or store visit
+# attribution (WEB_TO_STORE_VISIT_ATTRIBUTION UNION STORE_VISITS).
+#
+# ALL canonical tables:
+#   Tier 1: AD_IMPRESSION_LOG_V2, STORE_VISITS
+#   Tier 2: PIXEL_CAMPAIGN_MAPPING_V2
+#   Tier 3: AD_TO_WEB_VISIT_ATTRIBUTION, WEB_TO_STORE_VISIT_ATTRIBUTION
+#   Tier 4: IP_HOUSEHOLD_LOOKUP, MAID_HOUSEHOLD_LOOKUP
+#
+# Used by: Publisher tab, Creative tab, Geographic tab, Traffic Sources tab,
+#          Lift Analysis tab — each passes a different group_by_col.
+# =============================================================================
+
+def enrich_visits_by_hh_join(cursor, agency_id, advertiser_id, start_date, end_date,
+                              group_by_col, result_key, filters=""):
+    """Return {dimension_value: {'WEB_VISITS': n, 'STORE_VISITS': n}} using household-level join.
+
+    Canonical path:
+      Impression IP → IP_HOUSEHOLD_LOOKUP → HOUSEHOLD_ID
+                                                ↕
+      AD_TO_WEB_VISIT_ATTRIBUTION.HOUSEHOLD_ID (web visits)
+      WEB_TO_STORE_VISIT_ATTRIBUTION.HOUSEHOLD_ID ∪ STORE_VISITS→MAID_HOUSEHOLD_LOOKUP (store visits)
+
+    Args:
+        cursor: Snowflake cursor
+        agency_id: Agency ID
+        advertiser_id: Quorum advertiser ID
+        start_date, end_date: Date range
+        group_by_col: Column from AD_IMPRESSION_LOG_V2 to group by
+                      (e.g. 'v.SITE_DOMAIN', 'v.USER_POSTAL_CODE', 'v.CREATIVE_ID')
+        result_key: Key name in the result dict (e.g. 'PUBLISHER', 'ZIP', 'CREATIVE_ID')
+        filters: Additional SQL WHERE clauses (e.g. " AND v.INSERTION_ORDER_ID = '123'")
+
+    Returns:
+        dict: {dimension_value: {'WEB_VISITS': int, 'STORE_VISITS': int}}
+    """
+    try:
+        query = f"""
+            WITH
+            -- Web visit households for this advertiser (Tier 3)
+            web_hh AS (
+                SELECT DISTINCT CAST(HOUSEHOLD_ID AS VARCHAR) as HH_ID
+                FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION
+                WHERE AD_IMPRESSION_ADVERTISER_ID = %(advertiser_id)s
+                  AND WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+                  AND HOUSEHOLD_ID IS NOT NULL
+            ),
+            -- Store visit households for this advertiser (Tier 3 + Tier 1 via Tier 4)
+            store_hh AS (
+                SELECT DISTINCT CAST(HOUSEHOLD_ID AS VARCHAR) as HH_ID
+                FROM QUORUMDB.DERIVED_TABLES.WEB_TO_STORE_VISIT_ATTRIBUTION
+                WHERE AGENCY_ID = %(agency_id)s
+                  AND ADVERTISER_ID = %(advertiser_id)s
+                  AND STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+                  AND HOUSEHOLD_ID IS NOT NULL
+                UNION
+                SELECT DISTINCT CAST(mhl.HOUSEHOLD_ID AS VARCHAR) as HH_ID
+                FROM QUORUMDB.BASE_TABLES.STORE_VISITS sv
+                JOIN QUORUMDB.HOUSEHOLD_CORE.MAID_HOUSEHOLD_LOOKUP mhl
+                  ON UPPER(mhl.MAID) = UPPER(sv.MAID)
+                WHERE sv.AGENCY_ID = %(agency_id)s
+                  AND sv.QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                  AND sv.STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+                  AND sv.MAID IS NOT NULL
+            )
+            -- Impression households grouped by dimension (Tier 1 + Tier 2 + Tier 4)
+            SELECT
+                {group_by_col} as DIM_VALUE,
+                COUNT(DISTINCT CAST(iph.HOUSEHOLD_ID AS VARCHAR)) as EXPOSED_HH,
+                COUNT(DISTINCT CASE WHEN wh.HH_ID IS NOT NULL
+                    THEN CAST(iph.HOUSEHOLD_ID AS VARCHAR) END) as WEB_VISITS,
+                COUNT(DISTINCT CASE WHEN sh.HH_ID IS NOT NULL
+                    THEN CAST(iph.HOUSEHOLD_ID AS VARCHAR) END) as STORE_VISITS
+            FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+            JOIN (
+                SELECT DISTINCT DSP_ADVERTISER_ID
+                FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
+                WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                  AND AGENCY_ID = %(agency_id)s
+            ) pcm ON v.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
+            JOIN QUORUMDB.HOUSEHOLD_CORE.IP_HOUSEHOLD_LOOKUP iph
+              ON v.USER_IP_FROM_HTTP_REQUEST = iph.IP_ADDRESS
+            LEFT JOIN web_hh wh ON CAST(iph.HOUSEHOLD_ID AS VARCHAR) = wh.HH_ID
+            LEFT JOIN store_hh sh ON CAST(iph.HOUSEHOLD_ID AS VARCHAR) = sh.HH_ID
+            WHERE v.AGENCY_ID = %(agency_id)s
+              AND v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
+              AND {group_by_col} IS NOT NULL
+              {filters}
+            GROUP BY {group_by_col}
+        """
+        cursor.execute(query, {
+            'agency_id': agency_id, 'advertiser_id': int(advertiser_id),
+            'start_date': start_date, 'end_date': end_date
+        })
+        result = {}
+        for row in cursor.fetchall():
+            dim_val = str(row[0])
+            result[dim_val] = {
+                'EXPOSED_HH': int(row[1]),
+                'WEB_VISITS': int(row[2]),
+                'STORE_VISITS': int(row[3])
+            }
+        return result
+    except Exception as e:
+        app.logger.error(f"enrich_visits_by_hh_join error: {e}")
+        return {}
+
+
+def enrich_results_with_hh_visits(results, hh_visits, result_key):
+    """Merge household-join visit counts into an existing result set.
+
+    Args:
+        results: List of dicts with result_key and IMPRESSIONS
+        hh_visits: Dict from enrich_visits_by_hh_join()
+        result_key: Key in each result dict to match against hh_visits keys
+    """
+    for r in results:
+        dim_val = str(r.get(result_key, ''))
+        hh = hh_visits.get(dim_val, {})
+        r['WEB_VISITS'] = hh.get('WEB_VISITS', 0)
+        r['STORE_VISITS'] = hh.get('STORE_VISITS', 0)
+        r['EXPOSED_HH'] = hh.get('EXPOSED_HH', 0)
     return results
 
 
@@ -968,6 +1098,13 @@ def get_publisher_performance():
         cursor = conn.cursor()
         strategy = get_impression_strategy(agency_id, conn)
 
+        # =============================================================
+        # PUBLISHER PERFORMANCE — Block 3 (built on Block 1 HH join)
+        # =============================================================
+        # ADM_PREFIX agencies: get impressions from AD_IMPRESSION_LOG_V2,
+        # then use enrich_visits_by_hh_join for real per-publisher visit rates.
+        # PCM_4KEY agencies: pre-aggregated impressions, proportional VR fallback.
+
         if strategy == STRATEGY_ADM_PREFIX:
             filters = ""
             if campaign_id: filters += f" AND v.INSERTION_ORDER_ID = '{campaign_id}'"
@@ -995,7 +1132,22 @@ def get_publisher_performance():
             """
             cursor.execute(query, {'advertiser_id': advertiser_id, 'agency_id': agency_id,
                                    'start_date': start_date, 'end_date': end_date})
+
+            columns = [desc[0] for desc in cursor.description]
+            results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+            # Block 1 HH-join enrichment: real per-publisher visit rates
+            hh_filters = ""
+            if campaign_id: hh_filters += f" AND v.INSERTION_ORDER_ID = '{campaign_id}'"
+            if lineitem_id: hh_filters += f" AND v.LINE_ITEM_ID = '{lineitem_id}'"
+            hh_visits = enrich_visits_by_hh_join(
+                cursor, agency_id, advertiser_id, start_date, end_date,
+                group_by_col='v.SITE_DOMAIN', result_key='PUBLISHER', filters=hh_filters
+            )
+            enrich_results_with_hh_visits(results, hh_visits, 'PUBLISHER')
+
         else:
+            # PCM_4KEY: pre-aggregated, proportional VR fallback
             filters = ""
             if campaign_id: filters += f" AND IO_ID = '{campaign_id}'"
             if lineitem_id: filters += f" AND LI_ID = '{lineitem_id}'"
@@ -1016,13 +1168,12 @@ def get_publisher_performance():
             cursor.execute(query, {'agency_id': agency_id, 'advertiser_id': advertiser_id,
                                    'start_date': start_date, 'end_date': end_date})
 
-        columns = [desc[0] for desc in cursor.description]
-        results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+            columns = [desc[0] for desc in cursor.description]
+            results = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
-        # Enrich with proportional web/store visits (no publisher→visit join key)
-        total_web = enrich_web_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
-        total_store = enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
-        enrich_visits_proportional(results, total_web, total_store)
+            total_web = enrich_web_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
+            total_store = enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date)
+            enrich_visits_proportional(results, total_web, total_store)
 
         cursor.close()
         conn.close()
@@ -1069,14 +1220,17 @@ def get_zip_performance():
                     SELECT DISTINCT DSP_ADVERTISER_ID
                     FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
                     WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                      AND AGENCY_ID = %(agency_id)s
                 ) pcm ON v.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
                 LEFT JOIN QUORUMDB.SEGMENT_DATA.DBIP_LOOKUP_US d ON v.USER_POSTAL_CODE = d.ZIPCODE
-                WHERE v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s {filters}
+                WHERE v.AGENCY_ID = %(agency_id)s
+                  AND v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
+                  AND v.USER_POSTAL_CODE IS NOT NULL {filters}
                 GROUP BY v.USER_POSTAL_CODE
                 HAVING COUNT(*) >= 50
                 ORDER BY 3 DESC LIMIT 100
             """
-            cursor.execute(query, {'advertiser_id': advertiser_id,
+            cursor.execute(query, {'advertiser_id': advertiser_id, 'agency_id': agency_id,
                                    'start_date': start_date, 'end_date': end_date})
         else:
             filters = ""
@@ -1156,12 +1310,14 @@ def get_dma_performance():
                     SELECT DISTINCT DSP_ADVERTISER_ID
                     FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
                     WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                      AND AGENCY_ID = %(agency_id)s
                 ) pcm ON v.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
                 JOIN zip_dma d ON v.USER_POSTAL_CODE = d.ZIPCODE
-                WHERE v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s {filters}
+                WHERE v.AGENCY_ID = %(agency_id)s
+                  AND v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s {filters}
                 GROUP BY d.DMA_NAME HAVING COUNT(*) >= 100 ORDER BY 2 DESC LIMIT 50
             """
-            cursor.execute(query, {'advertiser_id': advertiser_id,
+            cursor.execute(query, {'advertiser_id': advertiser_id, 'agency_id': agency_id,
                                    'start_date': start_date, 'end_date': end_date})
         else:
             filters = ""
@@ -1355,6 +1511,21 @@ def get_lift_analysis():
         strategy = get_impression_strategy(agency_id, conn)
 
         if strategy == STRATEGY_ADM_PREFIX:
+            # =========================================================
+            # HOUSEHOLD-LEVEL LIFT ANALYSIS (Block 2 — built on Block 1)
+            # =========================================================
+            # Replaces broken device-level matching with HH-level matching.
+            # Canonical tables only: AD_IMPRESSION_LOG_V2, IP_HOUSEHOLD_LOOKUP,
+            # AD_TO_WEB_VISIT_ATTRIBUTION, WEB_TO_STORE_VISIT_ATTRIBUTION,
+            # STORE_VISITS, MAID_HOUSEHOLD_LOOKUP, PIXEL_CAMPAIGN_MAPPING_V2.
+            #
+            # Pattern:
+            #   exposed_hh = impression IP → IP_HOUSEHOLD_LOOKUP → HOUSEHOLD_ID
+            #   control_hh = random sample IPs → IP_HOUSEHOLD_LOOKUP → HOUSEHOLD_ID minus exposed
+            #   web_visit_hh = AD_TO_WEB_VISIT_ATTRIBUTION.HOUSEHOLD_ID
+            #   store_visit_hh = WEB_TO_STORE_VISIT_ATTRIBUTION.HOUSEHOLD_ID ∪ STORE_VISITS→MAID_HOUSEHOLD_LOOKUP
+            #   overlap = exposed_hh ∩ visit_hh → lift statistics
+
             if group_by == 'lineitem':
                 group_cols = "v.INSERTION_ORDER_ID, v.LINE_ITEM_ID"
                 name_cols = """
@@ -1371,80 +1542,101 @@ def get_lift_analysis():
 
             query = f"""
                 WITH
-                exposed_devices AS (
-                    SELECT DISTINCT LOWER(REPLACE(v.DEVICE_ID_RAW,'-','')) AS device_id
+                -- Exposed households: impression IP → IP_HOUSEHOLD_LOOKUP (Tier 1 + Tier 4)
+                exposed_hh AS (
+                    SELECT DISTINCT CAST(iph.HOUSEHOLD_ID AS VARCHAR) AS hh_id
                     FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
                     JOIN (
                         SELECT DISTINCT DSP_ADVERTISER_ID
                         FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
                         WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                          AND AGENCY_ID = %(agency_id)s
                     ) pcm ON v.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
-                    WHERE v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s AND v.DEVICE_ID_RAW IS NOT NULL
+                    JOIN QUORUMDB.HOUSEHOLD_CORE.IP_HOUSEHOLD_LOOKUP iph
+                      ON v.USER_IP_FROM_HTTP_REQUEST = iph.IP_ADDRESS
+                    WHERE v.AGENCY_ID = %(agency_id)s
+                      AND v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
                 ),
+                -- Control households: random IPs not in exposed set (Tier 1 + Tier 4)
                 control_sample AS (
-                    SELECT DISTINCT LOWER(REPLACE(v.DEVICE_ID_RAW,'-','')) AS device_id
+                    SELECT DISTINCT CAST(iph.HOUSEHOLD_ID AS VARCHAR) AS hh_id
                     FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v TABLESAMPLE (1)
+                    JOIN QUORUMDB.HOUSEHOLD_CORE.IP_HOUSEHOLD_LOOKUP iph
+                      ON v.USER_IP_FROM_HTTP_REQUEST = iph.IP_ADDRESS
                     WHERE v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
-                      AND v.DEVICE_ID_RAW IS NOT NULL
                     LIMIT 500000
                 ),
-                control_devices AS (
-                    SELECT cs.device_id
+                control_hh AS (
+                    SELECT cs.hh_id
                     FROM control_sample cs
-                    LEFT JOIN exposed_devices ed ON cs.device_id = ed.device_id
-                    WHERE ed.device_id IS NULL
+                    LEFT JOIN exposed_hh eh ON cs.hh_id = eh.hh_id
+                    WHERE eh.hh_id IS NULL
                 ),
-                adv_web_visit_days AS (
-                    SELECT LOWER(REPLACE(a.MAID,'-','')) AS device_id, a.WEB_VISIT_DATE AS event_date
-                    FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION a
-                    WHERE a.AD_IMPRESSION_ADVERTISER_ID = %(advertiser_id)s AND a.MAID IS NOT NULL
-                      AND a.WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
-                    GROUP BY 1, 2
+                -- Web visit households (Tier 3)
+                web_visit_hh AS (
+                    SELECT DISTINCT CAST(HOUSEHOLD_ID AS VARCHAR) AS hh_id
+                    FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION
+                    WHERE AD_IMPRESSION_ADVERTISER_ID = %(advertiser_id)s
+                      AND WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+                      AND HOUSEHOLD_ID IS NOT NULL
                 ),
-                adv_store_visit_days AS (
-                    SELECT LOWER(REPLACE(a.MAID,'-','')) AS device_id, a.STORE_VISIT_DATE AS event_date
-                    FROM QUORUMDB.DERIVED_TABLES.WEB_TO_STORE_VISIT_ATTRIBUTION a
-                    WHERE a.ADVERTISER_ID = %(advertiser_id)s AND a.MAID IS NOT NULL
-                      AND a.STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+                -- Store visit households (Tier 3 + Tier 1 via Tier 4)
+                store_visit_hh AS (
+                    SELECT DISTINCT CAST(HOUSEHOLD_ID AS VARCHAR) AS hh_id
+                    FROM QUORUMDB.DERIVED_TABLES.WEB_TO_STORE_VISIT_ATTRIBUTION
+                    WHERE AGENCY_ID = %(agency_id)s
+                      AND ADVERTISER_ID = %(advertiser_id)s
+                      AND STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+                      AND HOUSEHOLD_ID IS NOT NULL
                     UNION
-                    SELECT LOWER(REPLACE(a.MAID,'-','')) AS device_id, a.STORE_VISIT_DATE AS event_date
-                    FROM QUORUMDB.BASE_TABLES.STORE_VISITS a
-                    WHERE a.QUORUM_ADVERTISER_ID = %(advertiser_id)s AND a.MAID IS NOT NULL
-                      AND a.STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+                    SELECT DISTINCT CAST(mhl.HOUSEHOLD_ID AS VARCHAR) AS hh_id
+                    FROM QUORUMDB.BASE_TABLES.STORE_VISITS sv
+                    JOIN QUORUMDB.HOUSEHOLD_CORE.MAID_HOUSEHOLD_LOOKUP mhl
+                      ON UPPER(mhl.MAID) = UPPER(sv.MAID)
+                    WHERE sv.AGENCY_ID = %(agency_id)s
+                      AND sv.QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                      AND sv.STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+                      AND sv.MAID IS NOT NULL
                 ),
+                -- Control group baselines (HH level)
                 web_network_control AS (
-                    SELECT COUNT(DISTINCT c.device_id) AS control_n,
-                        COUNT(DISTINCT CASE WHEN v.device_id IS NOT NULL THEN c.device_id END) AS control_visitors,
-                        COUNT(DISTINCT CASE WHEN v.device_id IS NOT NULL THEN c.device_id END)::FLOAT
-                            / NULLIF(COUNT(DISTINCT c.device_id), 0) * 100 AS control_rate
-                    FROM control_devices c LEFT JOIN adv_web_visit_days v ON v.device_id = c.device_id
+                    SELECT COUNT(DISTINCT c.hh_id) AS control_n,
+                        COUNT(DISTINCT CASE WHEN wv.hh_id IS NOT NULL THEN c.hh_id END) AS control_visitors,
+                        COUNT(DISTINCT CASE WHEN wv.hh_id IS NOT NULL THEN c.hh_id END)::FLOAT
+                            / NULLIF(COUNT(DISTINCT c.hh_id), 0) * 100 AS control_rate
+                    FROM control_hh c LEFT JOIN web_visit_hh wv ON wv.hh_id = c.hh_id
                 ),
                 store_network_control AS (
-                    SELECT COUNT(DISTINCT c.device_id) AS control_n,
-                        COUNT(DISTINCT CASE WHEN v.device_id IS NOT NULL THEN c.device_id END) AS control_visitors,
-                        COUNT(DISTINCT CASE WHEN v.device_id IS NOT NULL THEN c.device_id END)::FLOAT
-                            / NULLIF(COUNT(DISTINCT c.device_id), 0) * 100 AS control_rate
-                    FROM control_devices c LEFT JOIN adv_store_visit_days v ON v.device_id = c.device_id
+                    SELECT COUNT(DISTINCT c.hh_id) AS control_n,
+                        COUNT(DISTINCT CASE WHEN sv.hh_id IS NOT NULL THEN c.hh_id END) AS control_visitors,
+                        COUNT(DISTINCT CASE WHEN sv.hh_id IS NOT NULL THEN c.hh_id END)::FLOAT
+                            / NULLIF(COUNT(DISTINCT c.hh_id), 0) * 100 AS control_rate
+                    FROM control_hh c LEFT JOIN store_visit_hh sv ON sv.hh_id = c.hh_id
                 ),
+                -- Total exposed store visitors (for summary)
                 exposed_store_visitors AS (
-                    SELECT COUNT(DISTINCT CASE WHEN sv.device_id IS NOT NULL THEN e.device_id END) AS store_visitors
-                    FROM exposed_devices e LEFT JOIN adv_store_visit_days sv ON sv.device_id = e.device_id
+                    SELECT COUNT(DISTINCT CASE WHEN sv.hh_id IS NOT NULL THEN eh.hh_id END) AS store_visitors
+                    FROM exposed_hh eh LEFT JOIN store_visit_hh sv ON sv.hh_id = eh.hh_id
                 ),
-                web_visitor_set AS (
-                    SELECT DISTINCT device_id FROM adv_web_visit_days
-                ),
+                -- Per-campaign metrics at household level (Tier 1 + Tier 2 + Tier 4)
                 campaign_metrics AS (
                     SELECT {group_cols}, {name_cols}
-                        COUNT(*) as IMPRESSIONS, COUNT(DISTINCT v.DEVICE_ID_RAW) as REACH,
-                        COUNT(DISTINCT CASE WHEN wvs.device_id IS NOT NULL THEN LOWER(REPLACE(v.DEVICE_ID_RAW,'-','')) END) as WEB_VISITORS
+                        COUNT(*) as IMPRESSIONS,
+                        COUNT(DISTINCT CAST(iph.HOUSEHOLD_ID AS VARCHAR)) as REACH,
+                        COUNT(DISTINCT CASE WHEN wv.hh_id IS NOT NULL
+                            THEN CAST(iph.HOUSEHOLD_ID AS VARCHAR) END) as WEB_VISITORS
                     FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
                     JOIN (
                         SELECT DISTINCT DSP_ADVERTISER_ID, INSERTION_ORDER_ID, LINE_ITEM_ID
                         FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
                         WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                          AND AGENCY_ID = %(agency_id)s
                     ) pcm ON v.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
-                    LEFT JOIN web_visitor_set wvs ON LOWER(REPLACE(v.DEVICE_ID_RAW,'-','')) = wvs.device_id
-                    WHERE v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
+                    JOIN QUORUMDB.HOUSEHOLD_CORE.IP_HOUSEHOLD_LOOKUP iph
+                      ON v.USER_IP_FROM_HTTP_REQUEST = iph.IP_ADDRESS
+                    LEFT JOIN web_visit_hh wv ON CAST(iph.HOUSEHOLD_ID AS VARCHAR) = wv.hh_id
+                    WHERE v.AGENCY_ID = %(agency_id)s
+                      AND v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
                     GROUP BY {group_cols} HAVING COUNT(*) >= 1000
                 ),
                 adv_baselines AS (
@@ -1481,6 +1673,7 @@ def get_lift_analysis():
 
             cursor.execute(query, {
                 'advertiser_id': int(advertiser_id),
+                'agency_id': agency_id,
                 'start_date': start_date, 'end_date': end_date
             })
 
@@ -1555,10 +1748,11 @@ def get_lift_analysis():
                 'total_web_visitors': total_web, 'total_store_visitors': total_store,
                 'strategy': strategy,
                 'methodology': {
-                    'index': 'Campaign visit rate vs advertiser average',
-                    'lift_vs_network': 'Campaign visit rate vs network control',
-                    'web_source': 'AD_TO_WEB_VISIT_ATTRIBUTION',
-                    'store_source': 'WEB_TO_STORE_VISIT_ATTRIBUTION'
+                    'matching': 'Household-level (impression IP → IP_HOUSEHOLD_LOOKUP → HOUSEHOLD_ID)',
+                    'index': 'Campaign HH visit rate vs advertiser average',
+                    'lift_vs_network': 'Campaign HH visit rate vs network control HH',
+                    'web_source': 'AD_TO_WEB_VISIT_ATTRIBUTION (HOUSEHOLD_ID)',
+                    'store_source': 'WEB_TO_STORE_VISIT_ATTRIBUTION ∪ STORE_VISITS→MAID_HOUSEHOLD_LOOKUP'
                 }
             })
 
@@ -1656,70 +1850,75 @@ def get_traffic_sources():
             return jsonify({'success': True, 'data': cached, 'cached': True, 'strategy': strategy})
 
         cursor = conn.cursor()
+        agency_id = int(agency_id)
 
-        # Traffic sources analysis requires referrer data which currently only exists
-        # in PARAMOUNT_WEB_IMPRESSION_DATA (Paramount-specific). Using base table
-        # AD_TO_WEB_VISIT_ATTRIBUTION for a simplified domain-based analysis instead.
+        # =============================================================
+        # TRAFFIC SOURCES — Block 1 HH join (canonical tables only)
+        # =============================================================
+        # Shows publisher effectiveness at driving site visits.
+        # Uses impression SITE_DOMAIN + HH-join to get real per-publisher
+        # web and store visit rates. No PARAMOUNT_IMPRESSIONS_REPORT.
+        #
+        # Canonical tables: AD_IMPRESSION_LOG_V2, IP_HOUSEHOLD_LOOKUP,
+        # AD_TO_WEB_VISIT_ATTRIBUTION, WEB_TO_STORE_VISIT_ATTRIBUTION,
+        # STORE_VISITS, MAID_HOUSEHOLD_LOOKUP, PIXEL_CAMPAIGN_MAPPING_V2
+
+        # Step 1: Get impression counts by publisher (Tier 1 + Tier 2)
         query = """
-            WITH
-            web_visitors AS (
-                SELECT DISTINCT a.MAID, a.WEB_VISIT_DOMAIN, a.WEB_VISIT_DATE
-                FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION a
-                WHERE a.AD_IMPRESSION_ADVERTISER_ID = %(advertiser_id)s
-                  AND a.WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
-                  AND a.MAID IS NOT NULL
-                LIMIT 50000
-            ),
-            exposed_maids AS (
-                SELECT DISTINCT LOWER(REPLACE(v.DEVICE_ID_RAW,'-','')) AS maid
-                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
-                JOIN (
-                    SELECT DISTINCT DSP_ADVERTISER_ID
-                    FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
-                    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
-                ) pcm ON v.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
-                WHERE v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
-                  AND v.DEVICE_ID_RAW IS NOT NULL
-                  AND LOWER(REPLACE(v.DEVICE_ID_RAW,'-','')) IN (SELECT LOWER(REPLACE(MAID,'-','')) FROM web_visitors)
-            ),
-            classified AS (
-                SELECT wv.WEB_VISIT_DOMAIN as traffic_source,
-                       wv.MAID, wv.WEB_VISIT_DATE,
-                       CASE WHEN em.maid IS NOT NULL THEN 1 ELSE 0 END AS is_exposed
-                FROM web_visitors wv
-                LEFT JOIN exposed_maids em ON LOWER(REPLACE(wv.MAID,'-','')) = em.maid
-            )
-            SELECT traffic_source, 'web' AS SOURCE_TYPE,
-                COUNT(*) AS VISITOR_DAYS,
-                COUNT(DISTINCT MAID) AS UNIQUE_VISITORS,
-                ROUND(COUNT(*)::FLOAT / NULLIF(COUNT(DISTINCT MAID), 0), 2) AS AVG_PAGEVIEWS,
-                1 AS P50_PAGES, 1 AS P90_PAGES,
-                0 AS BOUNCE_RATE,
-                SUM(is_exposed) AS CTV_OVERLAP,
-                ROUND(SUM(is_exposed)::FLOAT / NULLIF(COUNT(*), 0) * 100, 1) AS CTV_OVERLAP_PCT,
-                NULL AS AVG_PAGES_CTV,
-                NULL AS AVG_PAGES_NON_CTV
-            FROM classified
-            GROUP BY 1 HAVING COUNT(*) >= 5
-            ORDER BY VISITOR_DAYS DESC
+            SELECT
+                v.SITE_DOMAIN as TRAFFIC_SOURCE,
+                COUNT(*) as IMPRESSIONS,
+                COUNT(DISTINCT v.DEVICE_ID_RAW) as UNIQUE_DEVICES
+            FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+            JOIN (
+                SELECT DISTINCT DSP_ADVERTISER_ID
+                FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
+                WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                  AND AGENCY_ID = %(agency_id)s
+            ) pcm ON v.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
+            WHERE v.AGENCY_ID = %(agency_id)s
+              AND v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
+              AND v.SITE_DOMAIN IS NOT NULL
+            GROUP BY v.SITE_DOMAIN
+            HAVING COUNT(*) >= 100
+            ORDER BY 2 DESC LIMIT 50
         """
-
         cursor.execute(query, {
-            'advertiser_id': int(advertiser_id),
-            'start_date': start_date,
-            'end_date': end_date
+            'advertiser_id': int(advertiser_id), 'agency_id': agency_id,
+            'start_date': start_date, 'end_date': end_date
         })
 
         columns = [desc[0] for desc in cursor.description]
+        imp_results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        # Step 2: HH-join enrichment for per-publisher visit rates (Block 1)
+        hh_visits = enrich_visits_by_hh_join(
+            cursor, agency_id, advertiser_id, start_date, end_date,
+            group_by_col='v.SITE_DOMAIN', result_key='TRAFFIC_SOURCE'
+        )
+
+        # Step 3: Merge and compute traffic source metrics
         results = []
-        for row in cursor.fetchall():
-            d = dict(zip(columns, row))
-            for k, v in d.items():
-                if hasattr(v, 'is_integer'):
-                    d[k] = int(v) if v == int(v) else float(v)
-                elif v is None:
-                    d[k] = None
-            results.append(d)
+        for r in imp_results:
+            pub = str(r['TRAFFIC_SOURCE'])
+            hh = hh_visits.get(pub, {})
+            web_visits = hh.get('WEB_VISITS', 0)
+            store_visits = hh.get('STORE_VISITS', 0)
+            exposed_hh = hh.get('EXPOSED_HH', 0)
+            imps = int(r['IMPRESSIONS'])
+            devices = int(r['UNIQUE_DEVICES'])
+
+            results.append({
+                'TRAFFIC_SOURCE': pub,
+                'SOURCE_TYPE': 'publisher',
+                'IMPRESSIONS': imps,
+                'UNIQUE_DEVICES': devices,
+                'EXPOSED_HH': exposed_hh,
+                'SITE_VISITS': web_visits,
+                'STORE_VISITS': store_visits,
+                'SITE_VR': round(web_visits * 100.0 / exposed_hh, 3) if exposed_hh > 0 else 0,
+                'STORE_VR': round(store_visits * 100.0 / exposed_hh, 3) if exposed_hh > 0 else 0,
+            })
 
         cursor.close()
         conn.close()
