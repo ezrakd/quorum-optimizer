@@ -1008,50 +1008,91 @@ def get_creative_performance():
         cursor = conn.cursor()
         strategy = get_impression_strategy(agency_id, conn)
 
-        if strategy == STRATEGY_ADM_PREFIX:
+        # Determine if this agency has row-level creative data in AD_IMPRESSION_LOG_V2.
+        # Both ADM_PREFIX agencies and PCM_4KEY agencies with creative data (like MNTN)
+        # should query AD_IMPRESSION_LOG_V2 directly. The legacy CAMPAIGN_PERFORMANCE_
+        # REPORT_WEEKLY_STATS + XANDR_IMPRESSION_LOG path only covers Xandr agencies.
+        use_row_level = (strategy == STRATEGY_ADM_PREFIX) or avail['has_creative_data']
+
+        if use_row_level:
+            # ===== ROW-LEVEL PATH (AD_IMPRESSION_LOG_V2) =====
+            # Works for: ADM_PREFIX (Paramount, Dealer Spike, etc.) AND
+            # PCM_4KEY agencies with creative data (MNTN, Causal iQ, Magnite)
             filters = ""
             if campaign_id: filters += f" AND v.INSERTION_ORDER_ID = '{campaign_id}'"
             if lineitem_id: filters += f" AND v.LINE_ITEM_ID = '{lineitem_id}'"
 
-            query = f"""
-                WITH bounce_data AS (
+            # Use CREATIVE_NAME if available, fall back to CREATIVE_ID
+            has_names = avail.get('has_creative_names', False)
+            creative_col = 'v.CREATIVE_NAME' if has_names else "COALESCE(NULLIF(v.CREATIVE_NAME, ''), 'Creative ' || v.CREATIVE_ID)"
+            creative_filter = "AND v.CREATIVE_NAME IS NOT NULL" if has_names else "AND (v.CREATIVE_ID IS NOT NULL AND v.CREATIVE_ID != '0')"
+
+            # Bounce data only available for ADM_PREFIX agencies with WEB_VISITORS_TO_LOG
+            if strategy == STRATEGY_ADM_PREFIX:
+                query = f"""
+                    WITH bounce_data AS (
+                        SELECT
+                            CREATIVE_NAME, IP,
+                            COUNT(DISTINCT WEB_IMPRESSION_ID) as page_views
+                        FROM QUORUMDB.SEGMENT_DATA.WEB_VISITORS_TO_LOG
+                        WHERE QUORUM_ADVERTISER_ID = %(advertiser_id_str)s
+                          AND IS_SITE_VISIT = 'TRUE'
+                          AND SITE_VISIT_TIMESTAMP BETWEEN %(start_date)s AND %(end_date)s
+                          AND MAID IS NOT NULL AND CREATIVE_NAME IS NOT NULL
+                        GROUP BY CREATIVE_NAME, IP
+                    )
                     SELECT
-                        CREATIVE_NAME, IP,
-                        COUNT(DISTINCT WEB_IMPRESSION_ID) as page_views
-                    FROM QUORUMDB.SEGMENT_DATA.WEB_VISITORS_TO_LOG
-                    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id_str)s
-                      AND IS_SITE_VISIT = 'TRUE'
-                      AND SITE_VISIT_TIMESTAMP BETWEEN %(start_date)s AND %(end_date)s
-                      AND MAID IS NOT NULL AND CREATIVE_NAME IS NOT NULL
-                    GROUP BY CREATIVE_NAME, IP
-                )
-                SELECT
-                    v.CREATIVE_NAME, NULL as CREATIVE_SIZE,
-                    COUNT(*) as IMPRESSIONS,
-                    0 as STORE_VISITS,
-                    0 as WEB_VISITS,
-                    MAX(b_stats.bounce_rate) as BOUNCE_RATE,
-                    MAX(b_stats.avg_pages) as AVG_PAGES
-                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
-                JOIN (
-                    SELECT DISTINCT DSP_ADVERTISER_ID
-                    FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
-                    WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
-                      AND AGENCY_ID = %(agency_id)s
-                ) pcm ON v.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
-                LEFT JOIN (
-                    SELECT CREATIVE_NAME,
-                        ROUND(SUM(CASE WHEN page_views = 1 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 1) as bounce_rate,
-                        ROUND(AVG(page_views), 2) as avg_pages
-                    FROM bounce_data GROUP BY CREATIVE_NAME
-                ) b_stats ON v.CREATIVE_NAME = b_stats.CREATIVE_NAME
-                WHERE v.AGENCY_ID = %(agency_id)s
-                  AND v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
-                  AND v.CREATIVE_NAME IS NOT NULL {filters}
-                GROUP BY v.CREATIVE_NAME
-                HAVING COUNT(*) >= 100
-                ORDER BY 3 DESC
-            """
+                        {creative_col} as CREATIVE_NAME, NULL as CREATIVE_SIZE,
+                        COUNT(*) as IMPRESSIONS,
+                        0 as STORE_VISITS,
+                        0 as WEB_VISITS,
+                        MAX(b_stats.bounce_rate) as BOUNCE_RATE,
+                        MAX(b_stats.avg_pages) as AVG_PAGES
+                    FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+                    JOIN (
+                        SELECT DISTINCT DSP_ADVERTISER_ID
+                        FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
+                        WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                          AND AGENCY_ID = %(agency_id)s
+                    ) pcm ON v.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
+                    LEFT JOIN (
+                        SELECT CREATIVE_NAME,
+                            ROUND(SUM(CASE WHEN page_views = 1 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 1) as bounce_rate,
+                            ROUND(AVG(page_views), 2) as avg_pages
+                        FROM bounce_data GROUP BY CREATIVE_NAME
+                    ) b_stats ON {creative_col} = b_stats.CREATIVE_NAME
+                    WHERE v.AGENCY_ID = %(agency_id)s
+                      AND v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
+                      {creative_filter} {filters}
+                    GROUP BY {creative_col}
+                    HAVING COUNT(*) >= 100
+                    ORDER BY 3 DESC
+                """
+            else:
+                # PCM_4KEY with row-level data (MNTN, Causal iQ, Magnite, etc.)
+                # No bounce data available — NULL for those columns
+                query = f"""
+                    SELECT
+                        {creative_col} as CREATIVE_NAME, NULL as CREATIVE_SIZE,
+                        COUNT(*) as IMPRESSIONS,
+                        0 as STORE_VISITS,
+                        0 as WEB_VISITS,
+                        NULL as BOUNCE_RATE,
+                        NULL as AVG_PAGES
+                    FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2 v
+                    JOIN (
+                        SELECT DISTINCT DSP_ADVERTISER_ID
+                        FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
+                        WHERE QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                          AND AGENCY_ID = %(agency_id)s
+                    ) pcm ON v.DSP_ADVERTISER_ID = pcm.DSP_ADVERTISER_ID
+                    WHERE v.AGENCY_ID = %(agency_id)s
+                      AND v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
+                      {creative_filter} {filters}
+                    GROUP BY {creative_col}
+                    HAVING COUNT(*) >= 100
+                    ORDER BY 3 DESC
+                """
             cursor.execute(query, {
                 'advertiser_id': int(advertiser_id),
                 'agency_id': agency_id,
@@ -1059,6 +1100,9 @@ def get_creative_performance():
                 'start_date': start_date, 'end_date': end_date
             })
         else:
+            # ===== LEGACY PRE-AGGREGATED PATH =====
+            # Fallback for PCM_4KEY agencies without row-level creative data
+            # Uses CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS + XANDR creative map
             filters = ""
             if campaign_id: filters += f" AND w.IO_ID = '{campaign_id}'"
             if lineitem_id: filters += f" AND w.LI_ID = '{lineitem_id}'"

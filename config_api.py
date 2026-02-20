@@ -1752,13 +1752,10 @@ def get_agencies():
                 WHERE AGENCY_NAME IS NOT NULL AND AGENCY_NAME != ''
             ) ag ON c.AGENCY_ID = ag.AG_ID
             WHERE c.CONFIG_STATUS = 'ACTIVE'
-              AND (
-                  c.SEGMENT_COUNT > 0
-                  OR c.WEB_PIXEL_URL_COUNT > 0
-                  OR c.CAMPAIGN_MAPPING_COUNT > 0
-                  OR (c.REPORT_TYPE_IDS IS NOT NULL AND c.REPORT_TYPE_IDS != '')
-              )
+              AND c.HAS_IMPRESSION_TRACKING = TRUE
+              AND c.CAMPAIGN_MAPPING_COUNT > 0
             GROUP BY c.AGENCY_ID, ag.AGENCY_NAME
+            HAVING COUNT(DISTINCT c.ADVERTISER_ID) > 0
             ORDER BY AGENCY_NAME
             LIMIT 100
         """)
