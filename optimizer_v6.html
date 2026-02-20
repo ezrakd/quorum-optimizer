@@ -856,7 +856,9 @@
             `;
         }
 
+        let _tabVersion = 0;
         async function showTab(tab, btn) {
+            const myVersion = ++_tabVersion;
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             btn.classList.add('active');
             const content = document.getElementById('tabContent');
@@ -887,6 +889,7 @@
                         ...(state.filter.lineitemId && { lineitem_id: state.filter.lineitemId })
                     };
                     const result = await api('/api/v6/creative-performance', params);
+                    if (_tabVersion !== myVersion) return;
                     if (result.available === false) {
                         content.innerHTML = renderUnavailable('Creative Performance', result.reason);
                     } else {
@@ -911,6 +914,7 @@
                         ...(state.filter.lineitemId && { lineitem_id: state.filter.lineitemId })
                     };
                     const result = await api('/api/v6/publisher-performance', params);
+                    if (_tabVersion !== myVersion) return;
                     if (result.available === false) {
                         content.innerHTML = renderUnavailable('Publisher Performance', result.reason);
                     } else {
@@ -936,6 +940,7 @@
                         api('/api/v6/zip-performance', params),
                         api('/api/v6/dma-performance', params)
                     ]);
+                    if (_tabVersion !== myVersion) return;
                     if (zips.available === false) {
                         content.innerHTML = renderUnavailable('Geographic Performance', zips.reason);
                     } else {
@@ -956,9 +961,17 @@
                     group_by: state.liftGroupBy || 'campaign'
                 };
                 const result = await api('/api/v6/lift-analysis', params);
-                
+                if (_tabVersion !== myVersion) return;
+
+                // Handle API error (timeout, server error, etc.)
+                if (result.success === false && result.error) {
+                    content.innerHTML = renderUnavailable('Lift Analysis',
+                        result.error.includes('timeout') || result.error.includes('Timeout')
+                            ? 'Lift analysis query timed out. Try narrowing the date range or switching group-by to Campaign.'
+                            : 'Lift analysis failed: ' + result.error);
+                }
                 // Handle both old (single data) and new (web_data/store_data) API response formats
-                if (result.web_data !== undefined) {
+                else if (result.web_data !== undefined) {
                     // New Paramount dual-table format
                     window.tabData.webLift = result.web_data || [];
                     window.tabData.storeLift = result.store_data || [];
@@ -990,6 +1003,7 @@
                         ...dates()
                     };
                     const result = await api('/api/v6/traffic-sources', params);
+                    if (_tabVersion !== myVersion) return;
                     if (result.available === false) {
                         content.innerHTML = renderUnavailable('Traffic Source Analysis', result.reason);
                     } else {
@@ -1002,6 +1016,7 @@
                 content.innerHTML = '<div class="loading"><div class="spinner"></div> Analyzing performance across all dimensions (30-day baseline)...</div>';
                 const params = { advertiser_id: state.advertiserId, agency_id: state.agencyId };
                 const result = await api('/api/v6/optimize', params);
+                if (_tabVersion !== myVersion) return;
                 if (result.success) {
                     window.tabData.optimize = result.data;
                     content.innerHTML = renderOptimize(result.data);
@@ -1033,10 +1048,13 @@
                 <tbody>${data.length === 0 ? '<tr><td colspan="6" class="empty">No campaigns</td></tr>' : data.map(c => {
                     const svr = c.IMPRESSIONS > 0 ? (c.STORE_VISITS / c.IMPRESSIONS * 100) : 0;
                     const wvr = c.IMPRESSIONS > 0 ? (c.WEB_VISITS / c.IMPRESSIONS * 100) : 0;
-                    const baseName = c.IO_NAME || c.IO_ID || 'Unknown';
+                    const rawName = c.IO_NAME || c.IO_ID || 'Unknown';
+                    // Decode URL-encoded campaign names (e.g. %7C → |, + → space)
+                    let baseName = rawName;
+                    try { baseName = decodeURIComponent(rawName.replace(/\+/g, ' ')); } catch(e) {}
                     // Show IO_ID suffix if there are duplicate names
-                    const displayName = hasDupes && nameCount[c.IO_NAME] > 1 
-                        ? baseName + ' (' + String(c.IO_ID).slice(-6) + ')' 
+                    const displayName = hasDupes && nameCount[c.IO_NAME] > 1
+                        ? baseName + ' (' + String(c.IO_ID).slice(-6) + ')'
                         : baseName;
                     const name = baseName.replace(/'/g, "\\'");
                     return `
@@ -1057,12 +1075,16 @@
                 <tbody>${data.length === 0 ? '<tr><td colspan="8" class="empty">No line items</td></tr>' : data.map(l => {
                     const svr = l.IMPRESSIONS > 0 ? (l.STORE_VISITS / l.IMPRESSIONS * 100) : 0;
                     const wvr = l.IMPRESSIONS > 0 ? ((l.WEB_VISITS || 0) / l.IMPRESSIONS * 100) : 0;
-                    const liName = (l.LI_NAME || l.LI_ID || 'Unknown').replace(/'/g, "\\'");
-                    const ioName = (l.IO_NAME || '').replace(/'/g, "\\'");
+                    let liDisp = l.LI_NAME || l.LI_ID || 'Unknown';
+                    let ioDisp = l.IO_NAME || '';
+                    try { liDisp = decodeURIComponent(liDisp.replace(/\+/g, ' ')); } catch(e) {}
+                    try { ioDisp = decodeURIComponent(ioDisp.replace(/\+/g, ' ')); } catch(e) {}
+                    const liName = liDisp.replace(/'/g, "\\'");
+                    const ioName = ioDisp.replace(/'/g, "\\'");
                     return `
                     <tr class="clickable-row" onclick="filterByLineitem('${l.LI_ID}', '${liName}', '${l.IO_ID || ''}', '${ioName}')">
-                        <td>${l.LI_NAME || l.LI_ID || 'Unknown'}</td>
-                        <td class="text-muted">${l.IO_NAME || ''}</td>
+                        <td>${liDisp}</td>
+                        <td class="text-muted">${ioDisp}</td>
                         <td class="text-muted">${l.PLATFORM || ''}</td>
                         <td class="text-right">${fmt(l.IMPRESSIONS)}</td>
                         <td class="text-right text-green">${fmt(l.STORE_VISITS)}</td>
@@ -1370,14 +1392,17 @@
             const hasDupes = Object.values(nameCount).some(c => c > 1);
             
             const tableRows = data.map(d => {
-                // Add ID suffix for duplicate names
+                // Decode URL-encoded names and add ID suffix for duplicates
                 let displayName = d.NAME || 'Unknown';
-                if (hasDupes && nameCount[displayName] > 1 && d.ID) {
+                try { displayName = decodeURIComponent(displayName.replace(/\+/g, ' ')); } catch(e) {}
+                if (hasDupes && nameCount[d.NAME || 'Unknown'] > 1 && d.ID) {
                     displayName = displayName + ' (' + String(d.ID).slice(-6) + ')';
                 }
-                
+                let parentName = d.PARENT_NAME || '';
+                try { parentName = decodeURIComponent(parentName.replace(/\+/g, ' ')); } catch(e) {}
+
                 const nameCol = groupBy === 'lineitem'
-                    ? `<td>${displayName}</td><td class="text-muted">${d.PARENT_NAME || ''}</td>`
+                    ? `<td>${displayName}</td><td class="text-muted">${parentName}</td>`
                     : `<td>${displayName}</td>`;
                 
                 // Handle both field name formats: Paramount uses LIFT_VS_NETWORK, others use LIFT_PCT

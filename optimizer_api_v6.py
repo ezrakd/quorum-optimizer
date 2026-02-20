@@ -998,11 +998,12 @@ def get_creative_performance():
         # Data availability check — early return if no creative data
         avail = check_data_availability(agency_id, conn)
         if not avail['has_creative_data']:
+            strategy = get_impression_strategy(agency_id, conn)
             conn.close()
             return jsonify({
                 'success': True, 'data': [], 'available': False,
                 'reason': avail['reasons'].get('creative', 'Creative data not available.'),
-                'strategy': get_impression_strategy(agency_id, conn) if conn else 'UNKNOWN'
+                'strategy': strategy
             })
 
         cursor = conn.cursor()
@@ -1181,11 +1182,12 @@ def get_publisher_performance():
         # Data availability check — early return if no publisher data
         avail = check_data_availability(agency_id, conn)
         if not avail['has_publisher_data']:
+            strategy = get_impression_strategy(agency_id, conn)
             conn.close()
             return jsonify({
                 'success': True, 'data': [], 'available': False,
                 'reason': avail['reasons'].get('publisher', 'Publisher data not available.'),
-                'strategy': get_impression_strategy(agency_id, conn) if conn else 'UNKNOWN'
+                'strategy': strategy
             })
 
         cursor = conn.cursor()
@@ -1613,6 +1615,11 @@ def get_lift_analysis():
         start_date, end_date = get_date_range()
         conn = get_snowflake_connection()
         cursor = conn.cursor()
+        # Lift analysis involves heavy CTE joins on billion-row tables — cap at 120s
+        try:
+            cursor.execute("ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = 120")
+        except Exception:
+            pass  # Non-critical — some warehouses may not allow session ALTER
         strategy = get_impression_strategy(agency_id, conn)
 
         if strategy == STRATEGY_ADM_PREFIX:

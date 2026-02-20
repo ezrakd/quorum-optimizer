@@ -311,11 +311,14 @@ def _query_dimension_availability(agency_id, conn):
                     'Creative ID data is not populated for this agency\'s DSP.'
                 )
 
-    except Exception:
-        # If the impression query fails, default to False for all
-        result['reasons']['publisher'] = 'Could not verify publisher data availability.'
-        result['reasons']['geographic'] = 'Could not verify geographic data availability.'
-        result['reasons']['creative'] = 'Could not verify creative data availability.'
+    except Exception as e:
+        # Log the actual error so we can debug — don't swallow silently
+        import traceback
+        print(f"[AVAIL] Dimension availability query failed for agency {agency_id}: {e}")
+        traceback.print_exc()
+        result['reasons']['publisher'] = f'Could not verify publisher data availability ({type(e).__name__}).'
+        result['reasons']['geographic'] = f'Could not verify geographic data availability ({type(e).__name__}).'
+        result['reasons']['creative'] = f'Could not verify creative data availability ({type(e).__name__}).'
 
     # Check web pixel availability separately (different table)
     try:
@@ -335,8 +338,9 @@ def _query_dimension_availability(agency_id, conn):
                 'This agency does not have a web pixel deployed. '
                 'Traffic source analysis requires WEBPIXEL_EVENTS data.'
             )
-    except Exception:
-        result['reasons']['traffic_sources'] = 'Could not verify web pixel data availability.'
+    except Exception as e:
+        print(f"[AVAIL] Web pixel availability query failed for agency {agency_id}: {e}")
+        result['reasons']['traffic_sources'] = f'Could not verify web pixel data availability ({type(e).__name__}).'
 
     cursor.close()
     return result
