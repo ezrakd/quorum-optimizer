@@ -227,19 +227,28 @@ def enrich_web_visits_timeseries(cursor, agency_id, advertiser_id, start_date, e
 
 
 # =============================================================================
-# STORE VISIT ENRICHMENT (from Ali's WEB_TO_STORE_VISIT_ATTRIBUTION)
-# Used for ADM_PREFIX agencies whose impression query doesn't include store visits.
-# PCM_4KEY agencies already get store visits from CAMPAIGN_PERFORMANCE_REPORT_WEEKLY_STATS.
+# STORE VISIT ENRICHMENT
+# Reads from TWO sources:
+#   1. WEB_TO_STORE_VISIT_ATTRIBUTION (derived) — web→store attribution (some agencies)
+#   2. STORE_VISITS (base) — ad→store attribution (other agencies, e.g. Causal iQ)
+# The two tables have almost no agency overlap, so we UNION them.
 # =============================================================================
 def enrich_store_visits_agency(cursor, start_date, end_date):
-    """Return {agency_id: unique_store_visitor_count} from the pre-matched store attribution table."""
+    """Return {agency_id: unique_store_visitor_count} from both store visit sources."""
     try:
         cursor.execute("""
-            SELECT a.AGENCY_ID,
-                   COUNT(DISTINCT COALESCE(CAST(a.HOUSEHOLD_ID AS VARCHAR), a.MAID)) as STORE_VISITS
-            FROM QUORUMDB.DERIVED_TABLES.WEB_TO_STORE_VISIT_ATTRIBUTION a
-            WHERE a.STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
-            GROUP BY a.AGENCY_ID
+            WITH combined AS (
+                SELECT AGENCY_ID, COALESCE(CAST(HOUSEHOLD_ID AS VARCHAR), MAID) as VISITOR_ID
+                FROM QUORUMDB.DERIVED_TABLES.WEB_TO_STORE_VISIT_ATTRIBUTION
+                WHERE STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+                UNION ALL
+                SELECT AGENCY_ID, MAID as VISITOR_ID
+                FROM QUORUMDB.BASE_TABLES.STORE_VISITS
+                WHERE STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+            )
+            SELECT AGENCY_ID, COUNT(DISTINCT VISITOR_ID) as STORE_VISITS
+            FROM combined
+            GROUP BY AGENCY_ID
         """, {'start_date': start_date, 'end_date': end_date})
         return {int(r[0]): int(r[1]) for r in cursor.fetchall()}
     except Exception:
@@ -247,14 +256,23 @@ def enrich_store_visits_agency(cursor, start_date, end_date):
 
 
 def enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date, end_date):
-    """Return unique store visitor count for a specific advertiser from base attribution table."""
+    """Return unique store visitor count for a specific advertiser from both store visit sources."""
     try:
         cursor.execute("""
-            SELECT COUNT(DISTINCT COALESCE(CAST(a.HOUSEHOLD_ID AS VARCHAR), a.MAID)) as STORE_VISITS
-            FROM QUORUMDB.DERIVED_TABLES.WEB_TO_STORE_VISIT_ATTRIBUTION a
-            WHERE a.AGENCY_ID = %(agency_id)s
-              AND a.ADVERTISER_ID = %(advertiser_id)s
-              AND a.STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+            WITH combined AS (
+                SELECT COALESCE(CAST(HOUSEHOLD_ID AS VARCHAR), MAID) as VISITOR_ID
+                FROM QUORUMDB.DERIVED_TABLES.WEB_TO_STORE_VISIT_ATTRIBUTION
+                WHERE AGENCY_ID = %(agency_id)s
+                  AND ADVERTISER_ID = %(advertiser_id)s
+                  AND STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+                UNION ALL
+                SELECT MAID as VISITOR_ID
+                FROM QUORUMDB.BASE_TABLES.STORE_VISITS
+                WHERE AGENCY_ID = %(agency_id)s
+                  AND QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                  AND STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+            )
+            SELECT COUNT(DISTINCT VISITOR_ID) as STORE_VISITS FROM combined
         """, {'agency_id': agency_id, 'advertiser_id': advertiser_id,
               'start_date': start_date, 'end_date': end_date})
         row = cursor.fetchone()
@@ -264,15 +282,25 @@ def enrich_store_visits_advertiser(cursor, agency_id, advertiser_id, start_date,
 
 
 def enrich_store_visits_timeseries(cursor, agency_id, advertiser_id, start_date, end_date):
-    """Return {date_str: unique_store_visitor_count} for timeseries enrichment from base table."""
+    """Return {date_str: unique_store_visitor_count} for timeseries from both store visit sources."""
     try:
         cursor.execute("""
-            SELECT a.STORE_VISIT_DATE, COUNT(DISTINCT COALESCE(CAST(a.HOUSEHOLD_ID AS VARCHAR), a.MAID)) as STORE_VISITS
-            FROM QUORUMDB.DERIVED_TABLES.WEB_TO_STORE_VISIT_ATTRIBUTION a
-            WHERE a.AGENCY_ID = %(agency_id)s
-              AND a.ADVERTISER_ID = %(advertiser_id)s
-              AND a.STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
-            GROUP BY a.STORE_VISIT_DATE
+            WITH combined AS (
+                SELECT STORE_VISIT_DATE, COALESCE(CAST(HOUSEHOLD_ID AS VARCHAR), MAID) as VISITOR_ID
+                FROM QUORUMDB.DERIVED_TABLES.WEB_TO_STORE_VISIT_ATTRIBUTION
+                WHERE AGENCY_ID = %(agency_id)s
+                  AND ADVERTISER_ID = %(advertiser_id)s
+                  AND STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+                UNION ALL
+                SELECT STORE_VISIT_DATE, MAID as VISITOR_ID
+                FROM QUORUMDB.BASE_TABLES.STORE_VISITS
+                WHERE AGENCY_ID = %(agency_id)s
+                  AND QUORUM_ADVERTISER_ID = %(advertiser_id)s
+                  AND STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+            )
+            SELECT STORE_VISIT_DATE, COUNT(DISTINCT VISITOR_ID) as STORE_VISITS
+            FROM combined
+            GROUP BY STORE_VISIT_DATE
         """, {'agency_id': agency_id, 'advertiser_id': advertiser_id,
               'start_date': start_date, 'end_date': end_date})
         return {str(r[0]): int(r[1]) for r in cursor.fetchall()}
@@ -463,8 +491,8 @@ def get_agencies():
             imps = r.get('IMPRESSIONS') or 0
             r['WEB_VISIT_RATE'] = round(wv * 100.0 / imps, 4) if imps > 0 else 0
 
-        # Enrich ALL agencies with store visits from WEB_TO_STORE_VISIT_ATTRIBUTION (base table)
-        # PCM_4KEY VISITORS column is DSP-reported and unreliable as store visits
+        # Enrich ALL agencies with store visits from both sources
+        # (WEB_TO_STORE_VISIT_ATTRIBUTION + STORE_VISITS base table)
         store_by_agency = enrich_store_visits_agency(cursor, start_date, end_date)
         for r in all_results:
             aid = r.get('AGENCY_ID')
@@ -575,16 +603,26 @@ def get_advertisers():
         except Exception:
             web_by_adv = {}
 
-        # Enrich ALL advertisers with store visits from WEB_TO_STORE_VISIT_ATTRIBUTION (base table)
+        # Enrich ALL advertisers with store visits from BOTH sources
         store_by_adv = {}
         try:
             cursor.execute("""
-                SELECT a.ADVERTISER_ID,
-                       COUNT(DISTINCT COALESCE(CAST(a.HOUSEHOLD_ID AS VARCHAR), a.MAID) || '|' || a.STORE_VISIT_DATE) as STORE_VISITS
-                FROM QUORUMDB.DERIVED_TABLES.WEB_TO_STORE_VISIT_ATTRIBUTION a
-                WHERE a.AGENCY_ID = %(agency_id)s
-                  AND a.STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
-                GROUP BY a.ADVERTISER_ID
+                WITH combined AS (
+                    SELECT ADVERTISER_ID,
+                           COALESCE(CAST(HOUSEHOLD_ID AS VARCHAR), MAID) || '|' || STORE_VISIT_DATE as VISIT_KEY
+                    FROM QUORUMDB.DERIVED_TABLES.WEB_TO_STORE_VISIT_ATTRIBUTION
+                    WHERE AGENCY_ID = %(agency_id)s
+                      AND STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+                    UNION ALL
+                    SELECT QUORUM_ADVERTISER_ID as ADVERTISER_ID,
+                           MAID || '|' || STORE_VISIT_DATE as VISIT_KEY
+                    FROM QUORUMDB.BASE_TABLES.STORE_VISITS
+                    WHERE AGENCY_ID = %(agency_id)s
+                      AND STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
+                )
+                SELECT ADVERTISER_ID, COUNT(DISTINCT VISIT_KEY) as STORE_VISITS
+                FROM combined
+                GROUP BY ADVERTISER_ID
             """, {'agency_id': agency_id, 'start_date': start_date, 'end_date': end_date})
             store_by_adv = {int(r[0]): int(r[1]) for r in cursor.fetchall()}
         except Exception:
@@ -1368,7 +1406,11 @@ def get_lift_analysis():
                     FROM QUORUMDB.DERIVED_TABLES.WEB_TO_STORE_VISIT_ATTRIBUTION a
                     WHERE a.ADVERTISER_ID = %(advertiser_id)s AND a.MAID IS NOT NULL
                       AND a.STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
-                    GROUP BY 1, 2
+                    UNION
+                    SELECT LOWER(REPLACE(a.MAID,'-','')) AS device_id, a.STORE_VISIT_DATE AS event_date
+                    FROM QUORUMDB.BASE_TABLES.STORE_VISITS a
+                    WHERE a.QUORUM_ADVERTISER_ID = %(advertiser_id)s AND a.MAID IS NOT NULL
+                      AND a.STORE_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
                 ),
                 web_network_control AS (
                     SELECT COUNT(DISTINCT c.device_id) AS control_n,
