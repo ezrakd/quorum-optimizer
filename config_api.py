@@ -1821,7 +1821,7 @@ def get_pipeline_health():
         cursor.execute(f"""
             SELECT
                 c.AGENCY_ID,
-                MAX(aa.AGENCY_NAME) as AGENCY_NAME,
+                COALESCE(ag.AGENCY_NAME, '') as AGENCY_NAME,
                 MAX(c.IMPRESSION_JOIN_STRATEGY) as STRATEGY,
                 COUNT(DISTINCT c.ADVERTISER_ID) as TOTAL_ADVERTISERS,
                 SUM(CASE WHEN c.CONFIG_STATUS = 'ACTIVE' THEN 1 ELSE 0 END) as ACTIVE_ADVERTISERS,
@@ -1831,12 +1831,15 @@ def get_pipeline_health():
                 SUM(COALESCE(c.WEB_PIXEL_URL_COUNT, 0)) as TOTAL_URLS,
                 SUM(COALESCE(c.CAMPAIGN_MAPPING_COUNT, 0)) as TOTAL_MAPPINGS
             FROM QUORUMDB.BASE_TABLES.REF_ADVERTISER_CONFIG c
-            LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa
-                ON c.AGENCY_ID = aa.ADVERTISER_ID
+            LEFT JOIN (
+                SELECT DISTINCT AGENCY_ID as AG_ID, AGENCY_NAME
+                FROM QUORUMDB.BASE_TABLES.REF_AGENCY_ADVERTISER
+                WHERE AGENCY_NAME IS NOT NULL AND AGENCY_NAME != ''
+            ) ag ON c.AGENCY_ID = ag.AG_ID
             WHERE c.CONFIG_STATUS = 'ACTIVE'
               AND c.HAS_IMPRESSION_TRACKING = TRUE
               {agency_filter}
-            GROUP BY c.AGENCY_ID
+            GROUP BY c.AGENCY_ID, ag.AGENCY_NAME
             HAVING COUNT(DISTINCT c.ADVERTISER_ID) > 0
             ORDER BY COUNT(DISTINCT c.ADVERTISER_ID) DESC
         """, q_params)
