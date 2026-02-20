@@ -274,7 +274,7 @@ def _query_dimension_availability(agency_id, conn):
             FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2
             WHERE AGENCY_ID = %(agency_id)s
               AND AUCTION_TIMESTAMP >= DATEADD(day, -30, CURRENT_DATE)
-        """, {'agency_id': agency_id})
+        """, {'agency_id': str(agency_id)})
 
         row = cursor.fetchone()
         if row:
@@ -328,7 +328,7 @@ def _query_dimension_availability(agency_id, conn):
             WHERE AGENCY_ID = %(agency_id)s
               AND EVENT_TIMESTAMP >= DATEADD(day, -30, CURRENT_DATE)
             LIMIT 1
-        """, {'agency_id': agency_id})
+        """, {'agency_id': str(agency_id)})
         row = cursor.fetchone()
         event_count = int(row[0]) if row and row[0] else 0
         result['web_pixel_events'] = event_count
