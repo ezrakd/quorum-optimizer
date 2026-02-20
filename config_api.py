@@ -1773,6 +1773,310 @@ def get_agencies():
 # =============================================================================
 # INTEGRATION: Register with main Flask app
 # =============================================================================
+# =============================================================================
+# PIPELINE HEALTH — Per-Agency Data Quality Console
+# =============================================================================
+# Admin users: full cross-agency matrix
+# Agency users: only their assigned agency
+#
+# Checks per agency:
+#   1. Dimension availability (publisher, geo, creative, web pixel)
+#   2. Unmapped DSP advertisers (impressions firing without PCM mapping)
+#   3. Attribution readiness (POI/URL config status)
+#   4. Friendly name coverage (creative names vs IDs only)
+#
+# Severity levels:
+#   CRITICAL: Unmapped DSP advertiser → no visits attributed
+#   HIGH: Missing POI or URL config → store/web visits won't work
+#   MEDIUM: Missing friendly names → IDs in reports instead of names
+#   LOW: DSP limitation (e.g., no zip data) → acknowledged, not fixable
+# =============================================================================
+@config_bp.route('/pipeline-health', methods=['GET'])
+def get_pipeline_health():
+    """
+    Return data quality health matrix for one or all agencies.
+    Query params:
+        agency_id (optional) — filter to one agency. If absent and user is admin, return all.
+    """
+    try:
+        requested_agency = request.args.get('agency_id')
+
+        # Role-based filtering: agency users are locked to their agency
+        user = getattr(g, 'user', None)
+        is_admin = user and user.get('role') == 'admin'
+        locked_agency = None
+        if user and not is_admin and user.get('agency_id'):
+            locked_agency = int(user['agency_id'])
+
+        conn = get_config_connection()
+        cursor = conn.cursor()
+
+        # Step 1: Get active agencies from config
+        agency_filter = ""
+        q_params = {}
+        if locked_agency:
+            agency_filter = "AND c.AGENCY_ID = %(agency_id)s"
+            q_params['agency_id'] = locked_agency
+        elif requested_agency:
+            agency_filter = "AND c.AGENCY_ID = %(agency_id)s"
+            q_params['agency_id'] = int(requested_agency)
+
+        cursor.execute(f"""
+            SELECT
+                c.AGENCY_ID,
+                MAX(aa.AGENCY_NAME) as AGENCY_NAME,
+                MAX(c.IMPRESSION_JOIN_STRATEGY) as STRATEGY,
+                COUNT(DISTINCT c.ADVERTISER_ID) as TOTAL_ADVERTISERS,
+                SUM(CASE WHEN c.CONFIG_STATUS = 'ACTIVE' THEN 1 ELSE 0 END) as ACTIVE_ADVERTISERS,
+                SUM(CASE WHEN c.HAS_STORE_VISIT_ATTRIBUTION THEN 1 ELSE 0 END) as HAS_STORE_COUNT,
+                SUM(CASE WHEN c.HAS_WEB_VISIT_ATTRIBUTION THEN 1 ELSE 0 END) as HAS_WEB_COUNT,
+                SUM(COALESCE(c.SEGMENT_COUNT, 0)) as TOTAL_POIS,
+                SUM(COALESCE(c.WEB_PIXEL_URL_COUNT, 0)) as TOTAL_URLS,
+                SUM(COALESCE(c.CAMPAIGN_MAPPING_COUNT, 0)) as TOTAL_MAPPINGS
+            FROM QUORUMDB.BASE_TABLES.REF_ADVERTISER_CONFIG c
+            LEFT JOIN QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER aa
+                ON c.AGENCY_ID = aa.ADVERTISER_ID
+            WHERE c.CONFIG_STATUS = 'ACTIVE'
+              AND c.HAS_IMPRESSION_TRACKING = TRUE
+              {agency_filter}
+            GROUP BY c.AGENCY_ID
+            HAVING COUNT(DISTINCT c.ADVERTISER_ID) > 0
+            ORDER BY COUNT(DISTINCT c.ADVERTISER_ID) DESC
+        """, q_params)
+        agency_rows = rows_to_dicts(cursor)
+
+        if not agency_rows:
+            cursor.close()
+            conn.close()
+            return jsonify({'success': True, 'data': [], 'message': 'No active agencies found.'})
+
+        agency_ids = [r['AGENCY_ID'] for r in agency_rows]
+
+        # Step 2: Check dimension availability per agency (last 30 days)
+        # Use APPROX_COUNT_DISTINCT for speed on the big impression table
+        if len(agency_ids) <= 20:
+            id_list = ','.join(str(a) for a in agency_ids)
+            cursor.execute(f"""
+                SELECT
+                    AGENCY_ID,
+                    APPROX_COUNT_DISTINCT(
+                        CASE WHEN SITE_DOMAIN IS NOT NULL AND SITE_DOMAIN != '0' AND SITE_DOMAIN != ''
+                             THEN SITE_DOMAIN END
+                    ) as PUBLISHER_COUNT,
+                    APPROX_COUNT_DISTINCT(
+                        CASE WHEN USER_POSTAL_CODE IS NOT NULL AND USER_POSTAL_CODE != '0' AND USER_POSTAL_CODE != ''
+                             THEN USER_POSTAL_CODE END
+                    ) as ZIP_COUNT,
+                    APPROX_COUNT_DISTINCT(
+                        CASE WHEN CREATIVE_ID IS NOT NULL AND CREATIVE_ID != '0' AND CREATIVE_ID != ''
+                             THEN CREATIVE_ID END
+                    ) as CREATIVE_COUNT,
+                    APPROX_COUNT_DISTINCT(
+                        CASE WHEN CREATIVE_NAME IS NOT NULL AND CREATIVE_NAME != '' AND CREATIVE_NAME != '0'
+                             THEN CREATIVE_NAME END
+                    ) as CREATIVE_NAME_COUNT,
+                    COUNT(*) as TOTAL_IMPRESSIONS
+                FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2
+                WHERE AGENCY_ID IN ({id_list})
+                  AND AUCTION_TIMESTAMP >= DATEADD(day, -30, CURRENT_DATE)
+                GROUP BY AGENCY_ID
+            """)
+            dim_rows = {r[0]: {
+                'publisher_count': int(r[1]) if r[1] else 0,
+                'zip_count': int(r[2]) if r[2] else 0,
+                'creative_count': int(r[3]) if r[3] else 0,
+                'creative_name_count': int(r[4]) if r[4] else 0,
+                'impression_count': int(r[5]) if r[5] else 0,
+            } for r in cursor.fetchall()}
+        else:
+            dim_rows = {}
+
+        # Step 3: Check web pixel availability per agency
+        if len(agency_ids) <= 20:
+            cursor.execute(f"""
+                SELECT AGENCY_ID, COUNT(*) as EVENT_COUNT
+                FROM QUORUMDB.DERIVED_TABLES.WEBPIXEL_EVENTS
+                WHERE AGENCY_ID IN ({id_list})
+                  AND EVENT_TIMESTAMP >= DATEADD(day, -30, CURRENT_DATE)
+                GROUP BY AGENCY_ID
+            """)
+            pixel_rows = {int(r[0]): int(r[1]) for r in cursor.fetchall()}
+        else:
+            pixel_rows = {}
+
+        # Step 4: Check unmapped DSP advertisers per agency
+        # These are DSP_ADVERTISER_IDs in impressions but NOT in PIXEL_CAMPAIGN_MAPPING_V2
+        unmapped_counts = {}
+        try:
+            if len(agency_ids) <= 20:
+                cursor.execute(f"""
+                    SELECT
+                        i.AGENCY_ID,
+                        COUNT(DISTINCT i.DSP_ADVERTISER_ID) as UNMAPPED_COUNT,
+                        SUM(i.IMPR_COUNT) as UNMAPPED_IMPRESSIONS
+                    FROM (
+                        SELECT AGENCY_ID, DSP_ADVERTISER_ID, COUNT(*) as IMPR_COUNT
+                        FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2
+                        WHERE AGENCY_ID IN ({id_list})
+                          AND AUCTION_TIMESTAMP >= DATEADD(day, -14, CURRENT_DATE)
+                        GROUP BY AGENCY_ID, DSP_ADVERTISER_ID
+                        HAVING COUNT(*) >= 100
+                    ) i
+                    LEFT JOIN (
+                        SELECT DISTINCT AGENCY_ID, DSP_ADVERTISER_ID
+                        FROM QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2
+                    ) m ON i.AGENCY_ID = m.AGENCY_ID AND i.DSP_ADVERTISER_ID = m.DSP_ADVERTISER_ID
+                    WHERE m.DSP_ADVERTISER_ID IS NULL
+                    GROUP BY i.AGENCY_ID
+                """)
+                unmapped_counts = {int(r[0]): {
+                    'unmapped_dsp_ids': int(r[1]),
+                    'unmapped_impressions': int(r[2])
+                } for r in cursor.fetchall()}
+        except Exception:
+            pass  # Non-critical — if it fails, we just don't show unmapped counts
+
+        # Step 5: Assemble results with severity scoring
+        results = []
+        for row in agency_rows:
+            aid = row['AGENCY_ID']
+            dims = dim_rows.get(aid, {})
+            pixels = pixel_rows.get(aid, 0)
+            unmapped = unmapped_counts.get(aid, {'unmapped_dsp_ids': 0, 'unmapped_impressions': 0})
+
+            pub_count = dims.get('publisher_count', 0)
+            zip_count = dims.get('zip_count', 0)
+            creative_count = dims.get('creative_count', 0)
+            creative_name_count = dims.get('creative_name_count', 0)
+            impression_count = dims.get('impression_count', 0)
+
+            has_publisher = pub_count >= 2
+            has_geo = zip_count >= 10
+            has_creative = creative_count >= 1
+            has_creative_names = creative_name_count >= 1
+            has_web_pixel = pixels > 0
+
+            # Build issues list with severity
+            issues = []
+            if unmapped.get('unmapped_dsp_ids', 0) > 0:
+                issues.append({
+                    'severity': 'CRITICAL',
+                    'type': 'unmapped_advertisers',
+                    'message': f"{unmapped['unmapped_dsp_ids']} DSP advertiser(s) with {unmapped['unmapped_impressions']:,} impressions (14d) have no Quorum mapping.",
+                    'action': 'Map in Discovery tab'
+                })
+
+            total_advs = row.get('TOTAL_ADVERTISERS', 0)
+            poi_count = row.get('TOTAL_POIS', 0)
+            url_count = row.get('TOTAL_URLS', 0)
+
+            if total_advs > 0 and poi_count == 0 and row.get('HAS_STORE_COUNT', 0) == 0:
+                issues.append({
+                    'severity': 'HIGH',
+                    'type': 'no_store_config',
+                    'message': 'No POI locations assigned for any advertiser. Store visit attribution will not work.',
+                    'action': 'Assign POIs in advertiser config'
+                })
+
+            if total_advs > 0 and url_count == 0 and row.get('HAS_WEB_COUNT', 0) == 0:
+                issues.append({
+                    'severity': 'HIGH',
+                    'type': 'no_web_config',
+                    'message': 'No web pixel URLs configured. Web visit attribution will not work.',
+                    'action': 'Add domains in advertiser config'
+                })
+
+            if has_creative and not has_creative_names:
+                issues.append({
+                    'severity': 'MEDIUM',
+                    'type': 'no_creative_names',
+                    'message': f'{creative_count} creative IDs found but no friendly names. Reports will show IDs instead of names.',
+                    'action': 'DSP limitation — names not provided by this platform'
+                })
+
+            if not has_publisher:
+                issues.append({
+                    'severity': 'LOW',
+                    'type': 'no_publisher_data',
+                    'message': 'Publisher (SITE_DOMAIN) not populated by this DSP.',
+                    'action': 'Known DSP limitation — Publisher tab will show as unavailable'
+                })
+
+            if not has_geo:
+                issues.append({
+                    'severity': 'LOW',
+                    'type': 'no_geo_data',
+                    'message': 'Geographic (USER_POSTAL_CODE) not populated by this DSP.',
+                    'action': 'Known DSP limitation — Geographic tab will show as unavailable'
+                })
+
+            # Overall health score: count issues by severity
+            critical = sum(1 for i in issues if i['severity'] == 'CRITICAL')
+            high = sum(1 for i in issues if i['severity'] == 'HIGH')
+            medium = sum(1 for i in issues if i['severity'] == 'MEDIUM')
+            low = sum(1 for i in issues if i['severity'] == 'LOW')
+
+            if critical > 0:
+                health_status = 'CRITICAL'
+            elif high > 0:
+                health_status = 'NEEDS_ATTENTION'
+            elif medium > 0:
+                health_status = 'MINOR_GAPS'
+            else:
+                health_status = 'HEALTHY'
+
+            results.append({
+                'agency_id': aid,
+                'agency_name': row.get('AGENCY_NAME') or f'Agency {aid}',
+                'strategy': row.get('STRATEGY', 'UNKNOWN'),
+                'health_status': health_status,
+                'total_advertisers': total_advs,
+                'active_advertisers': row.get('ACTIVE_ADVERTISERS', 0),
+                'dimensions': {
+                    'publisher': {'available': has_publisher, 'count': pub_count},
+                    'geographic': {'available': has_geo, 'count': zip_count},
+                    'creative': {'available': has_creative, 'count': creative_count},
+                    'creative_names': {'available': has_creative_names, 'count': creative_name_count},
+                    'web_pixel': {'available': has_web_pixel, 'events': pixels},
+                },
+                'config_status': {
+                    'poi_locations': poi_count,
+                    'web_pixel_urls': url_count,
+                    'campaign_mappings': row.get('TOTAL_MAPPINGS', 0),
+                    'store_visit_enabled': row.get('HAS_STORE_COUNT', 0),
+                    'web_visit_enabled': row.get('HAS_WEB_COUNT', 0),
+                },
+                'impressions_30d': impression_count,
+                'unmapped': unmapped,
+                'issues': issues,
+                'issue_summary': {
+                    'critical': critical,
+                    'high': high,
+                    'medium': medium,
+                    'low': low,
+                },
+            })
+
+        cursor.close()
+        conn.close()
+
+        # Sort: critical issues first, then by advertiser count
+        results.sort(key=lambda r: (
+            -{'CRITICAL': 3, 'NEEDS_ATTENTION': 2, 'MINOR_GAPS': 1, 'HEALTHY': 0}[r['health_status']],
+            -r['total_advertisers']
+        ))
+
+        return jsonify({
+            'success': True,
+            'data': results,
+            'is_admin': is_admin,
+            'agency_count': len(results),
+        })
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 def register_config_api(app):
     """
     Call from main optimizer app:

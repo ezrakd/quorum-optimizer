@@ -170,6 +170,209 @@ def get_agency_capabilities(agency_id, conn=None):
 
 
 # =============================================================================
+# DATA AVAILABILITY — Per-Agency Dimension Availability Check
+# =============================================================================
+# Different DSPs populate different columns in AD_IMPRESSION_LOG_V2.
+# This check tells the frontend which tabs to show vs grey-out.
+#
+# Data availability matrix (from Feb 2026 audit):
+#   SITE_DOMAIN:       Only Paramount (opaque IDs), Causal iQ (~15% real), Magnite (4097 real)
+#   USER_POSTAL_CODE:  Only Causal iQ (289K distinct) and Magnite (5036 distinct)
+#   CREATIVE_ID:       Most agencies have it, but names vary
+#   WEBPIXEL_EVENTS:   Only Paramount (49M), LotLinx (71M), NPRP (1.2M), ByRider (85K)
+# =============================================================================
+_dimension_avail_cache = {}
+_dimension_avail_lock = threading.Lock()
+_dimension_avail_ts = 0
+DIMENSION_AVAIL_TTL = 600  # 10 minutes — these change slowly
+
+
+def check_data_availability(agency_id, conn):
+    """
+    Check what dimension data is available for an agency.
+    Returns a dict with boolean availability flags and reasons.
+
+    Checks AD_IMPRESSION_LOG_V2 for non-zero/non-null dimension columns,
+    and WEBPIXEL_EVENTS for web pixel data. Results are cached per-agency.
+
+    Returns:
+        {
+            'has_publisher_data': bool,
+            'has_geo_data': bool,
+            'has_creative_data': bool,
+            'has_creative_names': bool,
+            'has_web_pixel': bool,
+            'publisher_count': int,
+            'geo_zip_count': int,
+            'creative_count': int,
+            'web_pixel_events': int,
+            'reasons': {
+                'publisher': str,  # human-readable reason if unavailable
+                'geographic': str,
+                'creative': str,
+                'traffic_sources': str,
+            }
+        }
+    """
+    global _dimension_avail_cache, _dimension_avail_ts
+
+    agency_id = int(agency_id)
+
+    # Check cache first
+    with _dimension_avail_lock:
+        if (time.time() - _dimension_avail_ts < DIMENSION_AVAIL_TTL
+                and agency_id in _dimension_avail_cache):
+            return _dimension_avail_cache[agency_id]
+
+    result = _query_dimension_availability(agency_id, conn)
+
+    with _dimension_avail_lock:
+        _dimension_avail_cache[agency_id] = result
+        _dimension_avail_ts = time.time()
+
+    return result
+
+
+def _query_dimension_availability(agency_id, conn):
+    """Run the actual Snowflake queries to check dimension availability."""
+    cursor = conn.cursor()
+    result = {
+        'has_publisher_data': False,
+        'has_geo_data': False,
+        'has_creative_data': False,
+        'has_creative_names': False,
+        'has_web_pixel': False,
+        'publisher_count': 0,
+        'geo_zip_count': 0,
+        'creative_count': 0,
+        'web_pixel_events': 0,
+        'reasons': {},
+    }
+
+    try:
+        # Single efficient query: check all dimension columns at once
+        # Uses APPROX_COUNT_DISTINCT for speed on billion-row table
+        # Last 30 days only — no need to scan full history
+        cursor.execute("""
+            SELECT
+                APPROX_COUNT_DISTINCT(
+                    CASE WHEN SITE_DOMAIN IS NOT NULL AND SITE_DOMAIN != '0' AND SITE_DOMAIN != ''
+                         THEN SITE_DOMAIN END
+                ) as PUBLISHER_COUNT,
+                APPROX_COUNT_DISTINCT(
+                    CASE WHEN USER_POSTAL_CODE IS NOT NULL AND USER_POSTAL_CODE != '0' AND USER_POSTAL_CODE != ''
+                         THEN USER_POSTAL_CODE END
+                ) as ZIP_COUNT,
+                APPROX_COUNT_DISTINCT(
+                    CASE WHEN CREATIVE_ID IS NOT NULL AND CREATIVE_ID != '0' AND CREATIVE_ID != ''
+                         THEN CREATIVE_ID END
+                ) as CREATIVE_COUNT,
+                APPROX_COUNT_DISTINCT(
+                    CASE WHEN CREATIVE_NAME IS NOT NULL AND CREATIVE_NAME != '' AND CREATIVE_NAME != '0'
+                         THEN CREATIVE_NAME END
+                ) as CREATIVE_NAME_COUNT
+            FROM QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2
+            WHERE AGENCY_ID = %(agency_id)s
+              AND AUCTION_TIMESTAMP >= DATEADD(day, -30, CURRENT_DATE)
+        """, {'agency_id': agency_id})
+
+        row = cursor.fetchone()
+        if row:
+            pub_count = int(row[0]) if row[0] else 0
+            zip_count = int(row[1]) if row[1] else 0
+            creative_count = int(row[2]) if row[2] else 0
+            creative_name_count = int(row[3]) if row[3] else 0
+
+            result['publisher_count'] = pub_count
+            result['geo_zip_count'] = zip_count
+            result['creative_count'] = creative_count
+
+            # Publisher: need at least 2 distinct non-zero publishers
+            result['has_publisher_data'] = pub_count >= 2
+            if not result['has_publisher_data']:
+                result['reasons']['publisher'] = (
+                    'Publisher (SITE_DOMAIN) data is not available for this agency\'s DSP. '
+                    'This is a data source limitation, not a bug.'
+                )
+
+            # Geographic: need at least 10 distinct non-zero zip codes
+            result['has_geo_data'] = zip_count >= 10
+            if not result['has_geo_data']:
+                result['reasons']['geographic'] = (
+                    'Geographic (postal code) data is not available for this agency\'s DSP. '
+                    'Currently only Causal iQ and Magnite provide zip-level data.'
+                )
+
+            # Creative: need at least 1 creative ID
+            result['has_creative_data'] = creative_count >= 1
+            result['has_creative_names'] = creative_name_count >= 1
+            if not result['has_creative_data']:
+                result['reasons']['creative'] = (
+                    'Creative ID data is not populated for this agency\'s DSP.'
+                )
+
+    except Exception:
+        # If the impression query fails, default to False for all
+        result['reasons']['publisher'] = 'Could not verify publisher data availability.'
+        result['reasons']['geographic'] = 'Could not verify geographic data availability.'
+        result['reasons']['creative'] = 'Could not verify creative data availability.'
+
+    # Check web pixel availability separately (different table)
+    try:
+        cursor.execute("""
+            SELECT COUNT(*) as EVENT_COUNT
+            FROM QUORUMDB.DERIVED_TABLES.WEBPIXEL_EVENTS
+            WHERE AGENCY_ID = %(agency_id)s
+              AND EVENT_TIMESTAMP >= DATEADD(day, -30, CURRENT_DATE)
+            LIMIT 1
+        """, {'agency_id': agency_id})
+        row = cursor.fetchone()
+        event_count = int(row[0]) if row and row[0] else 0
+        result['web_pixel_events'] = event_count
+        result['has_web_pixel'] = event_count > 0
+        if not result['has_web_pixel']:
+            result['reasons']['traffic_sources'] = (
+                'This agency does not have a web pixel deployed. '
+                'Traffic source analysis requires WEBPIXEL_EVENTS data.'
+            )
+    except Exception:
+        result['reasons']['traffic_sources'] = 'Could not verify web pixel data availability.'
+
+    cursor.close()
+    return result
+
+
+def get_tab_availability(agency_id, conn):
+    """
+    Returns a frontend-friendly dict of tab availability.
+    Each tab maps to {available: bool, reason: str}.
+    """
+    avail = check_data_availability(agency_id, conn)
+    strategy = get_impression_strategy(agency_id, conn)
+
+    # Campaign, Line Item, Timeseries are always available if agency has impressions
+    caps = get_agency_capabilities(agency_id, conn)
+    has_impressions = caps.get('has_impressions', False)
+
+    return {
+        'campaigns':      {'available': has_impressions, 'reason': '' if has_impressions else 'No impression data for this agency.'},
+        'lineitems':      {'available': has_impressions, 'reason': '' if has_impressions else 'No impression data for this agency.'},
+        'creatives':      {'available': avail['has_creative_data'], 'reason': avail['reasons'].get('creative', '')},
+        'publishers':     {'available': avail['has_publisher_data'], 'reason': avail['reasons'].get('publisher', '')},
+        'geographic':     {'available': avail['has_geo_data'], 'reason': avail['reasons'].get('geographic', '')},
+        'traffic_sources': {'available': avail['has_web_pixel'], 'reason': avail['reasons'].get('traffic_sources', '')},
+        'lift':           {'available': has_impressions, 'reason': '' if has_impressions else 'No impression data for this agency.'},
+        'timeseries':     {'available': has_impressions, 'reason': '' if has_impressions else 'No impression data for this agency.'},
+        'strategy': strategy,
+        'has_creative_names': avail['has_creative_names'],
+        'publisher_count': avail['publisher_count'],
+        'geo_zip_count': avail['geo_zip_count'],
+        'creative_count': avail['creative_count'],
+        'web_pixel_events': avail['web_pixel_events'],
+    }
+
+
+# =============================================================================
 # MIGRATED ENDPOINT EXAMPLES
 # =============================================================================
 # Below are the key patterns showing how each endpoint type migrates.

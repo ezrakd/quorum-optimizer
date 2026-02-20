@@ -26,6 +26,8 @@ from optimizer_v6_migration import (
     is_row_level_agency,
     get_agency_name,
     get_agency_capabilities,
+    check_data_availability,
+    get_tab_availability,
     STRATEGY_ADM_PREFIX,
     STRATEGY_PCM_4KEY,
     STRATEGY_DIRECT_AG,
@@ -131,6 +133,31 @@ def health_check():
             '/api/v6/pipeline-health', '/api/v6/table-access',
         ]
     })
+
+
+# =============================================================================
+# TAB AVAILABILITY — Data availability routing for dimension tabs
+# =============================================================================
+@app.route('/api/v6/tab-availability', methods=['GET'])
+def get_tab_availability_endpoint():
+    """Return per-tab availability flags for the frontend.
+
+    This tells the frontend which tabs have real data vs should show
+    'not available' messages. Based on per-agency DSP data sparsity.
+    Cached for 10 minutes.
+    """
+    try:
+        agency_id = _get_agency_id()
+        if not agency_id:
+            return jsonify({'success': False, 'error': 'agency_id required'}), 400
+
+        conn = get_snowflake_connection()
+        availability = get_tab_availability(int(agency_id), conn)
+        conn.close()
+
+        return jsonify({'success': True, 'data': availability})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 # =============================================================================
@@ -967,6 +994,17 @@ def get_creative_performance():
         agency_id = int(agency_id)
         start_date, end_date = get_date_range()
         conn = get_snowflake_connection()
+
+        # Data availability check — early return if no creative data
+        avail = check_data_availability(agency_id, conn)
+        if not avail['has_creative_data']:
+            conn.close()
+            return jsonify({
+                'success': True, 'data': [], 'available': False,
+                'reason': avail['reasons'].get('creative', 'Creative data not available.'),
+                'strategy': get_impression_strategy(agency_id, conn) if conn else 'UNKNOWN'
+            })
+
         cursor = conn.cursor()
         strategy = get_impression_strategy(agency_id, conn)
 
@@ -1073,7 +1111,7 @@ def get_creative_performance():
 
         cursor.close()
         conn.close()
-        return jsonify({'success': True, 'data': results, 'strategy': strategy, 'note': note})
+        return jsonify({'success': True, 'data': results, 'available': True, 'strategy': strategy, 'note': note})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -1095,6 +1133,17 @@ def get_publisher_performance():
         agency_id = int(agency_id)
         start_date, end_date = get_date_range()
         conn = get_snowflake_connection()
+
+        # Data availability check — early return if no publisher data
+        avail = check_data_availability(agency_id, conn)
+        if not avail['has_publisher_data']:
+            conn.close()
+            return jsonify({
+                'success': True, 'data': [], 'available': False,
+                'reason': avail['reasons'].get('publisher', 'Publisher data not available.'),
+                'strategy': get_impression_strategy(agency_id, conn) if conn else 'UNKNOWN'
+            })
+
         cursor = conn.cursor()
         strategy = get_impression_strategy(agency_id, conn)
 
@@ -1177,7 +1226,7 @@ def get_publisher_performance():
 
         cursor.close()
         conn.close()
-        return jsonify({'success': True, 'data': results, 'strategy': strategy})
+        return jsonify({'success': True, 'data': results, 'available': True, 'strategy': strategy})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -1199,6 +1248,17 @@ def get_zip_performance():
         agency_id = int(agency_id)
         start_date, end_date = get_date_range()
         conn = get_snowflake_connection()
+
+        # Data availability check — early return if no geo data
+        avail = check_data_availability(agency_id, conn)
+        if not avail['has_geo_data']:
+            conn.close()
+            return jsonify({
+                'success': True, 'data': [], 'available': False,
+                'reason': avail['reasons'].get('geographic', 'Geographic data not available.'),
+                'strategy': get_impression_strategy(agency_id, conn) if conn else 'UNKNOWN'
+            })
+
         cursor = conn.cursor()
         strategy = get_impression_strategy(agency_id, conn)
 
@@ -1225,9 +1285,10 @@ def get_zip_performance():
                 LEFT JOIN QUORUMDB.SEGMENT_DATA.DBIP_LOOKUP_US d ON v.USER_POSTAL_CODE = d.ZIPCODE
                 WHERE v.AGENCY_ID = %(agency_id)s
                   AND v.AUCTION_TIMESTAMP::DATE BETWEEN %(start_date)s AND %(end_date)s
-                  AND v.USER_POSTAL_CODE IS NOT NULL {filters}
+                  AND v.USER_POSTAL_CODE IS NOT NULL
+                  AND v.USER_POSTAL_CODE != '0' AND v.USER_POSTAL_CODE != '' {filters}
                 GROUP BY v.USER_POSTAL_CODE
-                HAVING COUNT(*) >= 50
+                HAVING COUNT(*) >= 3000
                 ORDER BY 3 DESC LIMIT 100
             """
             cursor.execute(query, {'advertiser_id': advertiser_id, 'agency_id': agency_id,
@@ -1249,8 +1310,8 @@ def get_zip_performance():
                   AND LOG_DATE BETWEEN %(start_date)s AND %(end_date)s
                   AND ZIP IS NOT NULL AND ZIP != '' AND ZIP != '0' {filters}
                 GROUP BY ZIP
-                HAVING SUM(IMPRESSIONS) >= 50
-                ORDER BY 4 DESC LIMIT 100
+                HAVING SUM(IMPRESSIONS) >= 3000
+                ORDER BY 3 DESC LIMIT 100
             """
             cursor.execute(query, {'agency_id': agency_id, 'advertiser_id': advertiser_id,
                                    'start_date': start_date, 'end_date': end_date})
@@ -1265,7 +1326,7 @@ def get_zip_performance():
 
         cursor.close()
         conn.close()
-        return jsonify({'success': True, 'data': results, 'strategy': strategy, 'note': note})
+        return jsonify({'success': True, 'data': results, 'available': True, 'strategy': strategy, 'note': note})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -1834,11 +1895,14 @@ def get_traffic_sources():
         conn = get_snowflake_connection()
         strategy = get_impression_strategy(agency_id, conn) if agency_id else STRATEGY_PCM_4KEY
 
-        if strategy != STRATEGY_ADM_PREFIX:
+        # Data availability check — web pixel required for traffic sources
+        avail = check_data_availability(int(agency_id), conn) if agency_id else {'has_web_pixel': False, 'reasons': {}}
+        if not avail['has_web_pixel']:
             conn.close()
             return jsonify({
-                'success': True, 'data': [],
-                'message': 'Traffic sources analysis requires row-level impression data (ADM_PREFIX strategy only)',
+                'success': True, 'data': [], 'available': False,
+                'reason': avail['reasons'].get('traffic_sources',
+                    'Traffic source analysis requires web pixel data (WEBPIXEL_EVENTS).'),
                 'strategy': strategy
             })
 
@@ -1924,7 +1988,7 @@ def get_traffic_sources():
         conn.close()
         cache_set(cache_key, results)
 
-        return jsonify({'success': True, 'data': results, 'strategy': strategy})
+        return jsonify({'success': True, 'data': results, 'available': True, 'strategy': strategy})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 

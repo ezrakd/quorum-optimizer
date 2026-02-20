@@ -301,6 +301,7 @@
                         <button class="ctab active" data-tab="overview" onclick="switchContentTab(this)">Overview</button>
                         <button class="ctab" data-tab="campaigns" onclick="switchContentTab(this)">Campaigns <span class="count" id="tabCampaignCount">0</span></button>
                         <button class="ctab" data-tab="pois" onclick="switchContentTab(this)">POI Locations <span class="count" id="tabPoiCount">0</span></button>
+                        <button class="ctab" data-tab="health" onclick="switchContentTab(this); loadPipelineHealth();">Pipeline Health</button>
                         <button class="ctab" data-tab="discovery" onclick="switchContentTab(this)">Discovery</button>
                     </div>
 
@@ -441,6 +442,13 @@
                                 </div>
                                 <div id="uploadStatus" style="margin-top:10px;display:none;"></div>
                             </div>
+                        </div>
+                    </div>
+
+                    <!-- Pipeline Health Tab -->
+                    <div class="cpanel" id="tab-health">
+                        <div id="healthContent">
+                            <div class="loading"><div class="spinner"></div> Loading pipeline health data...</div>
                         </div>
                     </div>
 
@@ -846,6 +854,7 @@
     async function selectAdvertiser(advId, agencyId) {
         currentAdvId = advId;
         currentAgencyId = agencyId;
+        healthLoaded = false; // Reset so pipeline health refreshes for new context
 
         // Highlight in sidebar
         document.querySelectorAll('.adv-item').forEach(el => el.classList.remove('active'));
@@ -1139,6 +1148,180 @@
         if (el.dataset.tab === 'discovery' && currentAgencyId) {
             document.getElementById('discAgency').value = currentAgencyId;
         }
+    }
+
+    // =========================================================================
+    // PIPELINE HEALTH
+    // =========================================================================
+    let healthLoaded = false;
+
+    async function loadPipelineHealth() {
+        if (healthLoaded) return;
+        const container = document.getElementById('healthContent');
+        container.innerHTML = '<div class="loading"><div class="spinner"></div> Loading pipeline health (this may take a moment)...</div>';
+
+        try {
+            const params = currentAgencyId ? `?agency_id=${currentAgencyId}` : '';
+            const res = await fetch(`${API}/api/config/pipeline-health${params}`);
+            const json = await res.json();
+
+            if (!json.success) {
+                container.innerHTML = `<div class="empty">Failed to load: ${json.error}</div>`;
+                return;
+            }
+
+            healthLoaded = true;
+            renderPipelineHealth(json.data, json.is_admin);
+        } catch (e) {
+            container.innerHTML = `<div class="empty">Error: ${e.message}</div>`;
+        }
+    }
+
+    function renderPipelineHealth(data, isAdmin) {
+        const container = document.getElementById('healthContent');
+
+        if (!data || data.length === 0) {
+            container.innerHTML = '<div class="empty">No agencies found.</div>';
+            return;
+        }
+
+        // Summary cards
+        const totalAgencies = data.length;
+        const critical = data.filter(d => d.health_status === 'CRITICAL').length;
+        const needsAttention = data.filter(d => d.health_status === 'NEEDS_ATTENTION').length;
+        const healthy = data.filter(d => d.health_status === 'HEALTHY').length;
+
+        const statusBadge = (status) => {
+            const map = {
+                'CRITICAL': 'badge-red',
+                'NEEDS_ATTENTION': 'badge-yellow',
+                'MINOR_GAPS': 'badge-blue',
+                'HEALTHY': 'badge-green'
+            };
+            const labels = {
+                'CRITICAL': 'Critical',
+                'NEEDS_ATTENTION': 'Needs Attention',
+                'MINOR_GAPS': 'Minor Gaps',
+                'HEALTHY': 'Healthy'
+            };
+            return `<span class="badge ${map[status] || 'badge-muted'}">${labels[status] || status}</span>`;
+        };
+
+        const dimDot = (avail) => avail
+            ? '<span style="color:#00ba7c;font-size:16px;" title="Available">●</span>'
+            : '<span style="color:#3d5466;font-size:16px;" title="Not available">○</span>';
+
+        const sevIcon = (sev) => {
+            const m = { 'CRITICAL': '🔴', 'HIGH': '🟠', 'MEDIUM': '🟡', 'LOW': '⚪' };
+            return m[sev] || '⚪';
+        };
+
+        let html = `
+            <div class="summary-row" style="margin-bottom:14px;">
+                <div class="summary-card">
+                    <div class="summary-label">Agencies</div>
+                    <div class="summary-value text-blue">${totalAgencies}</div>
+                </div>
+                <div class="summary-card">
+                    <div class="summary-label">Critical</div>
+                    <div class="summary-value ${critical > 0 ? 'text-red' : 'text-muted'}">${critical}</div>
+                </div>
+                <div class="summary-card">
+                    <div class="summary-label">Needs Attention</div>
+                    <div class="summary-value ${needsAttention > 0 ? 'text-yellow' : 'text-muted'}">${needsAttention}</div>
+                </div>
+                <div class="summary-card">
+                    <div class="summary-label">Healthy</div>
+                    <div class="summary-value text-green">${healthy}</div>
+                </div>
+            </div>
+        `;
+
+        // Agency matrix table
+        html += `
+            <div class="card">
+                <div class="card-header">
+                    Data Availability Matrix
+                    <span class="text-muted" style="font-size:11px;">${isAdmin ? 'All agencies' : 'Your agency'}</span>
+                </div>
+                <div class="card-body-compact">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Agency</th>
+                                <th>Strategy</th>
+                                <th>Advs</th>
+                                <th style="text-align:center;" title="SITE_DOMAIN in impressions">Pub</th>
+                                <th style="text-align:center;" title="USER_POSTAL_CODE in impressions">Geo</th>
+                                <th style="text-align:center;" title="CREATIVE_ID in impressions">Creat</th>
+                                <th style="text-align:center;" title="Creative names (not just IDs)">Names</th>
+                                <th style="text-align:center;" title="WEBPIXEL_EVENTS data">Pixel</th>
+                                <th>Impr (30d)</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+        `;
+
+        for (const ag of data) {
+            const d = ag.dimensions;
+            html += `
+                <tr>
+                    <td><strong>${ag.agency_name}</strong><br><span class="text-muted" style="font-size:10px;">ID: ${ag.agency_id}</span></td>
+                    <td><span class="badge badge-muted">${ag.strategy}</span></td>
+                    <td class="text-right">${ag.total_advertisers}</td>
+                    <td style="text-align:center;">${dimDot(d.publisher.available)}<br><span class="text-muted" style="font-size:10px;">${d.publisher.count > 0 ? d.publisher.count : '—'}</span></td>
+                    <td style="text-align:center;">${dimDot(d.geographic.available)}<br><span class="text-muted" style="font-size:10px;">${d.geographic.count > 0 ? d.geographic.count : '—'}</span></td>
+                    <td style="text-align:center;">${dimDot(d.creative.available)}<br><span class="text-muted" style="font-size:10px;">${d.creative.count > 0 ? d.creative.count : '—'}</span></td>
+                    <td style="text-align:center;">${dimDot(d.creative_names.available)}<br><span class="text-muted" style="font-size:10px;">${d.creative_names.count > 0 ? d.creative_names.count : '—'}</span></td>
+                    <td style="text-align:center;">${dimDot(d.web_pixel.available)}<br><span class="text-muted" style="font-size:10px;">${d.web_pixel.events > 0 ? fmt(d.web_pixel.events) : '—'}</span></td>
+                    <td class="text-right">${fmt(ag.impressions_30d)}</td>
+                    <td>${statusBadge(ag.health_status)}</td>
+                </tr>
+            `;
+        }
+
+        html += '</tbody></table></div></div>';
+
+        // Issues breakdown
+        const allIssues = data.flatMap(ag =>
+            ag.issues.map(i => ({ ...i, agency_name: ag.agency_name, agency_id: ag.agency_id }))
+        );
+
+        if (allIssues.length > 0) {
+            // Sort: CRITICAL first, then HIGH, MEDIUM, LOW
+            const sevOrder = { 'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3 };
+            allIssues.sort((a, b) => (sevOrder[a.severity] || 9) - (sevOrder[b.severity] || 9));
+
+            html += `
+                <div class="card" style="margin-top:14px;">
+                    <div class="card-header">
+                        Issues
+                        <span class="text-muted" style="font-size:11px;">${allIssues.length} total</span>
+                    </div>
+                    <div class="card-body-compact">
+                        <table>
+                            <thead>
+                                <tr><th style="width:30px;"></th><th>Agency</th><th>Issue</th><th>Action</th></tr>
+                            </thead>
+                            <tbody>
+            `;
+
+            for (const issue of allIssues) {
+                html += `
+                    <tr>
+                        <td style="text-align:center;">${sevIcon(issue.severity)}</td>
+                        <td>${issue.agency_name}</td>
+                        <td>${issue.message}</td>
+                        <td class="text-muted" style="font-size:11px;">${issue.action}</td>
+                    </tr>
+                `;
+            }
+
+            html += '</tbody></table></div></div>';
+        }
+
+        container.innerHTML = html;
     }
 
     // =========================================================================

@@ -749,16 +749,20 @@
             
             const params = { agency_id: state.agencyId, advertiser_id: state.advertiserId, ...dates() };
             
-            const [summary, campaigns, lineitems, creatives, zips, publishers, dmas, timeseries] = await Promise.all([
+            const [summary, campaigns, lineitems, creatives, zips, publishers, dmas, timeseries, tabAvail] = await Promise.all([
                 api('/api/v6/summary', params),
                 api('/api/v6/campaign-performance', params),
                 api('/api/v6/lineitem-performance', params),
                 api('/api/v6/creative-performance', params),
-                api('/api/v6/zip-performance', params),  // No dates - full history
+                api('/api/v6/zip-performance', params),
                 api('/api/v6/publisher-performance', params),
                 api('/api/v6/dma-performance', params),
-                api('/api/v6/timeseries', params)
+                api('/api/v6/timeseries', params),
+                api('/api/v6/tab-availability', { agency_id: state.agencyId })
             ]);
+
+            // Store tab availability for showTab() to reference
+            window.tabAvailability = tabAvail.success ? tabAvail.data : {};
 
             const s = summary.success ? summary.data : {};
             const campData = campaigns.success ? campaigns.data : [];
@@ -803,11 +807,11 @@
                 <div class="tabs">
                     <button class="tab active" data-tab="campaigns" onclick="showTab('campaigns', this)">Campaigns</button>
                     <button class="tab" data-tab="lineitems" onclick="showTab('lineitems', this)">Line Items</button>
-                    <button class="tab" data-tab="creatives" onclick="showTab('creatives', this)">Creatives</button>
-                    <button class="tab" data-tab="publishers" onclick="showTab('publishers', this)">Publishers</button>
-                    <button class="tab" data-tab="zips" onclick="showTab('zips', this)">Geographic</button>
+                    ${renderTabButton('creatives', 'Creatives', 'creatives')}
+                    ${renderTabButton('publishers', 'Publishers', 'publishers')}
+                    ${renderTabButton('zips', 'Geographic', 'geographic')}
                     <button class="tab" data-tab="lift" onclick="showTab('lift', this)">Lift Analysis</button>
-                    <button class="tab" data-tab="traffic" onclick="showTab('traffic', this)" ${state.agencyId == 1480 ? '' : 'style="display:none"'}>Traffic Sources</button>
+                    ${renderTabButton('traffic', 'Traffic Sources', 'traffic_sources')}
                     <button class="tab" data-tab="optimize" onclick="showTab('optimize', this)" style="background: linear-gradient(135deg, #f59e0b, #ef4444); color: #fff; font-weight: 600;">⚡ Optimize</button>
                 </div>
                 <div id="tabContent">
@@ -822,7 +826,36 @@
                 renderMixedChart('advDetailChart', tsData);
             }
         }
-        
+
+        // =================================================================
+        // TAB AVAILABILITY — Data-driven tab show/hide
+        // =================================================================
+        function renderTabButton(tabId, label, availKey) {
+            const avail = window.tabAvailability || {};
+            const tabInfo = avail[availKey] || {};
+            const isAvailable = tabInfo.available !== false;  // default to true if unknown
+            if (isAvailable) {
+                return `<button class="tab" data-tab="${tabId}" onclick="showTab('${tabId}', this)">${label}</button>`;
+            } else {
+                return `<button class="tab" data-tab="${tabId}" onclick="showTab('${tabId}', this)" style="opacity: 0.5;" title="${tabInfo.reason || 'Data not available'}">${label}</button>`;
+            }
+        }
+
+        function renderUnavailable(title, reason) {
+            return `
+                <div class="table-container">
+                    <div class="table-title">${title}</div>
+                    <div style="padding: 48px 24px; text-align: center; color: #8b98a5;">
+                        <div style="font-size: 48px; margin-bottom: 16px;">📊</div>
+                        <div style="font-size: 16px; margin-bottom: 12px; color: #e7e9ea; font-weight: 500;">Not Available</div>
+                        <div style="font-size: 13px; max-width: 400px; margin: 0 auto; line-height: 1.6;">
+                            ${reason || 'This data is not available for the current agency.'}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
         async function showTab(tab, btn) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             btn.classList.add('active');
@@ -840,8 +873,11 @@
                 state.filter = { campaignId: null, campaignName: null, lineitemId: null, lineitemName: null };
                 content.innerHTML = renderLineitems(window.tabData.lineitems);
             } else if (tab === 'creatives') {
-                // Creatives tab — supports campaign/lineitem filtering
-                if (state.filter.campaignId || state.filter.lineitemId) {
+                // Creatives tab — check availability first
+                const creativeAvail = (window.tabAvailability || {}).creatives || {};
+                if (creativeAvail.available === false) {
+                    content.innerHTML = renderUnavailable('Creative Performance', creativeAvail.reason);
+                } else if (state.filter.campaignId || state.filter.lineitemId) {
                     content.innerHTML = '<div class="loading"><div class="spinner"></div> Loading filtered creative data...</div>';
                     const params = {
                         agency_id: state.agencyId,
@@ -851,33 +887,47 @@
                         ...(state.filter.lineitemId && { lineitem_id: state.filter.lineitemId })
                     };
                     const result = await api('/api/v6/creative-performance', params);
-                    content.innerHTML = renderFilterBar() + renderCreatives(result.success ? result.data : []);
+                    if (result.available === false) {
+                        content.innerHTML = renderUnavailable('Creative Performance', result.reason);
+                    } else {
+                        content.innerHTML = renderFilterBar() + renderCreatives(result.success ? result.data : []);
+                    }
                 } else {
                     content.innerHTML = renderCreatives(window.tabData.creatives);
                 }
             }
-            // For publishers/geographic, reload with filter if active
+            // For publishers/geographic, check availability then reload with filter if active
             else if (tab === 'publishers') {
-                if (state.filter.campaignId || state.filter.lineitemId) {
+                const pubAvail = (window.tabAvailability || {}).publishers || {};
+                if (pubAvail.available === false) {
+                    content.innerHTML = renderUnavailable('Publisher Performance', pubAvail.reason);
+                } else if (state.filter.campaignId || state.filter.lineitemId) {
                     content.innerHTML = '<div class="loading"><div class="spinner"></div> Loading filtered data...</div>';
-                    const params = { 
-                        agency_id: state.agencyId, 
-                        advertiser_id: state.advertiserId, 
+                    const params = {
+                        agency_id: state.agencyId,
+                        advertiser_id: state.advertiserId,
                         ...dates(),
                         ...(state.filter.campaignId && { campaign_id: state.filter.campaignId }),
                         ...(state.filter.lineitemId && { lineitem_id: state.filter.lineitemId })
                     };
                     const result = await api('/api/v6/publisher-performance', params);
-                    content.innerHTML = renderFilterBar() + renderPublishers(result.success ? result.data : []);
+                    if (result.available === false) {
+                        content.innerHTML = renderUnavailable('Publisher Performance', result.reason);
+                    } else {
+                        content.innerHTML = renderFilterBar() + renderPublishers(result.success ? result.data : []);
+                    }
                 } else {
                     content.innerHTML = renderPublishers(window.tabData.publishers);
                 }
             } else if (tab === 'zips') {
-                if (state.filter.campaignId || state.filter.lineitemId) {
+                const geoAvail = (window.tabAvailability || {}).geographic || {};
+                if (geoAvail.available === false) {
+                    content.innerHTML = renderUnavailable('Geographic Performance', geoAvail.reason);
+                } else if (state.filter.campaignId || state.filter.lineitemId) {
                     content.innerHTML = '<div class="loading"><div class="spinner"></div> Loading filtered data...</div>';
-                    const params = { 
-                        agency_id: state.agencyId, 
-                        advertiser_id: state.advertiserId, 
+                    const params = {
+                        agency_id: state.agencyId,
+                        advertiser_id: state.advertiserId,
                         ...dates(),
                         ...(state.filter.campaignId && { campaign_id: state.filter.campaignId }),
                         ...(state.filter.lineitemId && { lineitem_id: state.filter.lineitemId })
@@ -886,9 +936,13 @@
                         api('/api/v6/zip-performance', params),
                         api('/api/v6/dma-performance', params)
                     ]);
-                    window.tabData.filteredZips = zips.success ? zips.data : [];
-                    window.tabData.filteredDmas = dmas.success ? dmas.data : [];
-                    content.innerHTML = renderFilterBar() + renderZips(window.tabData.filteredZips, window.tabData.filteredDmas);
+                    if (zips.available === false) {
+                        content.innerHTML = renderUnavailable('Geographic Performance', zips.reason);
+                    } else {
+                        window.tabData.filteredZips = zips.success ? zips.data : [];
+                        window.tabData.filteredDmas = dmas.success ? dmas.data : [];
+                        content.innerHTML = renderFilterBar() + renderZips(window.tabData.filteredZips, window.tabData.filteredDmas);
+                    }
                 } else {
                     content.innerHTML = renderZips(window.tabData.zips, window.tabData.dmas);
                 }
@@ -924,17 +978,26 @@
                 }
                 content.innerHTML = renderLift();
             } else if (tab === 'traffic') {
-                // Load traffic sources data (Paramount only)
-                content.innerHTML = '<div class="loading"><div class="spinner"></div> Loading traffic sources (this may take 30-60 seconds)...</div>';
-                const params = {
-                    agency_id: state.agencyId,
-                    advertiser_id: state.advertiserId,
-                    ...dates()
-                };
-                const result = await api('/api/v6/traffic-sources', params);
-                window.tabData.traffic = result.success ? result.data : [];
-                window.tabData.trafficError = result.error || null;
-                content.innerHTML = renderTrafficSources(window.tabData.traffic, result.success, window.tabData.trafficError);
+                // Traffic sources — check web pixel availability first
+                const tsAvail = (window.tabAvailability || {}).traffic_sources || {};
+                if (tsAvail.available === false) {
+                    content.innerHTML = renderUnavailable('Traffic Source Analysis', tsAvail.reason);
+                } else {
+                    content.innerHTML = '<div class="loading"><div class="spinner"></div> Loading traffic sources (this may take 30-60 seconds)...</div>';
+                    const params = {
+                        agency_id: state.agencyId,
+                        advertiser_id: state.advertiserId,
+                        ...dates()
+                    };
+                    const result = await api('/api/v6/traffic-sources', params);
+                    if (result.available === false) {
+                        content.innerHTML = renderUnavailable('Traffic Source Analysis', result.reason);
+                    } else {
+                        window.tabData.traffic = result.success ? result.data : [];
+                        window.tabData.trafficError = result.error || null;
+                        content.innerHTML = renderTrafficSources(window.tabData.traffic, result.success, window.tabData.trafficError);
+                    }
+                }
             } else if (tab === 'optimize') {
                 content.innerHTML = '<div class="loading"><div class="spinner"></div> Analyzing performance across all dimensions (30-day baseline)...</div>';
                 const params = { advertiser_id: state.advertiserId, agency_id: state.agencyId };
