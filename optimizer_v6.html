@@ -46,6 +46,20 @@
         .opt-table th { font-size: 11px; padding: 6px 8px; }
         .opt-table td { padding: 5px 8px; }
         .opt-table th:first-child, .opt-table td:first-child { width: 35%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        /* Campaign / Line Item table: compact columns with truncation */
+        .camp-table { table-layout: fixed; }
+        .camp-table th, .camp-table td { padding: 10px 12px; font-size: 13px; }
+        .camp-table .col-name { width: 32%; max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .camp-table .col-metric { width: 13%; text-align: right; }
+        .camp-table .col-rate { width: 10%; text-align: right; }
+        .li-table { table-layout: fixed; }
+        .li-table th, .li-table td { padding: 10px 10px; font-size: 13px; }
+        .li-table .col-name { max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .li-table .col-name-li { width: 22%; }
+        .li-table .col-name-io { width: 18%; }
+        .li-table .col-plat { width: 8%; }
+        .li-table .col-metric { width: 11%; text-align: right; }
+        .li-table .col-rate { width: 9%; text-align: right; }
         .card { background: #1e2732; border-radius: 12px; padding: 20px; }
         .card-label { font-size: 12px; color: #8b98a5; text-transform: uppercase; margin-bottom: 8px; }
         .card-value { font-size: 24px; font-weight: 700; }
@@ -264,17 +278,18 @@
             window.location.href = '/login';
         }
 
-        async function api(endpoint, params = {}) {
+        async function api(endpoint, params = {}, options = {}) {
             const url = new URL(API + endpoint);
             Object.entries(params).forEach(([k, v]) => v != null && url.searchParams.append(k, v));
             console.log('[API Request]', endpoint, params);
+            const timeoutMs = options.timeout || 90000;
             try {
                 // Ensure fresh token before each API call (prevents stale token after tab switch)
                 if (_clerk && _clerk.session) {
                     try { _authToken = await _clerk.session.getToken(); } catch(e) {}
                 }
                 const controller = new AbortController();
-                const timeout = setTimeout(() => controller.abort(), 90000);
+                const timeout = setTimeout(() => controller.abort(), timeoutMs);
                 const headers = {};
                 if (_authToken) {
                     headers['Authorization'] = 'Bearer ' + _authToken;
@@ -292,7 +307,7 @@
                 console.log('[API Response]', endpoint, data);
                 return data.success ? data : { success: false, error: data.error || 'API error' };
             } catch (e) {
-                const msg = e.name === 'AbortError' ? 'Request timed out (90s)' : e.message;
+                const msg = e.name === 'AbortError' ? `Request timed out (${Math.round(timeoutMs/1000)}s)` : e.message;
                 console.warn('[API Error]', endpoint, msg);
                 return { success: false, error: msg };
             }
@@ -1002,7 +1017,7 @@
                         advertiser_id: state.advertiserId,
                         ...dates()
                     };
-                    const result = await api('/api/v6/traffic-sources', params);
+                    const result = await api('/api/v6/traffic-sources', params, { timeout: 150000 });
                     if (_tabVersion !== myVersion) return;
                     if (result.available === false) {
                         content.innerHTML = renderUnavailable('Traffic Source Analysis', result.reason);
@@ -1044,7 +1059,7 @@
             const hasDupes = Object.values(nameCount).some(n => n > 1);
             
             return `<div class="table-container"><div class="table-title">Campaign Performance <span class="table-note">Click a row to filter Publishers & Geographic</span></div>
-                <table><thead><tr><th>Campaign (IO)</th><th class="text-right">Impressions</th><th class="text-right">Store Visits</th><th class="text-right">Web Visits</th><th class="text-right">Store VR</th><th class="text-right">Web VR</th></tr></thead>
+                <table class="camp-table"><thead><tr><th class="col-name">Campaign (IO)</th><th class="col-metric">Impressions</th><th class="col-metric">Store Visits</th><th class="col-metric">Web Visits</th><th class="col-rate">Store VR</th><th class="col-rate">Web VR</th></tr></thead>
                 <tbody>${data.length === 0 ? '<tr><td colspan="6" class="empty">No campaigns</td></tr>' : data.map(c => {
                     const svr = c.IMPRESSIONS > 0 ? (c.STORE_VISITS / c.IMPRESSIONS * 100) : 0;
                     const wvr = c.IMPRESSIONS > 0 ? (c.WEB_VISITS / c.IMPRESSIONS * 100) : 0;
@@ -1057,21 +1072,22 @@
                         ? baseName + ' (' + String(c.IO_ID).slice(-6) + ')'
                         : baseName;
                     const name = baseName.replace(/'/g, "\\'");
+                    const escaped = displayName.replace(/"/g, '&quot;');
                     return `
                     <tr class="clickable-row" onclick="filterByCampaign('${c.IO_ID}', '${name}')">
-                        <td>${displayName}</td>
-                        <td class="text-right">${fmt(c.IMPRESSIONS)}</td>
-                        <td class="text-right text-green">${fmt(c.STORE_VISITS)}</td>
-                        <td class="text-right text-blue">${fmt(c.WEB_VISITS)}</td>
-                        <td class="text-right ${rateClass(svr)}">${pct(svr)}</td>
-                        <td class="text-right ${rateClass(wvr)}">${pct(wvr)}</td>
+                        <td class="col-name" title="${escaped}">${displayName}</td>
+                        <td class="col-metric">${fmt(c.IMPRESSIONS)}</td>
+                        <td class="col-metric text-green">${fmt(c.STORE_VISITS)}</td>
+                        <td class="col-metric text-blue">${fmt(c.WEB_VISITS)}</td>
+                        <td class="col-rate ${rateClass(svr)}">${pct(svr)}</td>
+                        <td class="col-rate ${rateClass(wvr)}">${pct(wvr)}</td>
                     </tr>
                 `}).join('')}</tbody></table></div>`;
         }
         
         function renderLineitems(data) {
             return `<div class="table-container"><div class="table-title">Line Item Performance <span class="table-note">Click a row to filter Publishers & Geographic</span></div>
-                <table><thead><tr><th>Line Item</th><th>Campaign</th><th>Platform</th><th class="text-right">Impressions</th><th class="text-right">Store Visits</th><th class="text-right">Web Visits</th><th class="text-right">Store VR</th><th class="text-right">Web VR</th></tr></thead>
+                <table class="li-table"><thead><tr><th class="col-name col-name-li">Line Item</th><th class="col-name col-name-io">Campaign</th><th class="col-plat">Platform</th><th class="col-metric">Impressions</th><th class="col-metric">Store Visits</th><th class="col-metric">Web Visits</th><th class="col-rate">Store VR</th><th class="col-rate">Web VR</th></tr></thead>
                 <tbody>${data.length === 0 ? '<tr><td colspan="8" class="empty">No line items</td></tr>' : data.map(l => {
                     const svr = l.IMPRESSIONS > 0 ? (l.STORE_VISITS / l.IMPRESSIONS * 100) : 0;
                     const wvr = l.IMPRESSIONS > 0 ? ((l.WEB_VISITS || 0) / l.IMPRESSIONS * 100) : 0;
@@ -1081,16 +1097,18 @@
                     try { ioDisp = decodeURIComponent(ioDisp.replace(/\+/g, ' ')); } catch(e) {}
                     const liName = liDisp.replace(/'/g, "\\'");
                     const ioName = ioDisp.replace(/'/g, "\\'");
+                    const liEsc = liDisp.replace(/"/g, '&quot;');
+                    const ioEsc = ioDisp.replace(/"/g, '&quot;');
                     return `
                     <tr class="clickable-row" onclick="filterByLineitem('${l.LI_ID}', '${liName}', '${l.IO_ID || ''}', '${ioName}')">
-                        <td>${liDisp}</td>
-                        <td class="text-muted">${ioDisp}</td>
-                        <td class="text-muted">${l.PLATFORM || ''}</td>
-                        <td class="text-right">${fmt(l.IMPRESSIONS)}</td>
-                        <td class="text-right text-green">${fmt(l.STORE_VISITS)}</td>
-                        <td class="text-right text-blue">${fmt(l.WEB_VISITS || 0)}</td>
-                        <td class="text-right ${rateClass(svr)}">${pct(svr)}</td>
-                        <td class="text-right ${rateClass(wvr)}">${pct(wvr)}</td>
+                        <td class="col-name col-name-li" title="${liEsc}">${liDisp}</td>
+                        <td class="col-name col-name-io text-muted" title="${ioEsc}">${ioDisp}</td>
+                        <td class="col-plat text-muted">${l.PLATFORM || ''}</td>
+                        <td class="col-metric">${fmt(l.IMPRESSIONS)}</td>
+                        <td class="col-metric text-green">${fmt(l.STORE_VISITS)}</td>
+                        <td class="col-metric text-blue">${fmt(l.WEB_VISITS || 0)}</td>
+                        <td class="col-rate ${rateClass(svr)}">${pct(svr)}</td>
+                        <td class="col-rate ${rateClass(wvr)}">${pct(wvr)}</td>
                     </tr>
                 `}).join('')}</tbody></table></div>`;
         }
@@ -1489,6 +1507,7 @@
 
             // Source type icons and colors
             const sourceTypeInfo = {
+                'view_through':  { icon: '📺', label: 'Ad View-Through', color: '#00ba7c' },
                 'direct':        { icon: '🔗', label: 'Direct', color: '#8b98a5' },
                 'organic_search':{ icon: '🔍', label: 'Organic Search', color: '#00ba7c' },
                 'paid_search':   { icon: '💰', label: 'Paid Search', color: '#f7931a' },
@@ -1513,21 +1532,24 @@
                 typeRollup[st].hh += d.UNIQUE_HOUSEHOLDS || 0;
             });
 
-            // Top source
-            const top = data[0];
+            // Separate view-through from click-based
+            const vtRow = data.find(d => d.SOURCE_TYPE === 'view_through');
+            const clickRows = data.filter(d => d.SOURCE_TYPE !== 'view_through');
+            const topClick = clickRows[0];
 
-            // Insight box
+            // Insight box — view-through vs click comparison
             let insightHtml = `
                 <div style="background: #1e2732; border-left: 3px solid #1d9bf0; padding: 12px 16px; margin-bottom: 16px; border-radius: 0 8px 8px 0; font-size: 13px; line-height: 1.6;">
-                    <strong>Referral Traffic Analysis:</strong>
-                    <strong style="color: #1d9bf0;">${fmt(totalVisits)}</strong> attributed web visits from <strong>${fmt(totalHH)}</strong> unique households across ${data.length} traffic sources.
-                    ${top ? `<br><strong style="color: #00ba7c;">Top source:</strong> ${top.TRAFFIC_SOURCE} (${top.VISIT_SHARE}% of visits, ${fmt(top.WEB_VISITS)} visits).` : ''}
+                    <strong>Traffic Source Analysis:</strong>
+                    <strong style="color: #1d9bf0;">${fmt(totalVisits)}</strong> attributed web visits from <strong>${fmt(totalHH)}</strong> unique households across ${data.length} sources.
+                    ${vtRow ? `<br><strong style="color: #00ba7c;">📺 Ad View-Through:</strong> ${fmt(vtRow.WEB_VISITS)} visits (${vtRow.VISIT_SHARE}%) from ad-exposed households with no click referrer — pure ad-driven traffic.` : ''}
+                    ${topClick ? `<br><strong>Top click source:</strong> ${topClick.TRAFFIC_SOURCE} (${topClick.VISIT_SHARE}% of visits, ${fmt(topClick.WEB_VISITS)} visits).` : ''}
                     ${totalConv > 0 ? `<br><strong>Conversions:</strong> ${fmt(totalConv)} total` + (totalConvVal > 0 ? ` ($${fmt(Math.round(totalConvVal))} value).` : '.') : ''}
                 </div>
             `;
 
             // Source type summary chips
-            const chipOrder = ['direct', 'organic_search', 'paid_search', 'paid', 'social', 'email', 'referral'];
+            const chipOrder = ['view_through', 'organic_search', 'paid_search', 'paid', 'social', 'email', 'referral'];
             let chipsHtml = '<div style="display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px;">';
             for (const st of chipOrder) {
                 const info = sourceTypeInfo[st] || sourceTypeInfo['referral'];
@@ -1550,15 +1572,18 @@
                 const barWidth = Math.max(3, ((d.WEB_VISITS || 0) / maxVisits) * 100);
                 const convRate = d.CONVERSION_RATE || 0;
                 const convClass = convRate >= 5 ? 'text-green' : convRate >= 1 ? 'text-yellow' : 'text-muted';
+                const isVT = d.SOURCE_TYPE === 'view_through';
+                const rowStyle = isVT ? 'background: #0d2b1a;' : '';
 
                 return `
-                    <tr>
+                    <tr style="${rowStyle}">
                         <td>
                             <span title="${st.label}">${st.icon}</span>
-                            <strong>${d.TRAFFIC_SOURCE}</strong>
-                            ${d.TRAFFIC_MEDIUM && d.TRAFFIC_MEDIUM !== 'unknown' ? `<span class="text-muted" style="font-size:10px;margin-left:4px;">/ ${d.TRAFFIC_MEDIUM}</span>` : ''}
+                            <strong${isVT ? ' style="color: #00ba7c;"' : ''}>${d.TRAFFIC_SOURCE}</strong>
+                            ${isVT ? '<span class="text-muted" style="font-size:10px;margin-left:4px;">/ no click referrer</span>' :
+                              (d.TRAFFIC_MEDIUM && d.TRAFFIC_MEDIUM !== 'unknown' ? `<span class="text-muted" style="font-size:10px;margin-left:4px;">/ ${d.TRAFFIC_MEDIUM}</span>` : '')}
                         </td>
-                        <td class="text-right text-blue">${fmt(d.WEB_VISITS)}</td>
+                        <td class="text-right ${isVT ? 'text-green' : 'text-blue'}">${fmt(d.WEB_VISITS)}</td>
                         <td class="text-right">${fmt(d.UNIQUE_HOUSEHOLDS)}</td>
                         <td class="text-right">
                             <div style="display: flex; align-items: center; justify-content: flex-end; gap: 8px;">
@@ -1573,6 +1598,7 @@
                         <td class="text-right ${convClass}">${d.CONVERSIONS > 0 ? fmt(d.CONVERSIONS) : '—'}</td>
                         <td class="text-right">${d.CONVERSION_VALUE > 0 ? '$' + fmt(Math.round(d.CONVERSION_VALUE)) : '—'}</td>
                     </tr>
+                    ${isVT ? '<tr style="height: 2px; background: #2f3942;"><td colspan="8" style="padding: 0; border: none;"></td></tr>' : ''}
                 `;
             }).join('');
 
@@ -1581,8 +1607,8 @@
                 ${chipsHtml}
                 <div class="table-container">
                     <div class="table-title">
-                        Referral Traffic — How Users Reach the Website
-                        <span class="table-note">Traffic sources for web visits attributed to ad-exposed households</span>
+                        Traffic Sources — View-Through vs Click-Based
+                        <span class="table-note">Ad-exposed household visits: view-through (no click) vs referral channels</span>
                     </div>
                     <table>
                         <thead>
@@ -1602,8 +1628,8 @@
                         </tbody>
                     </table>
                     <div style="font-size: 12px; color: #8b98a5; padding: 12px 16px; border-top: 1px solid #2f3942;">
-                        <strong>Source:</strong> How the user arrived at the website (UTM source, referrer URL, or direct).<br>
-                        <strong>Visits:</strong> Web visits from ad-exposed households attributed via household-level matching.<br>
+                        <strong>📺 Ad View-Through:</strong> Households exposed to ads who later visited the site with no click referrer — pure ad-driven traffic (view-through attribution).<br>
+                        <strong>Click Sources:</strong> How ad-exposed households arrived at the website (search, social, referral, etc.) — tracked via UTM, referrer URL, or pixel data.<br>
                         <strong>Share:</strong> % of total attributed visits from this source.<br>
                         <strong>Avg Days:</strong> Average days between ad impression and web visit.<br>
                         <strong>Conversions:</strong> Pixel events tagged as purchase, sale, conversion, or lead submission.

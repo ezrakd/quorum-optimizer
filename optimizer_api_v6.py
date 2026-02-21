@@ -1982,6 +1982,12 @@ def get_traffic_sources():
         cursor = conn.cursor()
         agency_id = int(agency_id)
 
+        # Set timeout — this query can be slow on large attribution tables
+        try:
+            cursor.execute("ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = 120")
+        except Exception:
+            pass
+
         # =============================================================
         # Step 1: Get attributed web visits with referral context
         # =============================================================
@@ -1993,6 +1999,13 @@ def get_traffic_sources():
         #   2. TRAFFIC_SOURCE (pixel-reported source param)
         #   3. CLIENT_REFERRER_URL domain (browser referrer)
         #   4. 'direct' (no referrer = direct/bookmarked)
+        # Internal/Quorum domains to exclude from traffic source display
+        internal_domains = (
+            'quorum.live', 'quorum.inc', 'app.quorum.live',
+            'localhost', '127.0.0.1', '0.0.0.0',
+            'quorumanalytics.com', 'quorum-optimizer',
+        )
+
         cursor.execute("""
             WITH attributed_visits AS (
                 SELECT
@@ -2039,6 +2052,8 @@ def get_traffic_sources():
                 FROM QUORUMDB.DERIVED_TABLES.AD_TO_WEB_VISIT_ATTRIBUTION a
                 LEFT JOIN QUORUMDB.DERIVED_TABLES.WEBPIXEL_EVENTS we
                     ON a.WEB_VISIT_UUID = we.UUID
+                    AND we.EVENT_TIMESTAMP >= %(start_date)s::TIMESTAMP
+                    AND we.EVENT_TIMESTAMP < DATEADD(day, 1, %(end_date)s::DATE)::TIMESTAMP
                 WHERE a.AD_IMPRESSION_AGENCY_ID = %(agency_id)s
                   AND a.AD_IMPRESSION_ADVERTISER_ID = %(advertiser_id)s
                   AND a.WEB_VISIT_DATE BETWEEN %(start_date)s AND %(end_date)s
@@ -2087,9 +2102,53 @@ def get_traffic_sources():
                         'banner', 'paid-search', 'paidsocial', 'paid_search'}
 
         results = []
-        total_visits = sum(int(r.get('WEB_VISITS', 0)) for r in raw_results)
+        # Accumulate view-through (direct) visits separately for the summary row
+        vt_visits = 0
+        vt_hh = 0
+        vt_impressions = 0
+        vt_conversions = 0
+        vt_conv_value = 0.0
+        vt_days_sum = 0.0
+        vt_days_count = 0
 
+        # First pass: filter internal traffic, separate view-through from click-based
+        filtered_results = []
         for r in raw_results:
+            source = str(r['TRAFFIC_SOURCE'])
+            source_lower = source.lower().strip()
+
+            # Filter out internal/Quorum traffic
+            is_internal = False
+            for dom in internal_domains:
+                if dom in source_lower:
+                    is_internal = True
+                    break
+            if is_internal:
+                continue
+
+            visits = int(r.get('WEB_VISITS', 0))
+            households = int(r.get('UNIQUE_HOUSEHOLDS', 0))
+            impressions = int(r.get('TOTAL_IMPRESSIONS', 0))
+            conversions = int(r.get('CONVERSIONS', 0))
+            conv_value = float(r.get('TOTAL_CONVERSION_VALUE', 0))
+            avg_days = float(r.get('AVG_DAYS_TO_VISIT', 0))
+
+            # Direct/no-referrer visits = view-through (ad-exposed HHs visiting with no click source)
+            if source_lower == 'direct':
+                vt_visits += visits
+                vt_hh += households
+                vt_impressions += impressions
+                vt_conversions += conversions
+                vt_conv_value += conv_value
+                vt_days_sum += avg_days * visits
+                vt_days_count += visits
+                continue
+
+            filtered_results.append(r)
+
+        total_visits = sum(int(r.get('WEB_VISITS', 0)) for r in filtered_results) + vt_visits
+
+        for r in filtered_results:
             source = str(r['TRAFFIC_SOURCE'])
             medium = str(r.get('TRAFFIC_MEDIUM', 'unknown'))
             visits = int(r.get('WEB_VISITS', 0))
@@ -2102,9 +2161,7 @@ def get_traffic_sources():
 
             # Classify the source
             source_lower = source.lower().strip()
-            if source_lower == 'direct':
-                source_type = 'direct'
-            elif medium in paid_mediums:
+            if medium in paid_mediums:
                 source_type = 'paid'
             elif source_lower in search_engines or any(se in source_lower for se in search_engines):
                 source_type = 'organic_search' if medium not in paid_mediums else 'paid_search'
@@ -2130,8 +2187,26 @@ def get_traffic_sources():
                 'VISITS_WITH_REFERRAL': referral_data,
             })
 
-        # Sort by visits descending
+        # Sort click-based by visits descending
         results.sort(key=lambda x: x['WEB_VISITS'], reverse=True)
+
+        # Insert view-through (ad exposure) row at the top
+        if vt_visits > 0:
+            vt_avg_days = round(vt_days_sum / vt_days_count, 1) if vt_days_count > 0 else 0
+            results.insert(0, {
+                'TRAFFIC_SOURCE': 'Ad View-Through',
+                'TRAFFIC_MEDIUM': 'view-through',
+                'SOURCE_TYPE': 'view_through',
+                'WEB_VISITS': vt_visits,
+                'UNIQUE_HOUSEHOLDS': vt_hh,
+                'TOTAL_IMPRESSIONS': vt_impressions,
+                'VISIT_SHARE': round(vt_visits * 100.0 / total_visits, 1) if total_visits > 0 else 0,
+                'AVG_DAYS_TO_VISIT': vt_avg_days,
+                'CONVERSIONS': vt_conversions,
+                'CONVERSION_VALUE': round(vt_conv_value, 2),
+                'CONVERSION_RATE': round(vt_conversions * 100.0 / vt_visits, 1) if vt_visits > 0 else 0,
+                'VISITS_WITH_REFERRAL': 0,
+            })
 
         # Summary stats for the response
         summary = {
