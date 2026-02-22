@@ -2090,32 +2090,49 @@ def get_traffic_sources():
         raw_results = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
         # =============================================================
-        # Step 2: Classify source types
+        # Step 2: Consolidate domains, filter internal, classify
         # =============================================================
+        # Domain consolidation map — merge fragmented Google/ad domains into clean labels
+        def consolidate_source(source_lower):
+            """Merge Google ad-serving domains into readable labels."""
+            if 'safeframe.googlesyndication.com' in source_lower:
+                return 'Google Display'
+            if source_lower in ('googleads.g.doubleclick.net', 'doubleclick.net',
+                                'pagead2.googlesyndication.com', 'tpc.googlesyndication.com'):
+                return 'Google Ads'
+            if source_lower == 'syndicatedsearch.goog':
+                return 'Google Paid Search'
+            if source_lower == 'www.google.com':
+                return 'Google'
+            if source_lower in ('m.facebook.com', 'l.facebook.com', 'lm.facebook.com'):
+                return 'Facebook'
+            if source_lower in ('m.youtube.com', 'www.youtube.com'):
+                return 'YouTube'
+            if source_lower == 'www.instagram.com':
+                return 'Instagram'
+            if source_lower in ('www.reddit.com',):
+                return 'Reddit'
+            if source_lower in ('www.bing.com',):
+                return 'Bing'
+            return None  # No consolidation
+
         search_engines = {'google.com', 'bing.com', 'yahoo.com', 'duckduckgo.com',
-                          'google', 'bing', 'yahoo', 'duckduckgo', 'baidu.com', 'yandex.com'}
+                          'google', 'bing', 'yahoo', 'duckduckgo', 'baidu.com', 'yandex.com',
+                          'health.yahoo.com', 'search.yahoo.com'}
         social_platforms = {'facebook.com', 'facebook', 'instagram.com', 'instagram',
                             'twitter.com', 'x.com', 'linkedin.com', 'linkedin',
                             'pinterest.com', 'tiktok.com', 'snapchat.com', 'youtube.com',
-                            'fb', 'ig', 'meta', 'reddit.com'}
+                            'youtube', 'fb', 'ig', 'meta', 'reddit.com', 'reddit',
+                            'threads.com', 'www.threads.com', 'truthsocial.com'}
         paid_mediums = {'cpc', 'ppc', 'cpm', 'paid', 'paid_social', 'display', 'retargeting',
                         'banner', 'paid-search', 'paidsocial', 'paid_search'}
 
-        results = []
-        # Accumulate view-through (direct) visits separately for the summary row
-        vt_visits = 0
-        vt_hh = 0
-        vt_impressions = 0
-        vt_conversions = 0
-        vt_conv_value = 0.0
-        vt_days_sum = 0.0
-        vt_days_count = 0
-
-        # First pass: filter internal traffic, separate view-through from click-based
-        filtered_results = []
+        # First pass: filter internal, consolidate domains, aggregate into buckets
+        consolidated = {}  # key = (display_name, medium) → aggregated metrics
         for r in raw_results:
             source = str(r['TRAFFIC_SOURCE'])
             source_lower = source.lower().strip()
+            medium = str(r.get('TRAFFIC_MEDIUM', 'unknown'))
 
             # Filter out internal/Quorum traffic
             is_internal = False
@@ -2126,31 +2143,15 @@ def get_traffic_sources():
             if is_internal:
                 continue
 
-            visits = int(r.get('WEB_VISITS', 0))
-            households = int(r.get('UNIQUE_HOUSEHOLDS', 0))
-            impressions = int(r.get('TOTAL_IMPRESSIONS', 0))
-            conversions = int(r.get('CONVERSIONS', 0))
-            conv_value = float(r.get('TOTAL_CONVERSION_VALUE', 0))
-            avg_days = float(r.get('AVG_DAYS_TO_VISIT', 0))
+            # Consolidate fragmented domains
+            display_name = consolidate_source(source_lower)
+            if display_name:
+                # Use the consolidated name; merge mediums into the dominant one
+                key = display_name
+            else:
+                key = source
+                display_name = source
 
-            # Direct/no-referrer visits = view-through (ad-exposed HHs visiting with no click source)
-            if source_lower == 'direct':
-                vt_visits += visits
-                vt_hh += households
-                vt_impressions += impressions
-                vt_conversions += conversions
-                vt_conv_value += conv_value
-                vt_days_sum += avg_days * visits
-                vt_days_count += visits
-                continue
-
-            filtered_results.append(r)
-
-        total_visits = sum(int(r.get('WEB_VISITS', 0)) for r in filtered_results) + vt_visits
-
-        for r in filtered_results:
-            source = str(r['TRAFFIC_SOURCE'])
-            medium = str(r.get('TRAFFIC_MEDIUM', 'unknown'))
             visits = int(r.get('WEB_VISITS', 0))
             households = int(r.get('UNIQUE_HOUSEHOLDS', 0))
             impressions = int(r.get('TOTAL_IMPRESSIONS', 0))
@@ -2159,9 +2160,43 @@ def get_traffic_sources():
             avg_days = float(r.get('AVG_DAYS_TO_VISIT', 0))
             referral_data = int(r.get('VISITS_WITH_REFERRAL_DATA', 0))
 
-            # Classify the source
-            source_lower = source.lower().strip()
-            if medium in paid_mediums:
+            if key not in consolidated:
+                consolidated[key] = {
+                    'display_name': display_name,
+                    'medium': medium,
+                    'visits': 0, 'households': 0, 'impressions': 0,
+                    'conversions': 0, 'conv_value': 0.0,
+                    'days_sum': 0.0, 'days_count': 0,
+                    'referral_data': 0,
+                }
+            c = consolidated[key]
+            c['visits'] += visits
+            c['households'] += households
+            c['impressions'] += impressions
+            c['conversions'] += conversions
+            c['conv_value'] += conv_value
+            c['days_sum'] += avg_days * visits
+            c['days_count'] += visits
+            c['referral_data'] += referral_data
+
+        # Build results with classification
+        total_visits = sum(c['visits'] for c in consolidated.values())
+        results = []
+
+        for key, c in consolidated.items():
+            source_display = c['display_name']
+            medium = c['medium']
+            visits = c['visits']
+            source_lower = key.lower().strip()
+
+            # Classify the source type
+            if source_lower == 'direct':
+                source_type = 'direct'
+            elif source_lower in ('google display', 'google ads'):
+                source_type = 'paid'
+            elif source_lower == 'google paid search':
+                source_type = 'paid_search'
+            elif medium in paid_mediums:
                 source_type = 'paid'
             elif source_lower in search_engines or any(se in source_lower for se in search_engines):
                 source_type = 'organic_search' if medium not in paid_mediums else 'paid_search'
@@ -2172,53 +2207,70 @@ def get_traffic_sources():
             else:
                 source_type = 'referral'
 
+            avg_days = round(c['days_sum'] / c['days_count'], 1) if c['days_count'] > 0 else 0
+            visits_per_hh = round(visits / c['households'], 1) if c['households'] > 0 else 0
+
             results.append({
-                'TRAFFIC_SOURCE': source,
+                'TRAFFIC_SOURCE': source_display,
                 'TRAFFIC_MEDIUM': medium,
                 'SOURCE_TYPE': source_type,
                 'WEB_VISITS': visits,
-                'UNIQUE_HOUSEHOLDS': households,
-                'TOTAL_IMPRESSIONS': impressions,
+                'UNIQUE_HOUSEHOLDS': c['households'],
+                'TOTAL_IMPRESSIONS': c['impressions'],
                 'VISIT_SHARE': round(visits * 100.0 / total_visits, 1) if total_visits > 0 else 0,
-                'AVG_DAYS_TO_VISIT': round(avg_days, 1),
-                'CONVERSIONS': conversions,
-                'CONVERSION_VALUE': round(conv_value, 2),
-                'CONVERSION_RATE': round(conversions * 100.0 / visits, 1) if visits > 0 else 0,
-                'VISITS_WITH_REFERRAL': referral_data,
+                'AVG_DAYS_TO_VISIT': avg_days,
+                'VISITS_PER_HH': visits_per_hh,
+                'CONVERSIONS': c['conversions'],
+                'CONVERSION_VALUE': round(c['conv_value'], 2),
+                'CONVERSION_RATE': round(c['conversions'] * 100.0 / visits, 1) if visits > 0 else 0,
+                'VISITS_WITH_REFERRAL': c['referral_data'],
             })
 
-        # Sort click-based by visits descending
+        # Sort by visits descending
         results.sort(key=lambda x: x['WEB_VISITS'], reverse=True)
 
-        # Insert view-through (ad exposure) row at the top
-        if vt_visits > 0:
-            vt_avg_days = round(vt_days_sum / vt_days_count, 1) if vt_days_count > 0 else 0
-            results.insert(0, {
-                'TRAFFIC_SOURCE': 'Ad View-Through',
-                'TRAFFIC_MEDIUM': 'view-through',
-                'SOURCE_TYPE': 'view_through',
-                'WEB_VISITS': vt_visits,
-                'UNIQUE_HOUSEHOLDS': vt_hh,
-                'TOTAL_IMPRESSIONS': vt_impressions,
-                'VISIT_SHARE': round(vt_visits * 100.0 / total_visits, 1) if total_visits > 0 else 0,
-                'AVG_DAYS_TO_VISIT': vt_avg_days,
-                'CONVERSIONS': vt_conversions,
-                'CONVERSION_VALUE': round(vt_conv_value, 2),
-                'CONVERSION_RATE': round(vt_conversions * 100.0 / vt_visits, 1) if vt_visits > 0 else 0,
-                'VISITS_WITH_REFERRAL': 0,
-            })
+        # Insert view-through summary row at top:
+        # ALL attributed visits = ad-exposed households who visited the website
+        # This is the aggregate view-through metric (the entire attribution table).
+        vt_total_visits = total_visits
+        vt_total_hh = sum(c['households'] for c in consolidated.values())
+        vt_total_imps = sum(c['impressions'] for c in consolidated.values())
+        vt_total_conv = sum(c['conversions'] for c in consolidated.values())
+        vt_total_cv = sum(c['conv_value'] for c in consolidated.values())
+        vt_total_days = sum(c['days_sum'] for c in consolidated.values())
+        vt_total_days_n = sum(c['days_count'] for c in consolidated.values())
+        vt_avg_days = round(vt_total_days / vt_total_days_n, 1) if vt_total_days_n > 0 else 0
+        vt_visits_per_hh = round(vt_total_visits / vt_total_hh, 1) if vt_total_hh > 0 else 0
+
+        results.insert(0, {
+            'TRAFFIC_SOURCE': 'All Ad-Attributed Visits',
+            'TRAFFIC_MEDIUM': 'view-through',
+            'SOURCE_TYPE': 'view_through',
+            'WEB_VISITS': vt_total_visits,
+            'UNIQUE_HOUSEHOLDS': vt_total_hh,
+            'TOTAL_IMPRESSIONS': vt_total_imps,
+            'VISIT_SHARE': 100.0,
+            'AVG_DAYS_TO_VISIT': vt_avg_days,
+            'VISITS_PER_HH': vt_visits_per_hh,
+            'CONVERSIONS': vt_total_conv,
+            'CONVERSION_VALUE': round(vt_total_cv, 2),
+            'CONVERSION_RATE': round(vt_total_conv * 100.0 / vt_total_visits, 1) if vt_total_visits > 0 else 0,
+            'VISITS_WITH_REFERRAL': 0,
+        })
 
         # Summary stats for the response
         summary = {
             'total_visits': total_visits,
-            'total_households': sum(r['UNIQUE_HOUSEHOLDS'] for r in results),
-            'total_conversions': sum(r['CONVERSIONS'] for r in results),
-            'total_conversion_value': round(sum(r['CONVERSION_VALUE'] for r in results), 2),
-            'source_count': len(results),
+            'total_households': vt_total_hh,
+            'total_conversions': vt_total_conv,
+            'total_conversion_value': round(vt_total_cv, 2),
+            'source_count': len(results) - 1,  # Exclude the summary row
             'source_type_breakdown': {},
         }
         for r in results:
             st = r['SOURCE_TYPE']
+            if st == 'view_through':
+                continue  # Don't double-count the summary row
             if st not in summary['source_type_breakdown']:
                 summary['source_type_breakdown'][st] = {'visits': 0, 'households': 0}
             summary['source_type_breakdown'][st]['visits'] += r['WEB_VISITS']

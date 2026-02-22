@@ -1532,24 +1532,26 @@
                 typeRollup[st].hh += d.UNIQUE_HOUSEHOLDS || 0;
             });
 
-            // Separate view-through from click-based
+            // Separate view-through summary from source breakdown
             const vtRow = data.find(d => d.SOURCE_TYPE === 'view_through');
-            const clickRows = data.filter(d => d.SOURCE_TYPE !== 'view_through');
-            const topClick = clickRows[0];
+            const sourceRows = data.filter(d => d.SOURCE_TYPE !== 'view_through');
+            const topSource = sourceRows[0];
+            const directRow = sourceRows.find(d => d.SOURCE_TYPE === 'direct');
 
-            // Insight box — view-through vs click comparison
+            // Insight box — view-through totals + top source
             let insightHtml = `
                 <div style="background: #1e2732; border-left: 3px solid #1d9bf0; padding: 12px 16px; margin-bottom: 16px; border-radius: 0 8px 8px 0; font-size: 13px; line-height: 1.6;">
-                    <strong>Traffic Source Analysis:</strong>
-                    <strong style="color: #1d9bf0;">${fmt(totalVisits)}</strong> attributed web visits from <strong>${fmt(totalHH)}</strong> unique households across ${data.length} sources.
-                    ${vtRow ? `<br><strong style="color: #00ba7c;">📺 Ad View-Through:</strong> ${fmt(vtRow.WEB_VISITS)} visits (${vtRow.VISIT_SHARE}%) from ad-exposed households with no click referrer — pure ad-driven traffic.` : ''}
-                    ${topClick ? `<br><strong>Top click source:</strong> ${topClick.TRAFFIC_SOURCE} (${topClick.VISIT_SHARE}% of visits, ${fmt(topClick.WEB_VISITS)} visits).` : ''}
+                    <strong>📺 Ad-Attributed Traffic:</strong>
+                    <strong style="color: #00ba7c;">${fmt(vtRow ? vtRow.WEB_VISITS : totalVisits)}</strong> web visits from <strong>${fmt(vtRow ? vtRow.UNIQUE_HOUSEHOLDS : totalHH)}</strong> ad-exposed households
+                    ${vtRow ? ` (<strong>${vtRow.VISITS_PER_HH}</strong> visits/HH avg, <strong>${vtRow.AVG_DAYS_TO_VISIT}</strong> days avg to visit).` : '.'}
+                    ${topSource ? `<br><strong>Top referral source:</strong> ${topSource.TRAFFIC_SOURCE} — ${fmt(topSource.WEB_VISITS)} visits (${topSource.VISIT_SHARE}%), ${topSource.VISITS_PER_HH || '-'} visits/HH.` : ''}
+                    ${directRow ? `<br><strong>🔗 Direct (no referrer):</strong> ${fmt(directRow.WEB_VISITS)} visits (${directRow.VISIT_SHARE}%) — typed URL, bookmarked, or app.` : ''}
                     ${totalConv > 0 ? `<br><strong>Conversions:</strong> ${fmt(totalConv)} total` + (totalConvVal > 0 ? ` ($${fmt(Math.round(totalConvVal))} value).` : '.') : ''}
                 </div>
             `;
 
-            // Source type summary chips
-            const chipOrder = ['view_through', 'organic_search', 'paid_search', 'paid', 'social', 'email', 'referral'];
+            // Source type summary chips (exclude view_through summary row)
+            const chipOrder = ['direct', 'organic_search', 'paid_search', 'paid', 'social', 'email', 'referral'];
             let chipsHtml = '<div style="display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px;">';
             for (const st of chipOrder) {
                 const info = sourceTypeInfo[st] || sourceTypeInfo['referral'];
@@ -1564,41 +1566,43 @@
             }
             chipsHtml += '</div>';
 
-            // Visit share bar
-            const maxVisits = Math.max(...data.map(d => d.WEB_VISITS || 0), 1);
+            // Visit share bar — exclude VT row from max calculation
+            const maxVisits = Math.max(...sourceRows.map(d => d.WEB_VISITS || 0), 1);
 
             const tableRows = data.map(d => {
                 const st = sourceTypeInfo[d.SOURCE_TYPE] || sourceTypeInfo['referral'];
-                const barWidth = Math.max(3, ((d.WEB_VISITS || 0) / maxVisits) * 100);
+                const isVT = d.SOURCE_TYPE === 'view_through';
+                const barWidth = isVT ? 100 : Math.max(3, ((d.WEB_VISITS || 0) / maxVisits) * 100);
                 const convRate = d.CONVERSION_RATE || 0;
                 const convClass = convRate >= 5 ? 'text-green' : convRate >= 1 ? 'text-yellow' : 'text-muted';
-                const isVT = d.SOURCE_TYPE === 'view_through';
                 const rowStyle = isVT ? 'background: #0d2b1a;' : '';
+                const visitsPH = d.VISITS_PER_HH || (d.UNIQUE_HOUSEHOLDS > 0 ? (d.WEB_VISITS / d.UNIQUE_HOUSEHOLDS).toFixed(1) : '—');
 
                 return `
                     <tr style="${rowStyle}">
                         <td>
                             <span title="${st.label}">${st.icon}</span>
                             <strong${isVT ? ' style="color: #00ba7c;"' : ''}>${d.TRAFFIC_SOURCE}</strong>
-                            ${isVT ? '<span class="text-muted" style="font-size:10px;margin-left:4px;">/ no click referrer</span>' :
-                              (d.TRAFFIC_MEDIUM && d.TRAFFIC_MEDIUM !== 'unknown' ? `<span class="text-muted" style="font-size:10px;margin-left:4px;">/ ${d.TRAFFIC_MEDIUM}</span>` : '')}
+                            ${isVT ? '<span class="text-muted" style="font-size:10px;margin-left:4px;">/ all ad-exposed household visits</span>' :
+                              (d.TRAFFIC_MEDIUM && d.TRAFFIC_MEDIUM !== 'unknown' && d.TRAFFIC_MEDIUM !== 'view-through'
+                                ? `<span class="text-muted" style="font-size:10px;margin-left:4px;">/ ${d.TRAFFIC_MEDIUM}</span>` : '')}
                         </td>
                         <td class="text-right ${isVT ? 'text-green' : 'text-blue'}">${fmt(d.WEB_VISITS)}</td>
                         <td class="text-right">${fmt(d.UNIQUE_HOUSEHOLDS)}</td>
+                        <td class="text-right">${visitsPH}</td>
                         <td class="text-right">
                             <div style="display: flex; align-items: center; justify-content: flex-end; gap: 8px;">
                                 <div style="width: 60px; height: 6px; background: #2f3942; border-radius: 3px; overflow: hidden;">
                                     <div style="width: ${barWidth}%; height: 100%; background: ${st.color}; border-radius: 3px;"></div>
                                 </div>
-                                <span style="min-width: 36px; text-align: right;">${d.VISIT_SHARE}%</span>
+                                <span style="min-width: 36px; text-align: right;">${isVT ? '—' : d.VISIT_SHARE + '%'}</span>
                             </div>
                         </td>
-                        <td class="text-right">${fmt(d.TOTAL_IMPRESSIONS)}</td>
                         <td class="text-right text-muted">${d.AVG_DAYS_TO_VISIT}</td>
                         <td class="text-right ${convClass}">${d.CONVERSIONS > 0 ? fmt(d.CONVERSIONS) : '—'}</td>
                         <td class="text-right">${d.CONVERSION_VALUE > 0 ? '$' + fmt(Math.round(d.CONVERSION_VALUE)) : '—'}</td>
                     </tr>
-                    ${isVT ? '<tr style="height: 2px; background: #2f3942;"><td colspan="8" style="padding: 0; border: none;"></td></tr>' : ''}
+                    ${isVT ? '<tr style="height: 2px; background: #2f3942;"><td colspan="9" style="padding: 0; border: none;"></td></tr>' : ''}
                 `;
             }).join('');
 
@@ -1607,17 +1611,17 @@
                 ${chipsHtml}
                 <div class="table-container">
                     <div class="table-title">
-                        Traffic Sources — View-Through vs Click-Based
-                        <span class="table-note">Ad-exposed household visits: view-through (no click) vs referral channels</span>
+                        Traffic Sources — Ad-Attributed Household Visits
+                        <span class="table-note">How ad-exposed households arrive at the website</span>
                     </div>
                     <table>
                         <thead>
                             <tr>
-                                <th>Source / Medium</th>
+                                <th>Source</th>
                                 <th class="text-right">Visits</th>
                                 <th class="text-right">Households</th>
+                                <th class="text-right">Visits/HH</th>
                                 <th class="text-right">Share</th>
-                                <th class="text-right">Impressions</th>
                                 <th class="text-right">Avg Days</th>
                                 <th class="text-right">Conversions</th>
                                 <th class="text-right">Conv. Value</th>
@@ -1628,9 +1632,9 @@
                         </tbody>
                     </table>
                     <div style="font-size: 12px; color: #8b98a5; padding: 12px 16px; border-top: 1px solid #2f3942;">
-                        <strong>📺 Ad View-Through:</strong> Households exposed to ads who later visited the site with no click referrer — pure ad-driven traffic (view-through attribution).<br>
-                        <strong>Click Sources:</strong> How ad-exposed households arrived at the website (search, social, referral, etc.) — tracked via UTM, referrer URL, or pixel data.<br>
-                        <strong>Share:</strong> % of total attributed visits from this source.<br>
+                        <strong>📺 All Ad-Attributed Visits:</strong> Total web visits from households that were exposed to ad impressions (view-through attribution). This is the aggregate — the rows below show how those households arrived.<br>
+                        <strong>Visits/HH:</strong> Average page visits per household — higher = more engaged visitors from that source.<br>
+                        <strong>Share:</strong> % of total ad-attributed visits arriving via this source.<br>
                         <strong>Avg Days:</strong> Average days between ad impression and web visit.<br>
                         <strong>Conversions:</strong> Pixel events tagged as purchase, sale, conversion, or lead submission.
                     </div>
