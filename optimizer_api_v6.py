@@ -2180,13 +2180,16 @@ def get_traffic_sources():
             c['referral_data'] += referral_data
 
         # Build results with classification
+        # Primary metric: UNIQUE_HOUSEHOLDS (visitors), secondary: WEB_VISITS (pageviews)
         total_visits = sum(c['visits'] for c in consolidated.values())
+        total_hh = sum(c['households'] for c in consolidated.values())
         results = []
 
         for key, c in consolidated.items():
             source_display = c['display_name']
             medium = c['medium']
             visits = c['visits']
+            households = c['households']
             source_lower = key.lower().strip()
 
             # Classify the source type
@@ -2208,26 +2211,26 @@ def get_traffic_sources():
                 source_type = 'referral'
 
             avg_days = round(c['days_sum'] / c['days_count'], 1) if c['days_count'] > 0 else 0
-            visits_per_hh = round(visits / c['households'], 1) if c['households'] > 0 else 0
+            pages_per_visitor = round(visits / households, 1) if households > 0 else 0
 
             results.append({
                 'TRAFFIC_SOURCE': source_display,
                 'TRAFFIC_MEDIUM': medium,
                 'SOURCE_TYPE': source_type,
-                'WEB_VISITS': visits,
-                'UNIQUE_HOUSEHOLDS': c['households'],
+                'WEB_VISITS': visits,                # Pageviews (total page events)
+                'UNIQUE_HOUSEHOLDS': households,      # Visitors (unique HH)
                 'TOTAL_IMPRESSIONS': c['impressions'],
-                'VISIT_SHARE': round(visits * 100.0 / total_visits, 1) if total_visits > 0 else 0,
+                'VISIT_SHARE': round(households * 100.0 / total_hh, 1) if total_hh > 0 else 0,  # Share based on visitors
                 'AVG_DAYS_TO_VISIT': avg_days,
-                'VISITS_PER_HH': visits_per_hh,
+                'VISITS_PER_HH': pages_per_visitor,   # Pages/Visitor engagement depth
                 'CONVERSIONS': c['conversions'],
                 'CONVERSION_VALUE': round(c['conv_value'], 2),
                 'CONVERSION_RATE': round(c['conversions'] * 100.0 / visits, 1) if visits > 0 else 0,
                 'VISITS_WITH_REFERRAL': c['referral_data'],
             })
 
-        # Sort by visits descending
-        results.sort(key=lambda x: x['WEB_VISITS'], reverse=True)
+        # Sort by unique households (visitors) descending
+        results.sort(key=lambda x: x['UNIQUE_HOUSEHOLDS'], reverse=True)
 
         # Insert view-through summary row at top:
         # ALL attributed visits = ad-exposed households who visited the website
