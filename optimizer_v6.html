@@ -1517,9 +1517,9 @@
                 'referral':      { icon: '↗️', label: 'Referral', color: '#e0e0e0' },
             };
 
-            // Totals
-            const totalVisits = data.reduce((s, d) => s + (d.WEB_VISITS || 0), 0);
+            // Totals — primary metric is unique HH (visitors)
             const totalHH = data.reduce((s, d) => s + (d.UNIQUE_HOUSEHOLDS || 0), 0);
+            const totalVisits = data.reduce((s, d) => s + (d.UNIQUE_VISITS || 0), 0);
             const totalConv = data.reduce((s, d) => s + (d.CONVERSIONS || 0), 0);
             const totalConvVal = data.reduce((s, d) => s + (d.CONVERSION_VALUE || 0), 0);
 
@@ -1528,7 +1528,7 @@
             data.forEach(d => {
                 const st = d.SOURCE_TYPE || 'referral';
                 if (!typeRollup[st]) typeRollup[st] = { visits: 0, hh: 0 };
-                typeRollup[st].visits += d.WEB_VISITS || 0;
+                typeRollup[st].visits += d.UNIQUE_VISITS || 0;
                 typeRollup[st].hh += d.UNIQUE_HOUSEHOLDS || 0;
             });
 
@@ -1539,14 +1539,15 @@
             const directRow = sourceRows.find(d => d.SOURCE_TYPE === 'direct');
 
             // Insight box — view-through totals + top source
-            // Metrics: UNIQUE_HOUSEHOLDS = "Visitors" (unique HH), WEB_VISITS = "Pageviews" (total events), VISITS_PER_HH = "Pages/Visitor"
+            // Metrics: UNIQUE_HOUSEHOLDS = visitors, UNIQUE_VISITS = visit events, DAILY_VISITORS = avg HH/day
             let insightHtml = `
                 <div style="background: #1e2732; border-left: 3px solid #1d9bf0; padding: 12px 16px; margin-bottom: 16px; border-radius: 0 8px 8px 0; font-size: 13px; line-height: 1.6;">
                     <strong>📺 Ad-Attributed Traffic:</strong>
-                    <strong style="color: #00ba7c;">${fmt(vtRow ? vtRow.UNIQUE_HOUSEHOLDS : totalHH)}</strong> unique households visited after ad exposure,
-                    generating <strong>${fmt(vtRow ? vtRow.WEB_VISITS : totalVisits)}</strong> pageviews
-                    ${vtRow ? ` (<strong>${vtRow.VISITS_PER_HH}</strong> pages/visitor avg, <strong>${vtRow.AVG_DAYS_TO_VISIT}</strong> days avg to visit).` : '.'}
-                    ${topSource ? `<br><strong>Top click source:</strong> ${topSource.TRAFFIC_SOURCE} — ${fmt(topSource.UNIQUE_HOUSEHOLDS)} visitors, ${topSource.VISITS_PER_HH || '-'} pages/visitor.` : ''}
+                    <strong style="color: #00ba7c;">${fmt(vtRow ? vtRow.UNIQUE_HOUSEHOLDS : totalHH)}</strong> unique households visited after ad exposure
+                    (<strong>${fmt(vtRow ? vtRow.UNIQUE_VISITS : totalVisits)}</strong> total visits, <strong>${vtRow ? vtRow.VISITS_PER_HH : '—'}</strong> visits/visitor,
+                    <strong>${vtRow ? vtRow.AVG_DAYS_TO_VISIT : '—'}</strong> avg days to visit).
+                    ${vtRow && vtRow.DAILY_VISITORS ? `<br><strong>~${fmt(vtRow.DAILY_VISITORS)} households/day</strong> visiting on average.` : ''}
+                    ${topSource ? `<br><strong>Top click source:</strong> ${topSource.TRAFFIC_SOURCE} — ${fmt(topSource.UNIQUE_HOUSEHOLDS)} visitors, ${topSource.VISITS_PER_HH || '-'} visits/visitor.` : ''}
                     ${directRow ? `<br><strong>🔗 Direct (no click referrer):</strong> ${fmt(directRow.UNIQUE_HOUSEHOLDS)} visitors (${directRow.VISIT_SHARE}%) — typed URL, bookmarked, or app.` : ''}
                     ${totalConv > 0 ? `<br><strong>Conversions:</strong> ${fmt(totalConv)} total` + (totalConvVal > 0 ? ` ($${fmt(Math.round(totalConvVal))} value).` : '.') : ''}
                 </div>
@@ -1578,7 +1579,8 @@
                 const convRate = d.CONVERSION_RATE || 0;
                 const convClass = convRate >= 5 ? 'text-green' : convRate >= 1 ? 'text-yellow' : 'text-muted';
                 const rowStyle = isVT ? 'background: #0d2b1a;' : '';
-                const pagesPerVisitor = d.VISITS_PER_HH || (d.UNIQUE_HOUSEHOLDS > 0 ? (d.WEB_VISITS / d.UNIQUE_HOUSEHOLDS).toFixed(1) : '—');
+                const visitsPerVisitor = d.VISITS_PER_HH || '—';
+                const dailyVis = d.DAILY_VISITORS ? fmt(d.DAILY_VISITORS) : '—';
 
                 return `
                     <tr style="${rowStyle}">
@@ -1590,8 +1592,9 @@
                                 ? `<span class="text-muted" style="font-size:10px;margin-left:4px;">/ ${d.TRAFFIC_MEDIUM}</span>` : '')}
                         </td>
                         <td class="text-right ${isVT ? 'text-green' : 'text-blue'}">${fmt(d.UNIQUE_HOUSEHOLDS)}</td>
-                        <td class="text-right">${fmt(d.WEB_VISITS)}</td>
-                        <td class="text-right">${pagesPerVisitor}</td>
+                        <td class="text-right">${fmt(d.UNIQUE_VISITS || 0)}</td>
+                        <td class="text-right">${dailyVis}</td>
+                        <td class="text-right">${visitsPerVisitor}</td>
                         <td class="text-right">
                             <div style="display: flex; align-items: center; justify-content: flex-end; gap: 8px;">
                                 <div style="width: 60px; height: 6px; background: #2f3942; border-radius: 3px; overflow: hidden;">
@@ -1604,7 +1607,7 @@
                         <td class="text-right ${convClass}">${d.CONVERSIONS > 0 ? fmt(d.CONVERSIONS) : '—'}</td>
                         <td class="text-right">${d.CONVERSION_VALUE > 0 ? '$' + fmt(Math.round(d.CONVERSION_VALUE)) : '—'}</td>
                     </tr>
-                    ${isVT ? '<tr style="height: 2px; background: #2f3942;"><td colspan="8" style="padding: 0; border: none;"></td></tr>' : ''}
+                    ${isVT ? '<tr style="height: 2px; background: #2f3942;"><td colspan="9" style="padding: 0; border: none;"></td></tr>' : ''}
                 `;
             }).join('');
 
@@ -1621,8 +1624,9 @@
                             <tr>
                                 <th>Source</th>
                                 <th class="text-right">Visitors</th>
-                                <th class="text-right">Pageviews</th>
-                                <th class="text-right">Pages/Visitor</th>
+                                <th class="text-right">Visits</th>
+                                <th class="text-right">Daily Avg</th>
+                                <th class="text-right">Visits/Visitor</th>
                                 <th class="text-right">Share</th>
                                 <th class="text-right">Avg Days</th>
                                 <th class="text-right">Conversions</th>
@@ -1634,10 +1638,11 @@
                         </tbody>
                     </table>
                     <div style="font-size: 12px; color: #8b98a5; padding: 12px 16px; border-top: 1px solid #2f3942;">
-                        <strong>📺 All Ad-Attributed (view-through):</strong> Households that saw an ad impression and subsequently visited the website. This is what we measure across all other tabs — the rows below show how those same households arrived at the site.<br>
-                        <strong>Visitors:</strong> Unique household IDs seen on site from this source.<br>
-                        <strong>Pageviews:</strong> Total page events from those households.<br>
-                        <strong>Pages/Visitor:</strong> Engagement depth — higher = more engaged visitors from that source.<br>
+                        <strong>📺 All Ad-Attributed (view-through):</strong> Households that saw an ad impression and subsequently visited the website. This is what we measure across all other tabs.<br>
+                        <strong>Visitors:</strong> Unique household IDs that visited from this source.<br>
+                        <strong>Visits:</strong> Total unique visit events (de-duped by visit UUID).<br>
+                        <strong>Daily Avg:</strong> Average unique household-visits per day over the date range.<br>
+                        <strong>Visits/Visitor:</strong> How many times each household visited — higher = more repeat engagement.<br>
                         <strong>Share:</strong> % of total ad-attributed visitors arriving via this source.
                     </div>
                 </div>

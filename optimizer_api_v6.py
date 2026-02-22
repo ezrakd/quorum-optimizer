@@ -2061,8 +2061,14 @@ def get_traffic_sources():
             SELECT
                 RESOLVED_SOURCE AS TRAFFIC_SOURCE,
                 RESOLVED_MEDIUM AS TRAFFIC_MEDIUM,
-                COUNT(*) AS WEB_VISITS,
+                -- Visitors: unique households that visited from this source
                 COUNT(DISTINCT HOUSEHOLD_ID) AS UNIQUE_HOUSEHOLDS,
+                -- Visits: unique visit events (de-duped by UUID)
+                COUNT(DISTINCT WEB_VISIT_UUID) AS UNIQUE_VISITS,
+                -- Visit-days: unique household-day combos (for daily metrics)
+                COUNT(DISTINCT HOUSEHOLD_ID || '::' || WEB_VISIT_DATE::VARCHAR) AS VISIT_DAYS,
+                -- Date span for daily averages
+                DATEDIFF(day, MIN(WEB_VISIT_DATE), MAX(WEB_VISIT_DATE)) + 1 AS DATE_SPAN_DAYS,
                 SUM(AD_IMPRESSION_COUNT) AS TOTAL_IMPRESSIONS,
                 AVG(DAYS_TO_WEB_VISIT) AS AVG_DAYS_TO_VISIT,
                 -- Event type breakdown
@@ -2076,8 +2082,8 @@ def get_traffic_sources():
                          THEN 1 ELSE 0 END) AS VISITS_WITH_REFERRAL_DATA
             FROM attributed_visits
             GROUP BY RESOLVED_SOURCE, RESOLVED_MEDIUM
-            HAVING COUNT(*) >= 2
-            ORDER BY COUNT(*) DESC
+            HAVING COUNT(DISTINCT WEB_VISIT_UUID) >= 2
+            ORDER BY COUNT(DISTINCT HOUSEHOLD_ID) DESC
             LIMIT 100
         """, {
             'agency_id': agency_id,
@@ -2128,7 +2134,7 @@ def get_traffic_sources():
                         'banner', 'paid-search', 'paidsocial', 'paid_search'}
 
         # First pass: filter internal, consolidate domains, aggregate into buckets
-        consolidated = {}  # key = (display_name, medium) → aggregated metrics
+        consolidated = {}  # key = display_name → aggregated metrics
         for r in raw_results:
             source = str(r['TRAFFIC_SOURCE'])
             source_lower = source.lower().strip()
@@ -2146,14 +2152,15 @@ def get_traffic_sources():
             # Consolidate fragmented domains
             display_name = consolidate_source(source_lower)
             if display_name:
-                # Use the consolidated name; merge mediums into the dominant one
                 key = display_name
             else:
                 key = source
                 display_name = source
 
-            visits = int(r.get('WEB_VISITS', 0))
             households = int(r.get('UNIQUE_HOUSEHOLDS', 0))
+            unique_visits = int(r.get('UNIQUE_VISITS', 0))
+            visit_days = int(r.get('VISIT_DAYS', 0))
+            date_span = int(r.get('DATE_SPAN_DAYS', 1)) or 1
             impressions = int(r.get('TOTAL_IMPRESSIONS', 0))
             conversions = int(r.get('CONVERSIONS', 0))
             conv_value = float(r.get('TOTAL_CONVERSION_VALUE', 0))
@@ -2164,32 +2171,38 @@ def get_traffic_sources():
                 consolidated[key] = {
                     'display_name': display_name,
                     'medium': medium,
-                    'visits': 0, 'households': 0, 'impressions': 0,
+                    'households': 0, 'unique_visits': 0, 'visit_days': 0,
+                    'date_span': date_span, 'impressions': 0,
                     'conversions': 0, 'conv_value': 0.0,
                     'days_sum': 0.0, 'days_count': 0,
                     'referral_data': 0,
                 }
             c = consolidated[key]
-            c['visits'] += visits
             c['households'] += households
+            c['unique_visits'] += unique_visits
+            c['visit_days'] += visit_days
+            c['date_span'] = max(c['date_span'], date_span)
             c['impressions'] += impressions
             c['conversions'] += conversions
             c['conv_value'] += conv_value
-            c['days_sum'] += avg_days * visits
-            c['days_count'] += visits
+            c['days_sum'] += avg_days * unique_visits
+            c['days_count'] += unique_visits
             c['referral_data'] += referral_data
 
         # Build results with classification
-        # Primary metric: UNIQUE_HOUSEHOLDS (visitors), secondary: WEB_VISITS (pageviews)
-        total_visits = sum(c['visits'] for c in consolidated.values())
+        # Primary metric: UNIQUE_HOUSEHOLDS (visitors)
+        # Secondary: UNIQUE_VISITS (de-duped visit events), VISIT_DAYS (HH-day combos)
         total_hh = sum(c['households'] for c in consolidated.values())
+        total_visits = sum(c['unique_visits'] for c in consolidated.values())
         results = []
 
         for key, c in consolidated.items():
             source_display = c['display_name']
             medium = c['medium']
-            visits = c['visits']
             households = c['households']
+            unique_visits = c['unique_visits']
+            visit_days = c['visit_days']
+            date_span = c['date_span']
             source_lower = key.lower().strip()
 
             # Classify the source type
@@ -2211,21 +2224,26 @@ def get_traffic_sources():
                 source_type = 'referral'
 
             avg_days = round(c['days_sum'] / c['days_count'], 1) if c['days_count'] > 0 else 0
-            pages_per_visitor = round(visits / households, 1) if households > 0 else 0
+            # Visits per visitor: unique visit events / unique HH
+            visits_per_visitor = round(unique_visits / households, 1) if households > 0 else 0
+            # Daily visitors: unique HH-day combos / date span
+            daily_visitors = round(visit_days / date_span) if date_span > 0 else 0
 
             results.append({
                 'TRAFFIC_SOURCE': source_display,
                 'TRAFFIC_MEDIUM': medium,
                 'SOURCE_TYPE': source_type,
-                'WEB_VISITS': visits,                # Pageviews (total page events)
-                'UNIQUE_HOUSEHOLDS': households,      # Visitors (unique HH)
+                'UNIQUE_HOUSEHOLDS': households,       # Visitors: unique HH
+                'UNIQUE_VISITS': unique_visits,        # Visits: de-duped visit events
+                'VISIT_DAYS': visit_days,              # HH-day combos
+                'DAILY_VISITORS': daily_visitors,       # Avg HH per day
                 'TOTAL_IMPRESSIONS': c['impressions'],
-                'VISIT_SHARE': round(households * 100.0 / total_hh, 1) if total_hh > 0 else 0,  # Share based on visitors
+                'VISIT_SHARE': round(households * 100.0 / total_hh, 1) if total_hh > 0 else 0,
                 'AVG_DAYS_TO_VISIT': avg_days,
-                'VISITS_PER_HH': pages_per_visitor,   # Pages/Visitor engagement depth
+                'VISITS_PER_HH': visits_per_visitor,   # Visits/Visitor (frequency)
                 'CONVERSIONS': c['conversions'],
                 'CONVERSION_VALUE': round(c['conv_value'], 2),
-                'CONVERSION_RATE': round(c['conversions'] * 100.0 / visits, 1) if visits > 0 else 0,
+                'CONVERSION_RATE': round(c['conversions'] * 100.0 / unique_visits, 1) if unique_visits > 0 else 0,
                 'VISITS_WITH_REFERRAL': c['referral_data'],
             })
 
@@ -2235,8 +2253,10 @@ def get_traffic_sources():
         # Insert view-through summary row at top:
         # ALL attributed visits = ad-exposed households who visited the website
         # This is the aggregate view-through metric (the entire attribution table).
+        vt_total_hh = total_hh
         vt_total_visits = total_visits
-        vt_total_hh = sum(c['households'] for c in consolidated.values())
+        vt_total_visit_days = sum(c['visit_days'] for c in consolidated.values())
+        vt_date_span = max((c['date_span'] for c in consolidated.values()), default=1)
         vt_total_imps = sum(c['impressions'] for c in consolidated.values())
         vt_total_conv = sum(c['conversions'] for c in consolidated.values())
         vt_total_cv = sum(c['conv_value'] for c in consolidated.values())
@@ -2244,13 +2264,16 @@ def get_traffic_sources():
         vt_total_days_n = sum(c['days_count'] for c in consolidated.values())
         vt_avg_days = round(vt_total_days / vt_total_days_n, 1) if vt_total_days_n > 0 else 0
         vt_visits_per_hh = round(vt_total_visits / vt_total_hh, 1) if vt_total_hh > 0 else 0
+        vt_daily = round(vt_total_visit_days / vt_date_span) if vt_date_span > 0 else 0
 
         results.insert(0, {
             'TRAFFIC_SOURCE': 'All Ad-Attributed Visits',
             'TRAFFIC_MEDIUM': 'view-through',
             'SOURCE_TYPE': 'view_through',
-            'WEB_VISITS': vt_total_visits,
             'UNIQUE_HOUSEHOLDS': vt_total_hh,
+            'UNIQUE_VISITS': vt_total_visits,
+            'VISIT_DAYS': vt_total_visit_days,
+            'DAILY_VISITORS': vt_daily,
             'TOTAL_IMPRESSIONS': vt_total_imps,
             'VISIT_SHARE': 100.0,
             'AVG_DAYS_TO_VISIT': vt_avg_days,
