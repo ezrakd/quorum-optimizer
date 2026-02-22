@@ -2299,7 +2299,7 @@ def get_traffic_sources():
                 continue  # Don't double-count the summary row
             if st not in summary['source_type_breakdown']:
                 summary['source_type_breakdown'][st] = {'visits': 0, 'households': 0}
-            summary['source_type_breakdown'][st]['visits'] += r['WEB_VISITS']
+            summary['source_type_breakdown'][st]['visits'] += r['UNIQUE_VISITS']
             summary['source_type_breakdown'][st]['households'] += r['UNIQUE_HOUSEHOLDS']
 
         cursor.close()
