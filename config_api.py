@@ -1032,6 +1032,12 @@ def update_config():
             'web_pixel_integration_type': 'WEB_PIXEL_INTEGRATION_TYPE',
             'exposure_source': 'EXPOSURE_SOURCE',
             'web_visit_source': 'WEB_VISIT_SOURCE',
+            'report_type_ids': 'REPORT_TYPE_IDS',
+            'report_type_count': 'REPORT_TYPE_COUNT',
+            'platform_type_ids': 'PLATFORM_TYPE_IDS',
+            'platform_count': 'PLATFORM_COUNT',
+            'client_identifier': 'CLIENT_IDENTIFIER',
+            'advertiser_display_name': 'ADVERTISER_DISPLAY_NAME',
         }
 
         set_clauses = ["UPDATED_AT = CURRENT_TIMESTAMP()"]
@@ -1244,7 +1250,11 @@ def get_advertiser_detail():
                 c.HAS_IMPRESSION_TRACKING, c.WEB_PIXEL_INTEGRATION_TYPE,
                 c.WEB_VISIT_SOURCE,
                 c.SEGMENT_COUNT, c.WEB_PIXEL_URL_COUNT, c.CAMPAIGN_MAPPING_COUNT,
-                c.PLATFORM_TYPE_IDS, c.CREATED_AT, c.UPDATED_AT
+                c.PLATFORM_TYPE_IDS, c.PLATFORM_COUNT,
+                c.REPORT_TYPE_IDS, c.REPORT_TYPE_COUNT,
+                c.CLIENT_IDENTIFIER, c.ADVERTISER_DISPLAY_NAME,
+                c.LAST_IMPRESSION_AT, c.LAST_STORE_VISIT_AT, c.LAST_WEB_VISIT_AT,
+                c.CREATED_AT, c.UPDATED_AT
             FROM QUORUMDB.BASE_TABLES.REF_AGENCY_ADVERTISER aa
             LEFT JOIN QUORUMDB.BASE_TABLES.REF_ADVERTISER_CONFIG c
                 ON aa.ADVERTISER_ID = c.ADVERTISER_ID AND aa.AGENCY_ID = c.AGENCY_ID
@@ -1726,6 +1736,47 @@ def remove_domain():
 # =============================================================================
 # AGENCIES LIST — for dropdowns
 # =============================================================================
+@config_bp.route('/report-types', methods=['GET'])
+def get_report_types():
+    """Return the report type taxonomy from REF_REPORT_TYPE."""
+    try:
+        conn = get_config_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT REPORT_TYPE_ID, REPORT_TYPE_CODE, EXPOSURE_SOURCE, OUTCOME_TYPE,
+                   DISPLAY_NAME, DESCRIPTION, IS_ACTIVE, SORT_ORDER
+            FROM QUORUMDB.BASE_TABLES.REF_REPORT_TYPE
+            WHERE IS_ACTIVE = TRUE
+            ORDER BY SORT_ORDER
+        """)
+        results = rows_to_dicts(cursor)
+        cursor.close()
+        conn.close()
+        return jsonify({'success': True, 'data': results})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@config_bp.route('/dsp-platforms', methods=['GET'])
+def get_dsp_platforms():
+    """Return the DSP platform reference from REF_DSP_PLATFORM."""
+    try:
+        conn = get_config_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT PLATFORM_TYPE_ID, PLATFORM_NAME, DSP_SHORT_NAME, DSP_CATEGORY,
+                   IS_ACTIVE, NOTES
+            FROM QUORUMDB.BASE_TABLES.REF_DSP_PLATFORM
+            ORDER BY PLATFORM_NAME
+        """)
+        results = rows_to_dicts(cursor)
+        cursor.close()
+        conn.close()
+        return jsonify({'success': True, 'data': results})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @config_bp.route('/agencies', methods=['GET'])
 def get_agencies():
     """

@@ -351,6 +351,17 @@
                             </div>
                         </div>
 
+                        <!-- Pixel & Identity Info -->
+                        <div class="card">
+                            <div class="card-header">
+                                Pixel & Identity
+                                <span class="text-muted" style="font-size:11px;">Tag info for this advertiser</span>
+                            </div>
+                            <div class="card-body" id="pixelInfo">
+                                <div class="empty">Select an advertiser to view pixel info</div>
+                            </div>
+                        </div>
+
                         <!-- Config Details -->
                         <div class="card">
                             <div class="card-header">Configuration</div>
@@ -537,21 +548,42 @@
 
     <!-- Modal: Edit Config -->
     <div class="modal-overlay" id="modalConfig">
-        <div class="modal">
+        <div class="modal" style="width:640px;">
             <div class="modal-header">
                 <div class="modal-title">Edit Configuration</div>
                 <button class="modal-close" onclick="closeModal('modalConfig')">&times;</button>
             </div>
             <div class="modal-body">
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                <!-- Identity -->
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+                    <div class="form-group">
+                        <div class="form-label">Display Name (override)</div>
+                        <input type="text" class="form-input" id="editDisplayName" placeholder="Human-readable name">
+                    </div>
+                    <div class="form-group">
+                        <div class="form-label">Client Identifier</div>
+                        <input type="text" class="form-input" id="editClientId" placeholder="e.g. dealer_id, client_id">
+                    </div>
+                </div>
+                <!-- Core settings -->
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
                     <div class="form-group">
                         <div class="form-label">Attribution Window (days)</div>
                         <input type="number" class="form-input" id="editAttrWindow" min="1" max="90">
                     </div>
                     <div class="form-group">
+                        <div class="form-label">Config Status</div>
+                        <select class="form-input" id="editStatus">
+                            <option value="ACTIVE">ACTIVE</option>
+                            <option value="INACTIVE">INACTIVE</option>
+                            <option value="PENDING">PENDING</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
                         <div class="form-label">Match Strategy</div>
                         <select class="form-input" id="editMatchStrategy">
                             <option value="HOUSEHOLD">HOUSEHOLD</option>
+                            <option value="IP_MAID">IP_MAID</option>
                             <option value="DEVICE">DEVICE</option>
                             <option value="IP_ONLY">IP_ONLY</option>
                         </select>
@@ -565,13 +597,32 @@
                         </select>
                     </div>
                     <div class="form-group">
-                        <div class="form-label">Config Status</div>
-                        <select class="form-input" id="editStatus">
-                            <option value="ACTIVE">ACTIVE</option>
-                            <option value="INACTIVE">INACTIVE</option>
-                            <option value="PENDING">PENDING</option>
+                        <div class="form-label">Exposure Source</div>
+                        <select class="form-input" id="editExposureSource">
+                            <option value="IMPRESSION">IMPRESSION — Digital Ad</option>
+                            <option value="OOH">OOH — Out of Home</option>
+                            <option value="WEB">WEB — Web Pixel</option>
                         </select>
                     </div>
+                </div>
+                <!-- Report Types (multi-select checkboxes) -->
+                <div class="form-group" style="margin-bottom:16px;">
+                    <div class="form-label">Report Types <span class="text-muted" style="font-size:10px;text-transform:none;font-weight:normal">(select all that apply — informs report templates/tabs)</span></div>
+                    <div id="editReportTypes" style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:6px;background:#273340;padding:10px;border-radius:6px;border:1px solid #3d5466;">
+                        <div class="text-muted" style="font-size:11px;">Loading report types...</div>
+                    </div>
+                </div>
+                <!-- Platform DSPs (multi-select checkboxes) -->
+                <div class="form-group" style="margin-bottom:16px;">
+                    <div class="form-label">Platform DSPs <span class="text-muted" style="font-size:10px;text-transform:none;font-weight:normal">(select platforms receiving impressions)</span></div>
+                    <div id="editPlatforms" style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:6px;background:#273340;padding:10px;border-radius:6px;border:1px solid #3d5466;max-height:200px;overflow-y:auto;">
+                        <div class="text-muted" style="font-size:11px;">Loading platforms...</div>
+                    </div>
+                </div>
+                <!-- Processing Pattern Info -->
+                <div style="background:#16202a;border-radius:6px;padding:10px 12px;font-size:11px;color:#8b98a5;border:1px solid #2f3942;">
+                    <strong style="color:#e7e9ea;">Processing Pattern:</strong>
+                    Line items automatically stop processing when no impressions are detected for the configured attribution window (default 28 days). Processing resumes automatically when new impressions are detected.
                 </div>
             </div>
             <div class="modal-footer">
@@ -633,6 +684,8 @@
     let currentAdvId = null, currentAgencyId = null, currentDetail = null;
     let agencies = [];
     let _mapData = {};
+    let _reportTypes = [];
+    let _dspPlatforms = [];
 
     // =========================================================================
     // AUTH
@@ -914,6 +967,9 @@
             // Domains list
             renderDomains(json.domains || []);
 
+            // Pixel & Identity info
+            renderPixelInfo(cfg, json.campaigns || []);
+
             // Config grid
             renderConfigGrid(cfg);
 
@@ -976,6 +1032,63 @@
         `).join('');
     }
 
+    function renderPixelInfo(cfg, campaigns) {
+        const el = document.getElementById('pixelInfo');
+        const agencyId = cfg.AGENCY_ID;
+        const advId = cfg.ADVERTISER_ID;
+        const clientId = cfg.CLIENT_IDENTIFIER;
+        const displayName = cfg.ADVERTISER_DISPLAY_NAME || cfg.ADVERTISER_NAME || '';
+
+        // Determine platforms from campaigns
+        const platforms = [...new Set(campaigns.map(c => c.DSP_PLATFORM_TYPE || c.DATA_SOURCE).filter(Boolean))];
+        const platformNames = platforms.map(pt => {
+            const p = _dspPlatforms.find(d => String(d.PLATFORM_TYPE_ID) === String(pt));
+            return p ? `${p.PLATFORM_NAME} (PT=${pt})` : `Platform ${pt}`;
+        });
+
+        let html = `<div class="config-grid">
+            <div class="config-item">
+                <div class="label">Agency ID</div>
+                <div class="value text-blue">${agencyId}</div>
+            </div>
+            <div class="config-item">
+                <div class="label">Quorum Advertiser ID</div>
+                <div class="value text-blue">${advId}</div>
+            </div>
+            <div class="config-item">
+                <div class="label">Display Name</div>
+                <div class="value">${esc(displayName) || '<span class="text-muted">—</span>'}</div>
+            </div>
+            <div class="config-item">
+                <div class="label">Client Identifier</div>
+                <div class="value">${clientId ? esc(clientId) : '<span class="text-muted">—</span>'}</div>
+            </div>
+            <div class="config-item">
+                <div class="label">Active Platforms</div>
+                <div class="value">${platformNames.length > 0 ? platformNames.join(', ') : '<span class="text-muted">None mapped</span>'}</div>
+            </div>
+            <div class="config-item">
+                <div class="label">Pixel Macro</div>
+                <div class="value" style="font-family:monospace;font-size:11px;word-break:break-all;color:#6cdfe5;">AG=${agencyId}&ADV=${advId}</div>
+            </div>
+        </div>`;
+
+        // If campaigns exist, show a sample pixel tag
+        if (campaigns.length > 0) {
+            const sampleCamp = campaigns[0];
+            const dspAdvId = sampleCamp.DSP_ADVERTISER_ID || '?';
+            const ioId = sampleCamp.INSERTION_ORDER_ID || '?';
+            html += `<div style="margin-top:10px;background:#16202a;border-radius:6px;padding:10px 12px;border:1px solid #2f3942;">
+                <div style="font-size:10px;color:#8b98a5;text-transform:uppercase;margin-bottom:4px;">Sample 4-Key Match</div>
+                <div style="font-family:monospace;font-size:11px;color:#6cdfe5;word-break:break-all;">
+                    AG_ID=${agencyId} · DSP_ADV=${dspAdvId} · IO=${ioId} · PT=${sampleCamp.DSP_PLATFORM_TYPE || '?'}
+                </div>
+            </div>`;
+        }
+
+        el.innerHTML = html;
+    }
+
     async function removeDomain(url) {
         if (!confirm(`Remove domain "${url}" from this advertiser?`)) return;
         try {
@@ -999,9 +1112,51 @@
         const boolItem = (label, val) => [label, val
             ? '<span class="text-green" style="font-size:12px;">● Enabled</span>'
             : '<span class="text-muted" style="font-size:12px;">○ Disabled</span>', true];
+
+        // Resolve report type names from cached reference data
+        const reportTypeStr = cfg.REPORT_TYPE_IDS || '';
+        let reportTypeDisplay = '—';
+        if (reportTypeStr && _reportTypes.length > 0) {
+            const ids = reportTypeStr.split(',').map(s => s.trim());
+            const names = ids.map(id => {
+                const rt = _reportTypes.find(r => String(r.REPORT_TYPE_ID) === id);
+                return rt ? rt.DISPLAY_NAME : `#${id}`;
+            });
+            reportTypeDisplay = names.join(', ');
+        } else if (reportTypeStr) {
+            reportTypeDisplay = reportTypeStr;
+        }
+
+        // Resolve platform names
+        const platformStr = cfg.PLATFORM_TYPE_IDS || '';
+        let platformDisplay = '—';
+        if (platformStr && _dspPlatforms.length > 0) {
+            const ids = platformStr.split(',').map(s => s.trim());
+            const names = ids.map(id => {
+                const p = _dspPlatforms.find(d => String(d.PLATFORM_TYPE_ID) === id);
+                return p ? p.PLATFORM_NAME : `PT-${id}`;
+            });
+            platformDisplay = names.join(', ');
+        } else if (platformStr) {
+            platformDisplay = platformStr;
+        }
+
+        // Processing pattern description
+        const attrWindow = cfg.ATTRIBUTION_WINDOW_DAYS || 28;
+        const lastImpr = cfg.LAST_IMPRESSION_AT;
+        let processingStatus = '<span class="text-muted">No impressions recorded</span>';
+        if (lastImpr) {
+            const daysSince = Math.floor((Date.now() - new Date(lastImpr).getTime()) / 86400000);
+            if (daysSince <= attrWindow) {
+                processingStatus = `<span class="text-green">● Active</span> <span class="text-muted" style="font-size:10px;">(last impression ${daysSince}d ago)</span>`;
+            } else {
+                processingStatus = `<span class="text-yellow">● Paused</span> <span class="text-muted" style="font-size:10px;">(no impressions for ${daysSince}d, window=${attrWindow}d)</span>`;
+            }
+        }
+
         const items = [
             ['Config Status', `<span class="${statusColors[cfg.CONFIG_STATUS] || 'text-muted'}">${cfg.CONFIG_STATUS || 'UNCONFIGURED'}</span>`, true],
-            ['Attribution Window', (cfg.ATTRIBUTION_WINDOW_DAYS || 30) + ' days'],
+            ['Attribution Window', attrWindow + ' days'],
             ['Match Strategy', cfg.MATCH_STRATEGY || 'HOUSEHOLD'],
             ['Impression Join', strategyLabels[cfg.IMPRESSION_JOIN_STRATEGY] || cfg.IMPRESSION_JOIN_STRATEGY || '—'],
             ['Exposure Source', cfg.EXPOSURE_SOURCE || '—'],
@@ -1009,6 +1164,11 @@
             boolItem('Store Visit', cfg.HAS_STORE_VISIT_ATTRIBUTION),
             boolItem('Web Visit', cfg.HAS_WEB_VISIT_ATTRIBUTION),
             boolItem('Impressions', cfg.HAS_IMPRESSION_TRACKING),
+            ['Report Types', reportTypeDisplay],
+            ['Platform DSPs', platformDisplay],
+            ['Client ID', cfg.CLIENT_IDENTIFIER || '<span class="text-muted">—</span>', true],
+            ['Display Name', cfg.ADVERTISER_DISPLAY_NAME || '<span class="text-muted">—</span>', true],
+            ['Processing', processingStatus, true],
             ['Last Updated', cfg.UPDATED_AT ? new Date(cfg.UPDATED_AT).toLocaleString() : '—'],
         ];
         document.getElementById('configGrid').innerHTML = items.map(([label, val, isHtml]) => `
@@ -1396,15 +1556,64 @@
     function openEditConfig() {
         if (!currentDetail?.config) return;
         const cfg = currentDetail.config;
+
+        // Identity fields
+        document.getElementById('editDisplayName').value = cfg.ADVERTISER_DISPLAY_NAME || '';
+        document.getElementById('editClientId').value = cfg.CLIENT_IDENTIFIER || '';
+
+        // Core settings
         document.getElementById('editAttrWindow').value = cfg.ATTRIBUTION_WINDOW_DAYS || 30;
         document.getElementById('editMatchStrategy').value = cfg.MATCH_STRATEGY || 'HOUSEHOLD';
         document.getElementById('editImprStrategy').value = cfg.IMPRESSION_JOIN_STRATEGY || 'PCM_4KEY';
         document.getElementById('editStatus').value = cfg.CONFIG_STATUS || 'ACTIVE';
+        document.getElementById('editExposureSource').value = cfg.EXPOSURE_SOURCE || 'IMPRESSION';
+
+        // Render report type checkboxes
+        const rtContainer = document.getElementById('editReportTypes');
+        const activeRtIds = (cfg.REPORT_TYPE_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+        if (_reportTypes.length > 0) {
+            rtContainer.innerHTML = _reportTypes.map(rt => `
+                <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;padding:3px 0;">
+                    <input type="checkbox" class="rt-cb" value="${rt.REPORT_TYPE_ID}"
+                        ${activeRtIds.includes(String(rt.REPORT_TYPE_ID)) ? 'checked' : ''}>
+                    <span>${esc(rt.DISPLAY_NAME)}</span>
+                    <span class="text-muted" style="font-size:10px;">(${rt.REPORT_TYPE_CODE})</span>
+                </label>
+            `).join('');
+        } else {
+            rtContainer.innerHTML = '<span class="text-muted" style="font-size:11px;">No report types loaded</span>';
+        }
+
+        // Render platform DSP checkboxes
+        const dpContainer = document.getElementById('editPlatforms');
+        const activePtIds = (cfg.PLATFORM_TYPE_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+        const activePlatforms = _dspPlatforms.filter(p => p.IS_ACTIVE !== false);
+        if (activePlatforms.length > 0) {
+            dpContainer.innerHTML = activePlatforms.map(p => `
+                <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;padding:3px 0;">
+                    <input type="checkbox" class="pt-cb" value="${p.PLATFORM_TYPE_ID}"
+                        ${activePtIds.includes(String(p.PLATFORM_TYPE_ID)) ? 'checked' : ''}>
+                    <span>${esc(p.PLATFORM_NAME)}</span>
+                    <span class="text-muted" style="font-size:10px;">${p.DSP_SHORT_NAME || ''}</span>
+                </label>
+            `).join('');
+        } else {
+            dpContainer.innerHTML = '<span class="text-muted" style="font-size:11px;">No platforms loaded</span>';
+        }
+
         openModal('modalConfig');
     }
 
     async function submitEditConfig() {
         try {
+            // Gather report type IDs from checkboxes
+            const rtChecked = document.querySelectorAll('.rt-cb:checked');
+            const rtIds = Array.from(rtChecked).map(cb => cb.value).join(',');
+
+            // Gather platform IDs from checkboxes
+            const ptChecked = document.querySelectorAll('.pt-cb:checked');
+            const ptIds = Array.from(ptChecked).map(cb => cb.value).join(',');
+
             const res = await fetch(API + '/api/config/update-config', {
                 method: 'POST',
                 headers: {'Content-Type':'application/json'},
@@ -1415,11 +1624,18 @@
                     match_strategy: document.getElementById('editMatchStrategy').value,
                     impression_join_strategy: document.getElementById('editImprStrategy').value,
                     config_status: document.getElementById('editStatus').value,
+                    exposure_source: document.getElementById('editExposureSource').value,
+                    report_type_ids: rtIds,
+                    report_type_count: rtChecked.length,
+                    platform_type_ids: ptIds,
+                    platform_count: ptChecked.length,
+                    client_identifier: document.getElementById('editClientId').value.trim(),
+                    advertiser_display_name: document.getElementById('editDisplayName').value.trim(),
                 })
             });
             const json = await res.json();
             closeModal('modalConfig');
-            if (json.success) { showToast('Config updated'); refreshDetail(); }
+            if (json.success) { showToast('Config updated'); refreshDetail(); loadAdvertiserList(); }
             else showToast(json.error, 'error');
         } catch(e) { showToast(e.message, 'error'); }
     }
@@ -1706,11 +1922,26 @@
     // =========================================================================
     // INIT
     // =========================================================================
+    // Load reference data for report types and DSP platforms
+    async function loadReferenceData() {
+        try {
+            const [rtRes, dpRes] = await Promise.all([
+                fetch(API + '/api/config/report-types'),
+                fetch(API + '/api/config/dsp-platforms')
+            ]);
+            const rtJson = await rtRes.json();
+            const dpJson = await dpRes.json();
+            if (rtJson.success) _reportTypes = rtJson.data;
+            if (dpJson.success) _dspPlatforms = dpJson.data;
+        } catch(e) { console.warn('Failed to load reference data:', e); }
+    }
+
     initAuth().then(async () => {
-        await loadAgencies();
+        await Promise.all([loadAgencies(), loadReferenceData()]);
         loadAdvertiserList();
     }).catch(() => {
         loadAgencies();
+        loadReferenceData();
         loadAdvertiserList();
     });
     </script>
