@@ -24,6 +24,9 @@ from flask import request, jsonify, g
 # Import the v6 optimizer Flask app
 from optimizer_api_v6 import app
 
+# Import the v7 optimizer Blueprint
+from optimizer_api_v7 import v7_bp, register_v7_config
+
 # Import the config API Blueprint
 from config_api import config_bp
 
@@ -32,6 +35,10 @@ from auth import _check_auth, _is_auth_enabled
 
 # Register config Blueprint onto the main app
 app.register_blueprint(config_bp)
+
+# Register v7 API Blueprint and apply v7 config defaults
+register_v7_config(app)
+app.register_blueprint(v7_bp)
 
 
 # ---------------------------------------------------------------------------
@@ -62,8 +69,8 @@ def enforce_auth():
     if '.' in path.split('/')[-1] and not path.startswith('/api/'):
         return None
 
-    # Page routes (/, /optimizer, /admin) — serve HTML, auth handled client-side
-    if path in ('/', '/optimizer', '/admin'):
+    # Page routes (/, /optimizer, /v7, /admin) — serve HTML, auth handled client-side
+    if path in ('/', '/optimizer', '/v7', '/admin'):
         return None
 
     # API routes — require authentication
@@ -142,6 +149,11 @@ def optimizer_page():
     return app.send_static_file('optimizer_v6.html')
 
 
+@app.route('/v7')
+def optimizer_v7_page():
+    return app.send_static_file('optimizer_v7.html')
+
+
 @app.route('/admin')
 def admin_page():
     return app.send_static_file('config_admin.html')
@@ -150,11 +162,11 @@ def admin_page():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
     auth_status = "ENABLED" if os.environ.get('CLERK_SECRET_KEY') else "DISABLED (no CLERK_SECRET_KEY)"
-    print(f"Starting Quorum Optimizer v6 on port {port}")
+    print(f"Starting Quorum Optimizer on port {port}")
     print(f"  Auth:          {auth_status}")
-    print(f"  Optimizer API: /api/v6/*")
+    print(f"  Optimizer v6:  /api/v6/*  (frontend: /)")
+    print(f"  Optimizer v7:  /api/v7/*  (frontend: /v7)")
     print(f"  Config API:    /api/config/*")
-    print(f"  Frontend:      /")
     print(f"  Config Admin:  /admin")
     print(f"  Login:         /login")
     app.run(host='0.0.0.0', port=port, debug=False)
