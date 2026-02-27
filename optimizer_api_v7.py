@@ -8,7 +8,7 @@ Key changes from v6:
 - All performance data from PERF_BY_* tables (DERIVED_TABLES)
 - Store visits from HH_STORE_VISIT_ATTRIBUTION (already HH-resolved)
 - Web visits from HH_WEB_VISIT_ATTRIBUTION (already HH-resolved)
-- Discovery from APP_DB.AGENCY_ADVERTISER (canonical, not SEGMENT_DATA copy)
+- Discovery from SEGMENT_DATA.AGENCY_ADVERTISER (role-accessible)
 - Visit rate = (visitors * COALESCE(multiplier, 1)) / NULLIF(impressions, 0)
 - Lift analysis uses HH_STORE_VISIT_ATTRIBUTION (single source, no UNION)
 
@@ -86,7 +86,7 @@ T = {
     "WEBPIXEL":       "QUORUMDB.DERIVED_TABLES.WEBPIXEL_EVENTS",
 
     # App/config tables
-    "AGENCY_ADV":     "QUORUMDB.APP_DB.AGENCY_ADVERTISER",
+    "AGENCY_ADV":     "QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER",
     "REPORT_LAYOUT":  "QUORUMDB.APP_DB.REPORT_LAYOUT_SETTING",
     "CAMPAIGN":       "QUORUMDB.APP_DB.CAMPAIGN",
     "LINE_ITEM":      "QUORUMDB.APP_DB.LINE_ITEM",
