@@ -1700,27 +1700,52 @@ def agency_timeseries():
             params,
         )
 
-    series = []
-    for r in rows:
-        imps = safe_int(r.get("IMPRESSIONS"))
-        visitors = safe_int(r.get("VISITORS"))
-        svr = safe_visit_rate(visitors, imps)
-        entry = {
-            "LOG_DATE": str(r["LOG_DATE"]),
-            "IMPRESSIONS": imps,
-            "DEVICE_REACH": safe_int(r.get("DEVICE_REACH")),
-            "HOUSEHOLD_REACH": safe_int(r.get("HH_REACH")),
-            "STORE_VISITS": visitors,
-            "STORE_VISIT_RATE": svr,
-            "WEB_VISITS": safe_int(r.get("WEB_VISITORS")),
-            "ACTIVE_ADVERTISERS": safe_int(r.get("ACTIVE_ADVERTISERS")),
-            "VISIT_RATE": svr,
+    if agency_id is not None:
+        # Single-agency mode: return flat array (used by advertiser-detail chart)
+        series = []
+        for r in rows:
+            imps = safe_int(r.get("IMPRESSIONS"))
+            visitors = safe_int(r.get("VISITORS"))
+            svr = safe_visit_rate(visitors, imps)
+            series.append({
+                "LOG_DATE": str(r["LOG_DATE"]),
+                "IMPRESSIONS": imps,
+                "DEVICE_REACH": safe_int(r.get("DEVICE_REACH")),
+                "HOUSEHOLD_REACH": safe_int(r.get("HH_REACH")),
+                "STORE_VISITS": visitors,
+                "STORE_VISIT_RATE": svr,
+                "WEB_VISITS": safe_int(r.get("WEB_VISITORS")),
+                "ACTIVE_ADVERTISERS": safe_int(r.get("ACTIVE_ADVERTISERS")),
+                "VISIT_RATE": svr,
+            })
+        return v6_response(series)
+    else:
+        # All-agencies mode: return nested dict for stacked bar chart
+        # Shape: { "data": { "2026-02-01": { "123": 500000, ... }, ... }, "agencies": { "123": "Causal", ... } }
+        AGENCY_NAMES = {
+            1202: "LotLinx",
+            1480: "Paramount",
+            1813: "Causal",
+            1445: "Lorem Tristique Aliquet",
+            1880: "UNIDENTIFIED (Adelphic + DCM/GAM)",
+            1697: "UNIDENTIFIED (Adelphic)",
         }
-        if agency_id is None:
-            entry["AGENCY_ID"] = safe_int(r.get("AGENCY_ID"))
-        series.append(entry)
+        data = {}
+        for r in rows:
+            dt_str = str(r["LOG_DATE"])
+            aid = safe_int(r.get("AGENCY_ID"))
+            imps = safe_int(r.get("IMPRESSIONS"))
+            if dt_str not in data:
+                data[dt_str] = {}
+            data[dt_str][aid] = imps + data[dt_str].get(aid, 0)
 
-    return v6_response(series)
+        agencies = {}
+        for date_map in data.values():
+            for aid in date_map:
+                if aid not in agencies:
+                    agencies[aid] = AGENCY_NAMES.get(aid, f"Agency {aid}")
+
+        return jsonify({"success": True, "data": data, "agencies": agencies})
 
 
 @v7_bp.route("/api/v7/advertiser-timeseries", methods=["GET"])
@@ -1757,24 +1782,22 @@ def advertiser_timeseries():
         params,
     )
 
-    # Build flat timeseries rows with ADVERTISER_ID + ADVERTISER_NAME per row
-    result = []
+    # Build nested dict for stacked bar chart
+    # Shape: { "data": { "2026-02-01": { "47648": 500000, ... } }, "advertisers": { "47648": "Advertiser 47648", ... } }
+    data = {}
+    advertisers = {}
     for r in rows:
+        dt_str = str(r["LOG_DATE"])
+        adv_id = safe_int(r.get("ADVERTISER_ID"))
         imps = safe_int(r.get("IMPRESSIONS"))
-        visitors = safe_int(r.get("VISITORS"))
-        svr = safe_visit_rate(visitors, imps)
-        result.append({
-            "ADVERTISER_ID": safe_int(r.get("ADVERTISER_ID")),
-            "ADVERTISER_NAME": r.get("ADV_NAME") or f"Advertiser {r.get('ADVERTISER_ID')}",
-            "LOG_DATE": str(r["LOG_DATE"]),
-            "IMPRESSIONS": imps,
-            "STORE_VISITS": visitors,
-            "STORE_VISIT_RATE": svr,
-            "WEB_VISITS": safe_int(r.get("WEB_VISITORS")),
-            "VISIT_RATE": svr,
-        })
+        adv_name = r.get("ADV_NAME") or f"Advertiser {adv_id}"
+        if dt_str not in data:
+            data[dt_str] = {}
+        data[dt_str][adv_id] = imps + data[dt_str].get(adv_id, 0)
+        if adv_id not in advertisers:
+            advertisers[adv_id] = adv_name
 
-    return v6_response(result)
+    return jsonify({"success": True, "data": data, "advertisers": advertisers})
 
 
 @v7_bp.route("/api/v7/optimize", methods=["GET"])
