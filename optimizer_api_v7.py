@@ -275,25 +275,12 @@ def get_coverage_multiplier(advertiser_id):
     that can be resolved to households. For example, if 51.8% of MAIDs
     resolve to HH, multiplier = 1/0.518 ≈ 1.93.
 
-    First checks REF_ADVERTISER_CONFIG for a per-advertiser override.
-    Falls back to 1.0 (no adjustment) if not configured.
+    TODO: Replace with dynamic MAID-resolution computation at line-item
+    level (with statistical significance flags) once the
+    COVERAGE_MULTIPLIER_STATS table is built.
+
+    Currently returns 1.0 (no adjustment) for all advertisers.
     """
-    row = execute_query(
-        f"""
-        SELECT CONFIG_VALUE
-        FROM {T['REF_ADV_CFG']}
-        WHERE ADVERTISER_ID = %(adv_id)s
-          AND CONFIG_KEY = 'COVERAGE_MULTIPLIER'
-          AND STATUS = 1
-        """,
-        {"adv_id": advertiser_id},
-        fetch="one",
-    )
-    if row and row.get("CONFIG_VALUE"):
-        try:
-            return float(row["CONFIG_VALUE"])
-        except (ValueError, TypeError):
-            pass
     return 1.0
 
 
