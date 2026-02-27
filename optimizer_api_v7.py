@@ -48,7 +48,7 @@ V7_DEFAULTS = {
     "SNOWFLAKE_PASSWORD": os.environ.get("SNOWFLAKE_PASSWORD", ""),
     "SNOWFLAKE_WAREHOUSE": os.environ.get("SNOWFLAKE_WAREHOUSE", "COMPUTE_WH"),
     "SNOWFLAKE_DATABASE": os.environ.get("SNOWFLAKE_DATABASE", "QUORUMDB"),
-    "SNOWFLAKE_ROLE": os.environ.get("SNOWFLAKE_ROLE", "OPTIMIZER_ROLE"),
+    "SNOWFLAKE_ROLE": os.environ.get("SNOWFLAKE_ROLE", "OPTIMIZER_READONLY_ROLE"),
     "API_TOKEN": os.environ.get("OPTIMIZER_API_TOKEN", ""),
     "DEFAULT_DATE_RANGE_DAYS": 30,
     "MAX_DATE_RANGE_DAYS": 365,
@@ -119,18 +119,31 @@ def get_snowflake_conn():
 
     Uses v7-specific key 'sf_conn_v7' to avoid colliding with v6's connection.
     Reads config from current_app (the main Flask app registered by server.py).
+    Includes retry logic for SSL certificate errors (common on Heroku/Railway).
     """
     if "sf_conn_v7" not in g:
         cfg = current_app.config
-        g.sf_conn_v7 = snowflake.connector.connect(
-            account=cfg.get("SNOWFLAKE_ACCOUNT", V7_DEFAULTS["SNOWFLAKE_ACCOUNT"]),
-            user=cfg.get("SNOWFLAKE_USER", V7_DEFAULTS["SNOWFLAKE_USER"]),
-            password=cfg.get("SNOWFLAKE_PASSWORD", V7_DEFAULTS["SNOWFLAKE_PASSWORD"]),
-            warehouse=cfg.get("SNOWFLAKE_WAREHOUSE", V7_DEFAULTS["SNOWFLAKE_WAREHOUSE"]),
-            database=cfg.get("SNOWFLAKE_DATABASE", V7_DEFAULTS["SNOWFLAKE_DATABASE"]),
-            role=cfg.get("SNOWFLAKE_ROLE", V7_DEFAULTS["SNOWFLAKE_ROLE"]),
-            session_parameters={"QUERY_TAG": "optimizer_v7"},
-        )
+        retries = 3
+        last_err = None
+        for attempt in range(retries):
+            try:
+                g.sf_conn_v7 = snowflake.connector.connect(
+                    account=cfg.get("SNOWFLAKE_ACCOUNT", V7_DEFAULTS["SNOWFLAKE_ACCOUNT"]),
+                    user=cfg.get("SNOWFLAKE_USER", V7_DEFAULTS["SNOWFLAKE_USER"]),
+                    password=cfg.get("SNOWFLAKE_PASSWORD", V7_DEFAULTS["SNOWFLAKE_PASSWORD"]),
+                    warehouse=cfg.get("SNOWFLAKE_WAREHOUSE", V7_DEFAULTS["SNOWFLAKE_WAREHOUSE"]),
+                    database=cfg.get("SNOWFLAKE_DATABASE", V7_DEFAULTS["SNOWFLAKE_DATABASE"]),
+                    role=cfg.get("SNOWFLAKE_ROLE", V7_DEFAULTS["SNOWFLAKE_ROLE"]),
+                    insecure_mode=True,
+                    session_parameters={"QUERY_TAG": "optimizer_v7"},
+                )
+                break
+            except Exception as e:
+                last_err = e
+                if attempt < retries - 1 and ('certificate' in str(e).lower() or '254007' in str(e)):
+                    logger.warning(f"Snowflake connection attempt {attempt + 1} failed (cert), retrying: {e}")
+                    continue
+                raise
     return g.sf_conn_v7
 
 
@@ -317,6 +330,26 @@ def safe_int(val, default=0):
 def api_error(message, status_code=400):
     """Return a standardized error response."""
     return jsonify({"success": False, "error": message}), status_code
+
+
+@v7_bp.errorhandler(Exception)
+def handle_v7_exception(e):
+    """Catch unhandled exceptions in v7 endpoints and return JSON."""
+    logger.error(f"Unhandled v7 error: {type(e).__name__}: {e}")
+    return jsonify({
+        "success": False,
+        "error": f"{type(e).__name__}: {str(e)}"
+    }), 500
+
+
+@v7_bp.errorhandler(500)
+def handle_v7_500(e):
+    """Catch 500 errors in v7 endpoints and return JSON."""
+    logger.error(f"v7 500 error: {e}")
+    return jsonify({
+        "success": False,
+        "error": f"Internal server error: {str(e)}"
+    }), 500
 
 
 def v6_response(data):
