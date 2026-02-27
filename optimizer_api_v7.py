@@ -644,13 +644,15 @@ def agencies():
         SELECT
             AGENCY_ID,
             COUNT(DISTINCT ADVERTISER_ID) AS advertiser_count,
-            SUM(IMPRESSIONS) AS total_impressions,
-            MIN(LOG_DATE) AS first_date,
-            MAX(LOG_DATE) AS last_date
+            SUM(IMPRESSIONS) AS impressions,
+            SUM(COALESCE(VISITORS, 0)) AS store_visits,
+            SUM(COALESCE(WEB_VISITORS, 0)) AS web_visits,
+            MIN(LOG_DATE) AS min_date,
+            MAX(LOG_DATE) AS max_date
         FROM {T['PERF_PUB']}
         WHERE LOG_DATE BETWEEN %(start)s AND %(end)s
         GROUP BY AGENCY_ID
-        ORDER BY total_impressions DESC
+        ORDER BY impressions DESC
         """,
         {"start": str(start_date), "end": str(end_date)},
     )
@@ -668,13 +670,22 @@ def agencies():
     result = []
     for r in rows:
         aid = safe_int(r.get("AGENCY_ID"))
+        imps = safe_int(r.get("IMPRESSIONS"))
+        sv = safe_int(r.get("STORE_VISITS"))
+        wv = safe_int(r.get("WEB_VISITS"))
+        sv_rate = round(sv / imps * 100, 4) if imps > 0 else 0
+        wv_rate = round(wv / imps * 100, 4) if imps > 0 else 0
         result.append({
             "AGENCY_ID": aid,
             "AGENCY_NAME": AGENCY_NAMES.get(aid, f"Agency {aid}"),
             "ADVERTISER_COUNT": safe_int(r.get("ADVERTISER_COUNT")),
-            "TOTAL_IMPRESSIONS": safe_int(r.get("TOTAL_IMPRESSIONS")),
-            "FIRST_DATE": str(r.get("FIRST_DATE", "")),
-            "LAST_DATE": str(r.get("LAST_DATE", "")),
+            "IMPRESSIONS": imps,
+            "STORE_VISITS": sv,
+            "STORE_VISIT_RATE": sv_rate,
+            "WEB_VISITS": wv,
+            "WEB_VISIT_RATE": wv_rate,
+            "MIN_DATE": str(r.get("MIN_DATE", "")),
+            "MAX_DATE": str(r.get("MAX_DATE", "")),
         })
 
     return v6_response(result)
@@ -700,9 +711,11 @@ def advertisers():
         WITH perf AS (
             SELECT
                 ADVERTISER_ID,
-                SUM(IMPRESSIONS) AS total_impressions,
-                MIN(LOG_DATE) AS first_date,
-                MAX(LOG_DATE) AS last_date
+                SUM(IMPRESSIONS) AS impressions,
+                SUM(COALESCE(VISITORS, 0)) AS store_visits,
+                SUM(COALESCE(WEB_VISITORS, 0)) AS web_visits,
+                MIN(LOG_DATE) AS min_date,
+                MAX(LOG_DATE) AS max_date
             FROM {T['PERF_PUB']}
             WHERE AGENCY_ID = %(agency_id)s
               AND LOG_DATE BETWEEN %(start)s AND %(end)s
@@ -715,18 +728,25 @@ def advertisers():
             aa.PIXEL_ID,
             aa.STORE_VISIT_ATTR_WINDOW,
             aa.ACCOUNT_MANAGER_NAME,
-            p.total_impressions,
-            p.first_date,
-            p.last_date
+            p.impressions,
+            p.store_visits,
+            p.web_visits,
+            p.min_date,
+            p.max_date
         FROM perf p
         LEFT JOIN {T['AGENCY_ADV']} aa ON p.ADVERTISER_ID = aa.ADVERTISER_ID
-        ORDER BY p.total_impressions DESC
+        ORDER BY p.impressions DESC
         """,
         {"agency_id": agency_id, "start": str(start_date), "end": str(end_date)},
     )
 
     result = []
     for r in rows:
+        imps = safe_int(r.get("IMPRESSIONS"))
+        sv = safe_int(r.get("STORE_VISITS"))
+        wv = safe_int(r.get("WEB_VISITS"))
+        sv_rate = round(sv / imps * 100, 4) if imps > 0 else 0
+        wv_rate = round(wv / imps * 100, 4) if imps > 0 else 0
         result.append({
             "ADVERTISER_ID": safe_int(r.get("ADVERTISER_ID")),
             "ADVERTISER_NAME": r.get("COMP_NAME") or f"Advertiser {r.get('ADVERTISER_ID')}",
@@ -734,9 +754,13 @@ def advertisers():
             "PIXEL_ID": safe_int(r.get("PIXEL_ID")),
             "STORE_VISIT_ATTR_WINDOW": safe_int(r.get("STORE_VISIT_ATTR_WINDOW"), default=14),
             "ACCOUNT_MANAGER": r.get("ACCOUNT_MANAGER_NAME"),
-            "TOTAL_IMPRESSIONS": safe_int(r.get("TOTAL_IMPRESSIONS")),
-            "FIRST_DATE": str(r.get("FIRST_DATE", "")),
-            "LAST_DATE": str(r.get("LAST_DATE", "")),
+            "IMPRESSIONS": imps,
+            "STORE_VISITS": sv,
+            "STORE_VISIT_RATE": sv_rate,
+            "WEB_VISITS": wv,
+            "WEB_VISIT_RATE": wv_rate,
+            "MIN_DATE": str(r.get("MIN_DATE", "")),
+            "MAX_DATE": str(r.get("MAX_DATE", "")),
         })
 
     return v6_response(result)
@@ -1625,42 +1649,63 @@ def traffic_sources():
 @v7_bp.route("/api/v7/agency-timeseries", methods=["GET"])
 @require_auth
 def agency_timeseries():
-    """Daily timeseries for all advertisers in an agency.
+    """Daily timeseries aggregated by agency.
 
-    Returns aggregated daily metrics across the agency.
+    When agency_id is provided, returns daily metrics for that agency.
+    When omitted, returns daily metrics per agency (for overview chart).
     """
-    agency_id = get_agency_id()
-    if agency_id is None:
-        return api_error("agency_id is required")
-
+    agency_id = get_agency_id()  # Returns None if not provided
     start_date, end_date = parse_date_range()
-    params = {"agency_id": agency_id, "start": str(start_date), "end": str(end_date)}
 
-    rows = execute_query(
-        f"""
-        SELECT
-            LOG_DATE,
-            SUM(IMPRESSIONS) AS impressions,
-            SUM(DEVICE_REACH) AS device_reach,
-            SUM(HOUSEHOLD_REACH) AS hh_reach,
-            SUM(VISITORS) AS visitors,
-            SUM(WEB_VISITORS) AS web_visitors,
-            COUNT(DISTINCT ADVERTISER_ID) AS active_advertisers
-        FROM {T['PERF_PUB']}
-        WHERE AGENCY_ID = %(agency_id)s
-          AND LOG_DATE BETWEEN %(start)s AND %(end)s
-        GROUP BY LOG_DATE
-        ORDER BY LOG_DATE
-        """,
-        params,
-    )
+    if agency_id is not None:
+        # Single agency: aggregate daily
+        params = {"agency_id": agency_id, "start": str(start_date), "end": str(end_date)}
+        rows = execute_query(
+            f"""
+            SELECT
+                LOG_DATE,
+                SUM(IMPRESSIONS) AS impressions,
+                SUM(COALESCE(DEVICE_REACH, 0)) AS device_reach,
+                SUM(COALESCE(HOUSEHOLD_REACH, 0)) AS hh_reach,
+                SUM(COALESCE(VISITORS, 0)) AS visitors,
+                SUM(COALESCE(WEB_VISITORS, 0)) AS web_visitors,
+                COUNT(DISTINCT ADVERTISER_ID) AS active_advertisers
+            FROM {T['PERF_PUB']}
+            WHERE AGENCY_ID = %(agency_id)s
+              AND LOG_DATE BETWEEN %(start)s AND %(end)s
+            GROUP BY LOG_DATE
+            ORDER BY LOG_DATE
+            """,
+            params,
+        )
+    else:
+        # All agencies: group by agency + date (for overview chart)
+        params = {"start": str(start_date), "end": str(end_date)}
+        rows = execute_query(
+            f"""
+            SELECT
+                LOG_DATE,
+                AGENCY_ID,
+                SUM(IMPRESSIONS) AS impressions,
+                SUM(COALESCE(DEVICE_REACH, 0)) AS device_reach,
+                SUM(COALESCE(HOUSEHOLD_REACH, 0)) AS hh_reach,
+                SUM(COALESCE(VISITORS, 0)) AS visitors,
+                SUM(COALESCE(WEB_VISITORS, 0)) AS web_visitors,
+                COUNT(DISTINCT ADVERTISER_ID) AS active_advertisers
+            FROM {T['PERF_PUB']}
+            WHERE LOG_DATE BETWEEN %(start)s AND %(end)s
+            GROUP BY LOG_DATE, AGENCY_ID
+            ORDER BY LOG_DATE, AGENCY_ID
+            """,
+            params,
+        )
 
     series = []
     for r in rows:
         imps = safe_int(r.get("IMPRESSIONS"))
         visitors = safe_int(r.get("VISITORS"))
         svr = safe_visit_rate(visitors, imps)
-        series.append({
+        entry = {
             "LOG_DATE": str(r["LOG_DATE"]),
             "IMPRESSIONS": imps,
             "DEVICE_REACH": safe_int(r.get("DEVICE_REACH")),
@@ -1670,7 +1715,10 @@ def agency_timeseries():
             "WEB_VISITS": safe_int(r.get("WEB_VISITORS")),
             "ACTIVE_ADVERTISERS": safe_int(r.get("ACTIVE_ADVERTISERS")),
             "VISIT_RATE": svr,
-        })
+        }
+        if agency_id is None:
+            entry["AGENCY_ID"] = safe_int(r.get("AGENCY_ID"))
+        series.append(entry)
 
     return v6_response(series)
 
