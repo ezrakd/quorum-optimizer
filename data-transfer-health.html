@@ -836,9 +836,20 @@ body {
     <!-- Populated by JS -->
   </div>
 
+  <!-- Pipeline Health Section (PERF_BY_* tables) -->
+  <div class="detail-section" id="pipelineSection" style="margin-bottom: 24px;">
+    <h2 style="font-size: 16px; margin-bottom: 12px;">
+      Quorum Pipeline Health <span class="badge badge-snowflake">PERF_BY Framework</span>
+    </h2>
+    <div id="pipelineGrid" class="tables-grid">
+      <div style="color: var(--text-muted); font-size: 13px; padding: 12px;">Loading pipeline health...</div>
+    </div>
+  </div>
+
   <!-- View toggle -->
   <div class="view-tabs" id="viewTabs">
     <button class="view-tab active" onclick="switchView('clients')">Client Details</button>
+    <button class="view-tab" onclick="switchView('pipeline')">Pipeline Tables</button>
     <button class="view-tab" onclick="switchView('gaps')">Monitoring Gaps &amp; Recommendations</button>
     <button class="view-tab" onclick="switchView('guide')">Investigation Guide</button>
   </div>
@@ -846,6 +857,30 @@ body {
   <!-- Client Detail Views -->
   <div id="detailContainer">
     <!-- Populated by JS -->
+  </div>
+
+  <!-- Pipeline Detail View -->
+  <div id="pipelineContainer" style="display:none;">
+    <div class="detail-section">
+      <h2>PERF_BY Pipeline Tables <span class="badge badge-snowflake">DERIVED_TABLES</span></h2>
+      <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 16px;">
+        Real-time health of the dimensional fact tables, attribution tables, and coverage multiplier stats.
+        These tables power the v7 Optimizer API.
+      </p>
+      <div id="pipelineDetailGrid" class="tables-grid">
+        <div style="color: var(--text-muted); font-size: 13px; padding: 12px;">Click "Refresh" to load live data from Snowflake.</div>
+      </div>
+      <div class="notes-section" style="margin-top: 16px;">
+        <h3>Pipeline Architecture</h3>
+        <ul>
+          <li><strong>Source:</strong> AD_IMPRESSION_LOG_V2 + PIXEL_CAMPAIGN_MAPPING_V2 → SP_ENRICH_DIMENSIONAL_FACTS</li>
+          <li><strong>Attribution:</strong> HH_STORE_VISIT_ATTRIBUTION + HH_WEB_VISIT_ATTRIBUTION (last-touch)</li>
+          <li><strong>Coverage:</strong> COVERAGE_MULTIPLIER_STATS — Wilson score 95% CI at line-item, campaign, and advertiser grain</li>
+          <li><strong>Refresh:</strong> Stored procedures run after data ingestion; COVERAGE_MULTIPLIER runs after PERF_BY enrichment</li>
+          <li><strong>Processing pattern:</strong> Line items stop processing 28 days after last impression; auto-resume when impressions detected</li>
+        </ul>
+      </div>
+    </div>
   </div>
 
   <!-- Monitoring Gaps Panel -->
@@ -1993,14 +2028,145 @@ function refreshFromSnapshot() {
 
 function switchView(view) {
   const tabs = document.querySelectorAll('.view-tab');
-  const viewMap = ['clients', 'gaps', 'guide'];
+  const viewMap = ['clients', 'pipeline', 'gaps', 'guide'];
   tabs.forEach((t, i) => {
     t.classList.toggle('active', view === viewMap[i]);
   });
 
   document.getElementById('detailContainer').style.display = view === 'clients' ? 'block' : 'none';
+  document.getElementById('pipelineContainer').style.display = view === 'pipeline' ? 'block' : 'none';
   document.getElementById('gapsContainer').style.display = view === 'gaps' ? 'block' : 'none';
   document.getElementById('guideContainer').style.display = view === 'guide' ? 'block' : 'none';
+
+  if (view === 'pipeline' && !_pipelineLoaded) loadPipelineHealth();
+}
+
+// ============================================================
+// PIPELINE HEALTH (PERF_BY_* tables via v7 API)
+// ============================================================
+
+let _pipelineData = null;
+let _pipelineLoaded = false;
+
+async function loadPipelineHealth() {
+  try {
+    const resp = await fetch('/api/v7/pipeline-health');
+    const json = await resp.json();
+    if (json.success && json.data && json.data.TABLES) {
+      _pipelineData = json.data;
+      _pipelineLoaded = true;
+      renderPipelineOverview();
+      renderPipelineDetail();
+    } else {
+      document.getElementById('pipelineGrid').innerHTML =
+        '<div style="color: var(--accent-red); font-size: 13px; padding: 12px;">Failed to load pipeline health. API returned: ' + (json.error || 'unknown error') + '</div>';
+    }
+  } catch (e) {
+    document.getElementById('pipelineGrid').innerHTML =
+      '<div style="color: var(--accent-red); font-size: 13px; padding: 12px;">Pipeline health unavailable: ' + e.message + '</div>';
+  }
+}
+
+function getPipelineTableStatus(table) {
+  if (table.status === 'error') return 'critical';
+  if (table.status === 'empty') return 'warning';
+  if (!table.date_range || !table.date_range.max) return 'stale';
+  const maxDate = table.date_range.max;
+  if (!maxDate || maxDate === 'None') return 'stale';
+  const days = calculateStaleness(maxDate.substring(0, 10));
+  if (days === null) return 'stale';
+  if (days <= 1) return 'healthy';
+  if (days <= 3) return 'warning';
+  return 'critical';
+}
+
+function renderPipelineOverview() {
+  if (!_pipelineData) return;
+  const grid = document.getElementById('pipelineGrid');
+
+  const tables = _pipelineData.TABLES;
+  const healthy = tables.filter(t => getPipelineTableStatus(t) === 'healthy').length;
+  const warning = tables.filter(t => getPipelineTableStatus(t) === 'warning').length;
+  const critical = tables.filter(t => ['critical', 'stale'].includes(getPipelineTableStatus(t))).length;
+
+  grid.innerHTML = `
+    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;">
+      <div class="kpi-card">
+        <div class="kpi-label">Tables Monitored</div>
+        <div class="kpi-value">${tables.length}</div>
+        <div class="kpi-sub">PERF_BY + Attribution + Coverage</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Healthy</div>
+        <div class="kpi-value" style="color: var(--healthy)">${healthy}</div>
+        <div class="kpi-sub">Data current within 24h</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Warning</div>
+        <div class="kpi-value" style="color: var(--warning)">${warning}</div>
+        <div class="kpi-sub">24-72h stale</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Critical</div>
+        <div class="kpi-value" style="color: var(--critical)">${critical}</div>
+        <div class="kpi-sub">&gt;72h stale or errored</div>
+      </div>
+    </div>
+  `;
+}
+
+function renderPipelineDetail() {
+  if (!_pipelineData) return;
+  const grid = document.getElementById('pipelineDetailGrid');
+
+  const tableTypes = {
+    'PERF_BY_PUBLISHER': { type: 'Dimensional Fact', desc: 'Publisher/supply-side performance' },
+    'PERF_BY_GEO': { type: 'Dimensional Fact', desc: 'Geographic performance (ZIP + DMA)' },
+    'PERF_BY_TRAFFIC': { type: 'Dimensional Fact', desc: 'Traffic source classification' },
+    'PERF_BY_CREATIVE': { type: 'Dimensional Fact', desc: 'Creative-level performance' },
+    'PERF_BY_HOUSEHOLD': { type: 'Dimensional Fact', desc: 'Household-level (top 1000/advertiser)' },
+    'HH_STORE_VISIT_ATTRIBUTION': { type: 'Attribution', desc: 'Store visit last-touch attribution' },
+    'HH_WEB_VISIT_ATTRIBUTION': { type: 'Attribution', desc: 'Web visit last-touch attribution' },
+    'WEBPIXEL_EVENTS': { type: 'Events', desc: 'Raw web pixel events (page views)' },
+    'AD_IMPRESSION_LOG_V2': { type: 'Raw Source', desc: 'Unified impression log (all DSPs)' },
+    'PIXEL_CAMPAIGN_MAPPING_V2': { type: 'Reference', desc: 'Campaign name resolution mapping' },
+    'COVERAGE_MULTIPLIER_STATS': { type: 'Coverage', desc: 'Wilson 95% CI multipliers (LI/IO/ADV grain)' },
+  };
+
+  const rows = _pipelineData.TABLES.map(t => {
+    const status = getPipelineTableStatus(t);
+    const info = tableTypes[t.table] || { type: 'Other', desc: '' };
+    const maxDate = t.date_range ? t.date_range.max : null;
+    const minDate = t.date_range ? t.date_range.min : null;
+    const stale = maxDate && maxDate !== 'None' ? staleDaysText(maxDate.substring(0, 10)) : '—';
+
+    return `
+      <div class="table-card">
+        <div>
+          <div class="table-name">${t.table}</div>
+          <div class="table-schema">${info.type} — ${info.desc}</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value">${t.row_count ? formatNumber(t.row_count) : '—'}</div>
+          <div class="metric-label">Rows</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value ${status}">${maxDate && maxDate !== 'None' ? formatDate(maxDate.substring(0, 10)) : '—'}</div>
+          <div class="metric-label">${stale}</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value">${minDate && minDate !== 'None' ? formatDate(minDate.substring(0, 10)) : '—'}</div>
+          <div class="metric-label">Earliest</div>
+        </div>
+        <div>
+          <span class="status-dot ${status}" style="display:inline-block;"></span>
+          <span class="status-label ${status}" style="font-size: 12px;">${getStatusText(status)}</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  grid.innerHTML = rows;
 }
 
 function init() {
@@ -2012,6 +2178,8 @@ function init() {
 
   // Auto-refresh from API on page load
   refreshAll();
+  // Also load pipeline health eagerly
+  loadPipelineHealth();
 }
 
 init();

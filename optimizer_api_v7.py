@@ -79,6 +79,7 @@ T = {
     "PERF_TRAFFIC":   "QUORUMDB.DERIVED_TABLES.PERF_BY_TRAFFIC",
     "PERF_CREATIVE":  "QUORUMDB.DERIVED_TABLES.PERF_BY_CREATIVE",
     "PERF_HH":        "QUORUMDB.DERIVED_TABLES.PERF_BY_HOUSEHOLD",
+    "COVERAGE":       "QUORUMDB.DERIVED_TABLES.COVERAGE_MULTIPLIER_STATS",
 
     # Attribution tables (DERIVED_TABLES)
     "HH_STORE":       "QUORUMDB.DERIVED_TABLES.HH_STORE_VISIT_ATTRIBUTION",
@@ -268,20 +269,77 @@ def get_advertiser_id():
         return None
 
 
-def get_coverage_multiplier(advertiser_id):
-    """Get coverage multiplier for an advertiser.
+_coverage_cache = {}
 
-    The multiplier accounts for the percentage of store visit devices
-    that can be resolved to households. For example, if 51.8% of MAIDs
-    resolve to HH, multiplier = 1/0.518 ≈ 1.93.
 
-    TODO: Replace with dynamic MAID-resolution computation at line-item
-    level (with statistical significance flags) once the
-    COVERAGE_MULTIPLIER_STATS table is built.
+def get_coverage_multiplier(advertiser_id, grain=None, grain_id=None):
+    """Get coverage multiplier with Wilson score 95% CI significance.
 
-    Currently returns 1.0 (no adjustment) for all advertisers.
+    Queries COVERAGE_MULTIPLIER_STATS at specified grain level with
+    automatic fallback: LINE_ITEM → CAMPAIGN → ADVERTISER → 1.0.
+
+    Args:
+        advertiser_id: Advertiser ID.
+        grain: 'LINE_ITEM', 'CAMPAIGN', or 'ADVERTISER' (default: ADVERTISER).
+        grain_id: LI_ID or IO_ID depending on grain.
+
+    Returns:
+        dict with: multiplier, is_significant, ci_lower, ci_upper,
+                   sample_size, grain, hh_resolution_rate
     """
-    return 1.0
+    cache_key = f"{advertiser_id}_{grain}_{grain_id}"
+    if cache_key in _coverage_cache:
+        return _coverage_cache[cache_key]
+
+    default = {
+        "multiplier": 1.0,
+        "is_significant": False,
+        "ci_lower": 1.0,
+        "ci_upper": 1.0,
+        "sample_size": 0,
+        "grain": "DEFAULT",
+        "hh_resolution_rate": 0.0,
+    }
+
+    # Build ordered query attempts based on grain
+    attempts = []
+    if grain == "LINE_ITEM" and grain_id:
+        attempts.append(("LINE_ITEM", f"AND GRAIN = 'LINE_ITEM' AND LI_ID = %(gid)s"))
+    if grain in ("LINE_ITEM", "CAMPAIGN") and grain_id:
+        attempts.append(("CAMPAIGN", f"AND GRAIN = 'CAMPAIGN' AND IO_ID = %(gid)s"))
+    attempts.append(("ADVERTISER", "AND GRAIN = 'ADVERTISER'"))
+
+    try:
+        for attempt_grain, clause in attempts:
+            row = execute_query(
+                f"""
+                SELECT COVERAGE_MULTIPLIER, IS_SIGNIFICANT,
+                       MULTIPLIER_CI_LOWER, MULTIPLIER_CI_UPPER,
+                       SAMPLE_SIZE, GRAIN, HH_RESOLUTION_RATE
+                FROM {T['COVERAGE']}
+                WHERE ADVERTISER_ID = %(adv_id)s {clause}
+                LIMIT 1
+                """,
+                {"adv_id": advertiser_id, "gid": grain_id},
+                fetch="one",
+            )
+            if row:
+                result = {
+                    "multiplier": safe_float(row.get("COVERAGE_MULTIPLIER"), 1.0),
+                    "is_significant": bool(row.get("IS_SIGNIFICANT")),
+                    "ci_lower": safe_float(row.get("MULTIPLIER_CI_LOWER"), 1.0),
+                    "ci_upper": safe_float(row.get("MULTIPLIER_CI_UPPER"), 1.0),
+                    "sample_size": safe_int(row.get("SAMPLE_SIZE")) or 0,
+                    "grain": row.get("GRAIN", attempt_grain),
+                    "hh_resolution_rate": safe_float(row.get("HH_RESOLUTION_RATE"), 0.0),
+                }
+                _coverage_cache[cache_key] = result
+                return result
+    except Exception as e:
+        logger.warning("Coverage multiplier lookup failed for %s: %s", advertiser_id, e)
+
+    _coverage_cache[cache_key] = default
+    return default
 
 
 def safe_visit_rate(visitors, impressions, multiplier=1.0):
@@ -420,23 +478,29 @@ def get_store_visits_by_lineitem(advertiser_id, start_date, end_date):
 
 
 def get_store_visits_by_creative(advertiser_id, start_date, end_date):
-    """Store visits grouped by creative."""
+    """Store visits grouped by creative + IO (to avoid duplication when same creative spans IOs)."""
     rows = execute_query(
         f"""
         SELECT CREATIVE_ID,
                CREATIVE_NAME,
+               INSERTION_ORDER_ID AS IO_ID,
                COUNT(*) AS visits,
                COUNT(DISTINCT HOUSEHOLD_ID) AS unique_hh
         FROM {T['HH_STORE']}
         WHERE AD_IMPRESSION_ADVERTISER_ID = %(adv_id)s
           AND IS_LAST_TOUCH = TRUE
           AND STORE_VISIT_DATE BETWEEN %(start)s AND %(end)s
-        GROUP BY 1, 2
+        GROUP BY 1, 2, 3
         """,
         {"adv_id": advertiser_id, "start": str(start_date), "end": str(end_date)},
     )
-    return {str(r["CREATIVE_ID"]): {"visits": r["VISITS"], "unique_hh": r["UNIQUE_HH"],
-                                     "name": r["CREATIVE_NAME"]} for r in rows}
+    # Keyed by (creative_id, io_id) tuple for precise lookup
+    result = {}
+    for r in rows:
+        key = (str(r["CREATIVE_ID"]), str(r.get("IO_ID", "")))
+        result[key] = {"visits": r["VISITS"], "unique_hh": r["UNIQUE_HH"],
+                        "name": r["CREATIVE_NAME"]}
+    return result
 
 
 def get_store_visits_by_date(advertiser_id, start_date, end_date):
@@ -548,23 +612,28 @@ def get_web_visits_by_lineitem(advertiser_id, start_date, end_date):
 
 
 def get_web_visits_by_creative(advertiser_id, start_date, end_date):
-    """Web visits grouped by creative."""
+    """Web visits grouped by creative + IO (to avoid duplication when same creative spans IOs)."""
     rows = execute_query(
         f"""
         SELECT CREATIVE_ID,
                CREATIVE_NAME,
+               INSERTION_ORDER_ID AS IO_ID,
                COUNT(*) AS visits,
                COUNT(DISTINCT HOUSEHOLD_ID) AS unique_hh
         FROM {T['HH_WEB']}
         WHERE AD_IMPRESSION_ADVERTISER_ID = %(adv_id)s
           AND IS_LAST_TOUCH = TRUE
           AND WEB_VISIT_DATE BETWEEN %(start)s AND %(end)s
-        GROUP BY 1, 2
+        GROUP BY 1, 2, 3
         """,
         {"adv_id": advertiser_id, "start": str(start_date), "end": str(end_date)},
     )
-    return {str(r["CREATIVE_ID"]): {"visits": r["VISITS"], "unique_hh": r["UNIQUE_HH"],
-                                     "name": r["CREATIVE_NAME"]} for r in rows}
+    result = {}
+    for r in rows:
+        key = (str(r["CREATIVE_ID"]), str(r.get("IO_ID", "")))
+        result[key] = {"visits": r["VISITS"], "unique_hh": r["UNIQUE_HH"],
+                        "name": r["CREATIVE_NAME"]}
+    return result
 
 
 def get_web_visits_by_date(advertiser_id, start_date, end_date):
@@ -866,18 +935,23 @@ def summary():
 
     impressions = safe_int(imp_row.get("TOTAL_IMPRESSIONS")) if imp_row else 0
 
-    # Store visits (exact count from attribution table)
+    # Panel reach: raw matched households from attribution tables
     sv = get_store_visits_total(advertiser_id, start_date, end_date)
-
-    # Web visits (exact count from attribution table)
     wv = get_web_visits_total(advertiser_id, start_date, end_date)
 
-    # Coverage multiplier
-    multiplier = get_coverage_multiplier(advertiser_id)
+    # Coverage multiplier with statistical significance
+    cov = get_coverage_multiplier(advertiser_id, grain="ADVERTISER")
+    multiplier = cov["multiplier"]
 
-    # Visit rates = (visits * multiplier) / impressions
-    store_vr = safe_visit_rate(sv["total_visits"], impressions, multiplier)
-    web_vr = safe_visit_rate(wv["total_visits"], impressions, multiplier)
+    # Visits = panel_reach × multiplier (projected total)
+    store_panel = sv["total_visits"]
+    web_panel = wv["total_visits"]
+    store_visits = int(store_panel * multiplier)
+    web_visits = int(web_panel * multiplier)
+
+    # Visit rate = visits / impressions
+    store_vr = safe_visit_rate(store_visits, impressions)
+    web_vr = safe_visit_rate(web_visits, impressions)
 
     return v6_response({
         "ADVERTISER_ID": advertiser_id,
@@ -885,13 +959,23 @@ def summary():
         "DEVICE_REACH": safe_int(imp_row.get("TOTAL_DEVICE_REACH")) if imp_row else 0,
         "HOUSEHOLD_REACH": safe_int(imp_row.get("TOTAL_HH_REACH")) if imp_row else 0,
         "UNIQUE_HOUSEHOLDS": sv["unique_households"],
-        "STORE_VISITS": sv["total_visits"],
+        "STORE_PANEL_REACH": store_panel,
+        "STORE_VISITS": store_visits,
         "STORE_VISIT_RATE": store_vr,
-        "WEB_VISITS": wv["total_visits"],
+        "STORE_SIGNIFICANT": cov["is_significant"],
+        "WEB_PANEL_REACH": web_panel,
+        "WEB_VISITS": web_visits,
         "WEB_VISIT_RATE": web_vr,
+        "WEB_SIGNIFICANT": cov["is_significant"],
         "TOTAL_PAGE_VIEWS": safe_int(imp_row.get("TOTAL_PAGE_VIEWS")) if imp_row else 0,
         "VISIT_RATE": store_vr,
         "MULTIPLIER": multiplier,
+        "MULTIPLIER_CI_LOWER": cov["ci_lower"],
+        "MULTIPLIER_CI_UPPER": cov["ci_upper"],
+        "MULTIPLIER_SIGNIFICANT": cov["is_significant"],
+        "MULTIPLIER_GRAIN": cov["grain"],
+        "MULTIPLIER_SAMPLE_SIZE": cov["sample_size"],
+        "HH_RESOLUTION_RATE": cov["hh_resolution_rate"],
         "PLATFORM_COUNT": safe_int(imp_row.get("PLATFORM_COUNT")) if imp_row else 0,
         "CAMPAIGN_COUNT": safe_int(imp_row.get("CAMPAIGN_COUNT")) if imp_row else 0,
         "LINEITEM_COUNT": safe_int(imp_row.get("LINEITEM_COUNT")) if imp_row else 0,
@@ -1017,10 +1101,9 @@ def campaign_performance():
         params,
     )
 
-    # Exact store visits by campaign (from HH attribution)
+    # Panel reach by campaign (from HH attribution)
     sv_by_io = get_store_visits_by_campaign(advertiser_id, start_date, end_date)
     wv_by_io = get_web_visits_by_campaign(advertiser_id, start_date, end_date)
-    multiplier = get_coverage_multiplier(advertiser_id)
 
     campaigns = []
     for r in imp_rows:
@@ -1028,10 +1111,16 @@ def campaign_performance():
         imps = safe_int(r.get("IMPRESSIONS"))
         sv = sv_by_io.get(io_id, {})
         wv = wv_by_io.get(io_id, {})
-        store_visits = safe_int(sv.get("visits"))
-        web_visits = safe_int(wv.get("visits"))
-        svr = safe_visit_rate(store_visits, imps, multiplier)
-        wvr = safe_visit_rate(web_visits, imps, multiplier)
+        store_panel = safe_int(sv.get("visits"))
+        web_panel = safe_int(wv.get("visits"))
+
+        # Campaign-grain multiplier with fallback to advertiser
+        cov = get_coverage_multiplier(advertiser_id, grain="CAMPAIGN", grain_id=io_id)
+        multiplier = cov["multiplier"]
+        store_visits = int(store_panel * multiplier)
+        web_visits = int(web_panel * multiplier)
+        svr = safe_visit_rate(store_visits, imps)
+        wvr = safe_visit_rate(web_visits, imps)
 
         campaigns.append({
             "IO_ID": io_id,
@@ -1040,15 +1129,20 @@ def campaign_performance():
             "IMPRESSIONS": imps,
             "DEVICE_REACH": safe_int(r.get("DEVICE_REACH")),
             "HOUSEHOLD_REACH": safe_int(r.get("HH_REACH")),
+            "STORE_PANEL_REACH": store_panel,
             "STORE_VISITS": store_visits,
             "STORE_VISIT_RATE": svr,
             "STORE_VR": svr,
+            "WEB_PANEL_REACH": web_panel,
             "WEB_VISITS": web_visits,
             "WEB_VISIT_RATE": wvr,
             "WEB_VR": wvr,
             "UNIQUE_HOUSEHOLDS": safe_int(sv.get("unique_hh")),
             "PAGE_VIEWS": safe_int(r.get("PAGE_VIEWS")),
             "VISIT_RATE": svr,
+            "MULTIPLIER": multiplier,
+            "MULTIPLIER_SIGNIFICANT": cov["is_significant"],
+            "MULTIPLIER_GRAIN": cov["grain"],
             "FIRST_DATE": str(r.get("FIRST_DATE", "")),
             "LAST_DATE": str(r.get("LAST_DATE", "")),
         })
@@ -1101,7 +1195,6 @@ def lineitem_performance():
 
     sv_by_li = get_store_visits_by_lineitem(advertiser_id, start_date, end_date)
     wv_by_li = get_web_visits_by_lineitem(advertiser_id, start_date, end_date)
-    multiplier = get_coverage_multiplier(advertiser_id)
 
     lineitems = []
     for r in imp_rows:
@@ -1109,10 +1202,16 @@ def lineitem_performance():
         imps = safe_int(r.get("IMPRESSIONS"))
         sv = sv_by_li.get(li_id, {})
         wv = wv_by_li.get(li_id, {})
-        store_visits = safe_int(sv.get("visits"))
-        web_visits = safe_int(wv.get("visits"))
-        svr = safe_visit_rate(store_visits, imps, multiplier)
-        wvr = safe_visit_rate(web_visits, imps, multiplier)
+        store_panel = safe_int(sv.get("visits"))
+        web_panel = safe_int(wv.get("visits"))
+
+        # Line-item grain multiplier with fallback to campaign → advertiser
+        cov = get_coverage_multiplier(advertiser_id, grain="LINE_ITEM", grain_id=li_id)
+        multiplier = cov["multiplier"]
+        store_visits = int(store_panel * multiplier)
+        web_visits = int(web_panel * multiplier)
+        svr = safe_visit_rate(store_visits, imps)
+        wvr = safe_visit_rate(web_visits, imps)
 
         io_name = r.get("IO_NAME") or ""
         li_name = r.get("LI_NAME") or f"LI {li_id}"
@@ -1137,6 +1236,9 @@ def lineitem_performance():
             "UNIQUE_HOUSEHOLDS": safe_int(sv.get("unique_hh")),
             "PAGE_VIEWS": safe_int(r.get("PAGE_VIEWS")),
             "VISIT_RATE": svr,
+            "MULTIPLIER": multiplier,
+            "MULTIPLIER_SIGNIFICANT": cov["is_significant"],
+            "MULTIPLIER_GRAIN": cov["grain"],
             "FIRST_DATE": str(r.get("FIRST_DATE", "")),
             "LAST_DATE": str(r.get("LAST_DATE", "")),
         })
@@ -1186,12 +1288,15 @@ def creative_performance():
     creatives = []
     for r in rows:
         cr_id = str(r.get("CREATIVE_ID", ""))
+        io_id = str(r.get("IO_ID", ""))
         imps = safe_int(r.get("IMPRESSIONS"))
-        sv = sv_by_cr.get(cr_id, {})
-        wv = wv_by_cr.get(cr_id, {})
-        store_visits = safe_int(sv.get("visits"))
-        web_visits = safe_int(wv.get("visits"))
-        svr = safe_visit_rate(store_visits, imps, multiplier)
+        sv = sv_by_cr.get((cr_id, io_id), {})
+        wv = wv_by_cr.get((cr_id, io_id), {})
+        store_panel = safe_int(sv.get("visits"))
+        web_panel = safe_int(wv.get("visits"))
+        store_visits = int(store_panel * multiplier)
+        web_visits = int(web_panel * multiplier)
+        svr = safe_visit_rate(store_visits, imps)
 
         page_views = safe_int(r.get("PAGE_VIEWS"))
         hh_reach = safe_int(r.get("HH_REACH"))
@@ -1986,6 +2091,7 @@ def pipeline_health():
         ("WEBPIXEL_EVENTS", T["WEBPIXEL"]),
         ("AD_IMPRESSION_LOG_V2", T["IMP_LOG"]),
         ("PIXEL_CAMPAIGN_MAPPING_V2", T["PCM"]),
+        ("COVERAGE_MULTIPLIER_STATS", T["COVERAGE"]),
     ]
 
     results = []
