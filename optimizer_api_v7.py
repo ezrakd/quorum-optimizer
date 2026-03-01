@@ -8,7 +8,7 @@ Key changes from v6:
 - All performance data from PERF_BY_* tables (DERIVED_TABLES)
 - Store visits from HH_STORE_VISIT_ATTRIBUTION (already HH-resolved)
 - Web visits from HH_WEB_VISIT_ATTRIBUTION (already HH-resolved)
-- Discovery from SEGMENT_DATA.AGENCY_ADVERTISER (role-accessible)
+- Discovery from BASE_TABLES.AGENCY_ADVERTISER_PROFILE (canonical names)
 - Visit rate = (visitors * COALESCE(multiplier, 1)) / NULLIF(impressions, 0)
 - Lift analysis uses HH_STORE_VISIT_ATTRIBUTION (single source, no UNION)
 
@@ -22,6 +22,38 @@ Table architecture (run39 + run40-43):
 Enrichment (SP_ENRICH_DIMENSIONAL_FACTS):
   VISITORS, WEB_VISITORS, VISIT_RATE are pre-computed on PERF_BY_* tables.
   For endpoints needing HH-level detail (lift analysis), query HH_* tables directly.
+
+VISIT COUNTING METHODOLOGY (CRITICAL — READ BEFORE MODIFYING)
+==============================================================
+All visit metrics use LAST-TOUCH attribution with strict deduplication.
+The canonical source tables are HH_WEB_VISIT_ATTRIBUTION and
+HH_STORE_VISIT_ATTRIBUTION — these are pre-filtered to IS_LAST_TOUCH=TRUE
+and resolved to HOUSEHOLD_ID. Do NOT use the raw multi-touch tables
+(AD_TO_WEB_VISIT_ATTRIBUTION, WEB_TO_STORE_VISIT_ATTRIBUTION) for visit
+counts — those contain one row per impression-per-visit and will inflate
+counts by 25x+ due to impression fan-out.
+
+  WEB VISITS:
+    - Unit: 1 per unique web session (WEB_VISIT_UUID) per day
+    - Attribution: last impression before visit only (IS_LAST_TOUCH=TRUE)
+    - Source: HH_WEB_VISIT_ATTRIBUTION
+    - Count: COUNT(DISTINCT WEB_VISIT_UUID)
+    - NOT page views (one session = one visit regardless of pages viewed)
+    - NOT per-impression (one session matched to many impressions = still 1 visit)
+
+  STORE VISITS:
+    - Unit: 1 per household per day per location
+    - Attribution: last impression before visit only (IS_LAST_TOUCH=TRUE)
+    - Target source: HH_STORE_VISIT_ATTRIBUTION (run49)
+    - Target count: COUNT(DISTINCT HOUSEHOLD_ID || '|' || STORE_VISIT_DATE
+                         || '|' || STORE_VISIT_SEGMENT_MD5)
+    - NOT per-ping (device seen 5 times at same location same day = 1 visit)
+    - NOT per-impression (one visit matched to many impressions = still 1 visit)
+
+  VISIT RATE:
+    - Formula: unique_visits / impressions * 100
+    - With coverage multiplier: (unique_visits * multiplier) / impressions * 100
+    - Coverage multiplier compensates for HH resolution rate (<100% match)
 """
 
 import os
@@ -88,6 +120,7 @@ T = {
 
     # App/config tables
     "AGENCY_ADV":     "QUORUMDB.SEGMENT_DATA.AGENCY_ADVERTISER",
+    "AAP":            "QUORUMDB.BASE_TABLES.AGENCY_ADVERTISER_PROFILE",
     "REPORT_LAYOUT":  "QUORUMDB.APP_DB.REPORT_LAYOUT_SETTING",
     "CAMPAIGN":       "QUORUMDB.APP_DB.CAMPAIGN",
     "LINE_ITEM":      "QUORUMDB.APP_DB.LINE_ITEM",
@@ -109,6 +142,41 @@ T = {
     # Impression log (for lift analysis only)
     "IMP_LOG":        "QUORUMDB.BASE_TABLES.AD_IMPRESSION_LOG_V2",
 }
+
+# ---------------------------------------------------------------------------
+# Agency name resolution
+# Uses AGENCY_ADVERTISER_PROFILE (BASE_TABLES) for dynamic name lookup.
+# COMP_NAME in AGENCY_ADVERTISER shows dealership names, NOT agency names.
+# AAP.AGENCY_NAME is the canonical source for agency display names.
+# ---------------------------------------------------------------------------
+
+# Per-request cache for agency name map (populated on first call per request)
+def get_agency_names():
+    """Fetch agency name map from AGENCY_ADVERTISER_PROFILE.
+
+    Returns dict of {agency_id: agency_name}.
+    Cached on Flask g object for the duration of the request.
+    """
+    cached = getattr(g, "_agency_names", None)
+    if cached is not None:
+        return cached
+
+    rows = execute_query(
+        f"""
+        SELECT DISTINCT AGENCY_ID, AGENCY_NAME
+        FROM {T['AAP']}
+        WHERE AGENCY_NAME IS NOT NULL
+        """,
+    )
+    name_map = {safe_int(r["AGENCY_ID"]): r["AGENCY_NAME"] for r in rows}
+    g._agency_names = name_map
+    return name_map
+
+
+def resolve_agency_name(agency_id):
+    """Resolve an agency ID to its display name."""
+    names = get_agency_names()
+    return names.get(agency_id, f"Agency {agency_id}")
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +478,82 @@ def v6_response(data):
 
 
 # ---------------------------------------------------------------------------
+# Advertiser Config (from REF_ADVERTISER_CONFIG)
+# ---------------------------------------------------------------------------
+# Config flags drive which attribution types are queried per advertiser.
+# This avoids expensive HH_STORE / HH_WEB queries for advertisers that
+# don't have the corresponding attribution set up.
+# ---------------------------------------------------------------------------
+
+def get_advertiser_config(advertiser_id):
+    """Fetch advertiser config flags from REF_ADVERTISER_CONFIG.
+
+    Returns a dict with normalized boolean/string fields.
+    Falls back to safe defaults (all False) if no config row exists.
+    Results are cached on Flask's g object for the duration of the request.
+    """
+    cache_key = f"_adv_config_{advertiser_id}"
+    cached = getattr(g, cache_key, None)
+    if cached is not None:
+        return cached
+
+    row = execute_query(
+        f"""
+        SELECT
+            HAS_STORE_VISIT_ATTRIBUTION,
+            HAS_WEB_VISIT_ATTRIBUTION,
+            HAS_IMPRESSION_TRACKING,
+            ATTRIBUTION_WINDOW_DAYS,
+            MATCH_STRATEGY,
+            CONFIG_STATUS,
+            WEB_VISIT_SOURCE,
+            ADVERTISER_DISPLAY_NAME,
+            POI_URL_COUNT,
+            WEB_PIXEL_URL_COUNT
+        FROM {T['REF_ADV_CFG']}
+        WHERE ADVERTISER_ID = %(adv_id)s
+        """,
+        {"adv_id": advertiser_id},
+        fetch="one",
+    )
+
+    if row:
+        config = {
+            "has_store": row.get("HAS_STORE_VISIT_ATTRIBUTION") is True
+                         or str(row.get("HAS_STORE_VISIT_ATTRIBUTION", "")).lower() == "true",
+            "has_web": row.get("HAS_WEB_VISIT_ATTRIBUTION") is True
+                       or str(row.get("HAS_WEB_VISIT_ATTRIBUTION", "")).lower() == "true",
+            "has_impressions": row.get("HAS_IMPRESSION_TRACKING") is True
+                               or str(row.get("HAS_IMPRESSION_TRACKING", "")).lower() == "true",
+            "attribution_window": safe_int(row.get("ATTRIBUTION_WINDOW_DAYS"), default=14),
+            "match_strategy": row.get("MATCH_STRATEGY") or "MAID_PRIORITY",
+            "config_status": row.get("CONFIG_STATUS") or "UNKNOWN",
+            "web_visit_source": row.get("WEB_VISIT_SOURCE") or "",
+            "display_name": row.get("ADVERTISER_DISPLAY_NAME") or "",
+            "poi_count": safe_int(row.get("POI_URL_COUNT")),
+            "web_pixel_count": safe_int(row.get("WEB_PIXEL_URL_COUNT")),
+            "config_found": True,
+        }
+    else:
+        config = {
+            "has_store": False,
+            "has_web": False,
+            "has_impressions": False,
+            "attribution_window": 14,
+            "match_strategy": "MAID_PRIORITY",
+            "config_status": "NOT_CONFIGURED",
+            "web_visit_source": "",
+            "display_name": "",
+            "poi_count": 0,
+            "web_pixel_count": 0,
+            "config_found": False,
+        }
+
+    setattr(g, cache_key, config)
+    return config
+
+
+# ---------------------------------------------------------------------------
 # Store Visit Enrichment (from HH_STORE_VISIT_ATTRIBUTION)
 # ---------------------------------------------------------------------------
 # These functions query the HH-resolved attribution table directly.
@@ -552,14 +696,14 @@ def get_store_visits_by_brand(advertiser_id, start_date, end_date):
 # ---------------------------------------------------------------------------
 
 def get_web_visits_total(advertiser_id, start_date, end_date):
-    """Total web visit count for an advertiser (last-touch)."""
+    """Total web visit count for an advertiser.
+    Last-touch only, 1 per unique web session (WEB_VISIT_UUID)."""
     row = execute_query(
         f"""
-        SELECT COUNT(*) AS total_visits,
+        SELECT COUNT(DISTINCT WEB_VISIT_UUID) AS total_visits,
                COUNT(DISTINCT HOUSEHOLD_ID) AS unique_hh
         FROM {T['HH_WEB']}
         WHERE AD_IMPRESSION_ADVERTISER_ID = %(adv_id)s
-          AND IS_LAST_TOUCH = TRUE
           AND WEB_VISIT_DATE BETWEEN %(start)s AND %(end)s
         """,
         {"adv_id": advertiser_id, "start": str(start_date), "end": str(end_date)},
@@ -661,10 +805,19 @@ def get_web_visits_by_date(advertiser_id, start_date, end_date):
 # =========================================================================
 
 # ---------------------------------------------------------------------------
+# Visit Enrichment — LAST-TOUCH, DEDUPLICATED
+# See VISIT COUNTING METHODOLOGY in module docstring for rules.
+# Source tables: HH_WEB_VISIT_ATTRIBUTION + HH_STORE_VISIT_ATTRIBUTION
+# These tables are pre-filtered to IS_LAST_TOUCH=TRUE.
+# DO NOT use AD_TO_WEB_VISIT_ATTRIBUTION or WEB_TO_STORE_VISIT_ATTRIBUTION
+# for visit counts — those are raw multi-touch and inflate 25x+.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
 # Health Check
 # ---------------------------------------------------------------------------
 
-@v7_bp.route("/health", methods=["GET"])
+@v7_bp.route("/api/v7/health", methods=["GET"])
 def health():
     """Basic health check — verifies Snowflake connectivity."""
     try:
@@ -690,8 +843,7 @@ def agencies():
 
     AGENCY_ID comes from DSP impression data (not AGENCY_ADVERTISER.ID).
     We get the definitive list from PERF_BY_PUBLISHER and resolve names
-    from hardwired mappings (AGENCY_ADVERTISER.COMP_NAME shows dealership
-    names, NOT agency/platform names).
+    dynamically from AGENCY_ADVERTISER_PROFILE (BASE_TABLES).
     """
     start_date, end_date = parse_date_range()
 
@@ -713,16 +865,6 @@ def agencies():
         {"start": str(start_date), "end": str(end_date)},
     )
 
-    # Hardwired agency name resolution (COMP_NAME shows dealership names, not platforms)
-    AGENCY_NAMES = {
-        1202: "LotLinx",
-        1480: "Paramount",
-        1813: "Causal",
-        1445: "Lorem Tristique Aliquet",
-        1880: "UNIDENTIFIED (Adelphic + DCM/GAM)",
-        1697: "UNIDENTIFIED (Adelphic)",
-    }
-
     result = []
     for r in rows:
         aid = safe_int(r.get("AGENCY_ID"))
@@ -733,7 +875,7 @@ def agencies():
         wv_rate = round(wv / imps * 100, 4) if imps > 0 else 0
         result.append({
             "AGENCY_ID": aid,
-            "AGENCY_NAME": AGENCY_NAMES.get(aid, f"Agency {aid}"),
+            "AGENCY_NAME": resolve_agency_name(aid),
             "ADVERTISER_COUNT": safe_int(r.get("ADVERTISER_COUNT")),
             "IMPRESSIONS": imps,
             "STORE_VISITS": sv,
@@ -779,7 +921,7 @@ def advertisers():
         )
         SELECT
             p.ADVERTISER_ID,
-            aa.COMP_NAME,
+            REGEXP_REPLACE(aap.ADVERTISER_NAME, '^[^ ]+ - ', '') AS ADVERTISER_NAME,
             aa.REPORT_STATUS,
             aa.PIXEL_ID,
             aa.STORE_VISIT_ATTR_WINDOW,
@@ -788,9 +930,15 @@ def advertisers():
             p.store_visits,
             p.web_visits,
             p.min_date,
-            p.max_date
+            p.max_date,
+            cfg.HAS_STORE_VISIT_ATTRIBUTION,
+            cfg.HAS_WEB_VISIT_ATTRIBUTION,
+            cfg.CONFIG_STATUS,
+            cfg.ADVERTISER_DISPLAY_NAME
         FROM perf p
-        LEFT JOIN {T['AGENCY_ADV']} aa ON p.ADVERTISER_ID = aa.ADVERTISER_ID
+        LEFT JOIN {T['AAP']} aap ON p.ADVERTISER_ID = aap.ADVERTISER_ID
+        LEFT JOIN {T['AGENCY_ADV']} aa ON p.ADVERTISER_ID = aa.ID
+        LEFT JOIN {T['REF_ADV_CFG']} cfg ON p.ADVERTISER_ID = cfg.ADVERTISER_ID
         ORDER BY p.impressions DESC
         """,
         {"agency_id": agency_id, "start": str(start_date), "end": str(end_date)},
@@ -798,14 +946,25 @@ def advertisers():
 
     result = []
     for r in rows:
+        adv_id = safe_int(r.get("ADVERTISER_ID"))
         imps = safe_int(r.get("IMPRESSIONS"))
         sv = safe_int(r.get("STORE_VISITS"))
         wv = safe_int(r.get("WEB_VISITS"))
         sv_rate = round(sv / imps * 100, 4) if imps > 0 else 0
         wv_rate = round(wv / imps * 100, 4) if imps > 0 else 0
+
+        # Config flags from REF_ADVERTISER_CONFIG
+        has_store = (r.get("HAS_STORE_VISIT_ATTRIBUTION") is True
+                     or str(r.get("HAS_STORE_VISIT_ATTRIBUTION", "")).lower() == "true")
+        has_web = (r.get("HAS_WEB_VISIT_ATTRIBUTION") is True
+                   or str(r.get("HAS_WEB_VISIT_ATTRIBUTION", "")).lower() == "true")
+
+        # Use config display name if available, fall back to AAP.ADVERTISER_NAME
+        display_name = r.get("ADVERTISER_DISPLAY_NAME") or r.get("ADVERTISER_NAME") or f"Advertiser {adv_id}"
+
         result.append({
-            "ADVERTISER_ID": safe_int(r.get("ADVERTISER_ID")),
-            "ADVERTISER_NAME": r.get("COMP_NAME") or f"Advertiser {r.get('ADVERTISER_ID')}",
+            "ADVERTISER_ID": adv_id,
+            "ADVERTISER_NAME": display_name,
             "REPORT_STATUS": r.get("REPORT_STATUS"),
             "PIXEL_ID": safe_int(r.get("PIXEL_ID")),
             "STORE_VISIT_ATTR_WINDOW": safe_int(r.get("STORE_VISIT_ATTR_WINDOW"), default=14),
@@ -817,6 +976,9 @@ def advertisers():
             "WEB_VISIT_RATE": wv_rate,
             "MIN_DATE": str(r.get("MIN_DATE", "")),
             "MAX_DATE": str(r.get("MAX_DATE", "")),
+            "HAS_STORE_ATTRIBUTION": has_store,
+            "HAS_WEB_ATTRIBUTION": has_web,
+            "CONFIG_STATUS": r.get("CONFIG_STATUS") or "NOT_CONFIGURED",
         })
 
     return v6_response(result)
@@ -837,21 +999,16 @@ def tab_availability():
     start_date, end_date = parse_date_range()
     params = {"adv_id": advertiser_id, "start": str(start_date), "end": str(end_date)}
 
-    # Check each dimension in parallel-friendly queries
+    # Config flags determine store/web attribution capability
+    cfg = get_advertiser_config(advertiser_id)
+
+    # Check PERF_BY_* dimension availability (still query-based — these are fast)
     checks = execute_query(
         f"""
         SELECT
             (SELECT COUNT(*) FROM {T['PERF_PUB']}
              WHERE ADVERTISER_ID = %(adv_id)s AND LOG_DATE BETWEEN %(start)s AND %(end)s
              LIMIT 1) AS has_impressions,
-            (SELECT COUNT(*) FROM {T['HH_STORE']}
-             WHERE AD_IMPRESSION_ADVERTISER_ID = %(adv_id)s
-               AND STORE_VISIT_DATE BETWEEN %(start)s AND %(end)s
-             LIMIT 1) AS has_store_visits,
-            (SELECT COUNT(*) FROM {T['HH_WEB']}
-             WHERE AD_IMPRESSION_ADVERTISER_ID = %(adv_id)s
-               AND WEB_VISIT_DATE BETWEEN %(start)s AND %(end)s
-             LIMIT 1) AS has_web_visits,
             (SELECT COUNT(*) FROM {T['PERF_PUB']}
              WHERE ADVERTISER_ID = %(adv_id)s AND LOG_DATE BETWEEN %(start)s AND %(end)s
                AND PUBLISHER != ''
@@ -876,20 +1033,22 @@ def tab_availability():
     if not checks:
         checks = {}
 
-    has_sv = safe_int(checks.get("HAS_STORE_VISITS")) > 0
     has_imps = safe_int(checks.get("HAS_IMPRESSIONS")) > 0
+    has_sv = cfg["has_store"]
+    has_wv = cfg["has_web"]
 
     return v6_response({
         "ADVERTISER_ID": advertiser_id,
         "IMPRESSIONS": has_imps,
         "STORE_VISITS": has_sv,
-        "WEB_VISITS": safe_int(checks.get("HAS_WEB_VISITS")) > 0,
+        "WEB_VISITS": has_wv,
         "PUBLISHER": safe_int(checks.get("HAS_PUBLISHER")) > 0,
         "GEO": safe_int(checks.get("HAS_GEO")) > 0,
         "CREATIVE": safe_int(checks.get("HAS_CREATIVE")) > 0,
         "TRAFFIC": safe_int(checks.get("HAS_TRAFFIC")) > 0,
         "HOUSEHOLD": safe_int(checks.get("HAS_HOUSEHOLD")) > 0,
         "LIFT": has_sv and has_imps,
+        "CONFIG_STATUS": cfg["config_status"],
     })
 
 
@@ -903,7 +1062,7 @@ def summary():
     """Headline metrics for an advertiser.
 
     Returns: impressions, device_reach, household_reach, store_visits,
-    web_visits, visit_rate, total_page_views, date range.
+    web_visits, visit_rate, date range.
     """
     advertiser_id = get_advertiser_id()
     if advertiser_id is None:
@@ -919,7 +1078,6 @@ def summary():
             SUM(IMPRESSIONS) AS total_impressions,
             SUM(DEVICE_REACH) AS total_device_reach,
             SUM(HOUSEHOLD_REACH) AS total_hh_reach,
-            SUM(TOTAL_PAGE_VIEWS) AS total_page_views,
             COUNT(DISTINCT PLATFORM_NAME) AS platform_count,
             COUNT(DISTINCT IO_ID) AS campaign_count,
             COUNT(DISTINCT LI_ID) AS lineitem_count,
@@ -935,19 +1093,27 @@ def summary():
 
     impressions = safe_int(imp_row.get("TOTAL_IMPRESSIONS")) if imp_row else 0
 
-    # Panel reach: raw matched households from attribution tables
-    sv = get_store_visits_total(advertiser_id, start_date, end_date)
-    wv = get_web_visits_total(advertiser_id, start_date, end_date)
+    # Config-driven: only query attribution tables when configured
+    cfg = get_advertiser_config(advertiser_id)
+
+    sv_zero = {"total_visits": 0, "unique_households": 0}
+    wv_zero = {"total_visits": 0, "unique_households": 0}
+
+    sv = get_store_visits_total(advertiser_id, start_date, end_date) if cfg["has_store"] else sv_zero
+    wv = get_web_visits_total(advertiser_id, start_date, end_date) if cfg["has_web"] else wv_zero
 
     # Coverage multiplier with statistical significance
     cov = get_coverage_multiplier(advertiser_id, grain="ADVERTISER")
     multiplier = cov["multiplier"]
 
-    # Visits = panel_reach × multiplier (projected total)
+    # Store visits = panel_reach × multiplier (projected total)
+    # Web visits = raw count (multiplier NOT applied — web pixel captures
+    # the visit directly, so HH resolution gap doesn't cause undercounting
+    # the way it does for geofence-based store visits)
     store_panel = sv["total_visits"]
     web_panel = wv["total_visits"]
     store_visits = int(store_panel * multiplier)
-    web_visits = int(web_panel * multiplier)
+    web_visits = web_panel  # no multiplier for web visits
 
     # Visit rate = visits / impressions
     store_vr = safe_visit_rate(store_visits, impressions)
@@ -967,7 +1133,6 @@ def summary():
         "WEB_VISITS": web_visits,
         "WEB_VISIT_RATE": web_vr,
         "WEB_SIGNIFICANT": cov["is_significant"],
-        "TOTAL_PAGE_VIEWS": safe_int(imp_row.get("TOTAL_PAGE_VIEWS")) if imp_row else 0,
         "VISIT_RATE": store_vr,
         "MULTIPLIER": multiplier,
         "MULTIPLIER_CI_LOWER": cov["ci_lower"],
@@ -983,6 +1148,9 @@ def summary():
         "END_DATE": str(end_date),
         "DATA_START": str(imp_row.get("FIRST_DATE", "")) if imp_row else "",
         "DATA_END": str(imp_row.get("LAST_DATE", "")) if imp_row else "",
+        "HAS_STORE_ATTRIBUTION": cfg["has_store"],
+        "HAS_WEB_ATTRIBUTION": cfg["has_web"],
+        "CONFIG_STATUS": cfg["config_status"],
     })
 
 
@@ -1011,8 +1179,7 @@ def timeseries():
             LOG_DATE,
             SUM(IMPRESSIONS) AS impressions,
             SUM(DEVICE_REACH) AS device_reach,
-            SUM(HOUSEHOLD_REACH) AS hh_reach,
-            SUM(TOTAL_PAGE_VIEWS) AS page_views
+            SUM(HOUSEHOLD_REACH) AS hh_reach
         FROM {T['PERF_PUB']}
         WHERE ADVERTISER_ID = %(adv_id)s
           AND LOG_DATE BETWEEN %(start)s AND %(end)s
@@ -1022,13 +1189,14 @@ def timeseries():
         params,
     )
 
-    # Store visits by date
-    sv_by_date = get_store_visits_by_date(advertiser_id, start_date, end_date)
+    # Config-driven: only query attribution tables when configured
+    cfg = get_advertiser_config(advertiser_id)
 
-    # Web visits by date
-    wv_by_date = get_web_visits_by_date(advertiser_id, start_date, end_date)
+    sv_by_date = get_store_visits_by_date(advertiser_id, start_date, end_date) if cfg["has_store"] else {}
+    wv_by_date = get_web_visits_by_date(advertiser_id, start_date, end_date) if cfg["has_web"] else {}
 
-    multiplier = get_coverage_multiplier(advertiser_id)
+    cov = get_coverage_multiplier(advertiser_id)
+    multiplier = cov["multiplier"]
 
     series = []
     for r in imp_rows:
@@ -1039,7 +1207,7 @@ def timeseries():
         visitors = safe_int(sv_day.get("visits"))
         web_v = safe_int(wv_day.get("visits"))
         svr = safe_visit_rate(visitors, imps, multiplier)
-        wvr = safe_visit_rate(web_v, imps, multiplier)
+        wvr = safe_visit_rate(web_v, imps)  # no multiplier for web visits
 
         series.append({
             "LOG_DATE": d,
@@ -1051,7 +1219,6 @@ def timeseries():
             "WEB_VISITS": web_v,
             "WEB_VISIT_RATE": wvr,
             "UNIQUE_HOUSEHOLDS": safe_int(sv_day.get("unique_hh")),
-            "PAGE_VIEWS": safe_int(r.get("PAGE_VIEWS")),
             "VISIT_RATE": svr,
         })
 
@@ -1078,47 +1245,68 @@ def campaign_performance():
     params = {"adv_id": advertiser_id, "start": str(start_date), "end": str(end_date)}
 
     # Aggregate impressions by IO from PERF_BY_PUBLISHER
+    # GROUP BY IO_ID only — IO_NAME has encoding variants that create duplicate rows
     imp_rows = execute_query(
         f"""
         SELECT
             IO_ID,
-            IO_NAME,
-            PLATFORM_NAME,
+            MAX(IO_NAME) AS IO_NAME,
+            MAX(PLATFORM_NAME) AS PLATFORM_NAME,
             SUM(IMPRESSIONS) AS impressions,
             SUM(DEVICE_REACH) AS device_reach,
             SUM(HOUSEHOLD_REACH) AS hh_reach,
             SUM(VISITORS) AS visitors,
             SUM(WEB_VISITORS) AS web_visitors,
-            SUM(TOTAL_PAGE_VIEWS) AS page_views,
             MIN(LOG_DATE) AS first_date,
             MAX(LOG_DATE) AS last_date
         FROM {T['PERF_PUB']}
         WHERE ADVERTISER_ID = %(adv_id)s
           AND LOG_DATE BETWEEN %(start)s AND %(end)s
-        GROUP BY IO_ID, IO_NAME, PLATFORM_NAME
+        GROUP BY IO_ID
         ORDER BY impressions DESC
         """,
         params,
     )
 
-    # Panel reach by campaign (from HH attribution)
-    sv_by_io = get_store_visits_by_campaign(advertiser_id, start_date, end_date)
-    wv_by_io = get_web_visits_by_campaign(advertiser_id, start_date, end_date)
+    # Config-driven: only query HH attribution fallback when configured
+    cfg = get_advertiser_config(advertiser_id)
+    sv_by_io = get_store_visits_by_campaign(advertiser_id, start_date, end_date) if cfg["has_store"] else {}
+    wv_by_io = get_web_visits_by_campaign(advertiser_id, start_date, end_date) if cfg["has_web"] else {}
 
     campaigns = []
     for r in imp_rows:
         io_id = str(r.get("IO_ID", ""))
         imps = safe_int(r.get("IMPRESSIONS"))
+
+        # PERF_BY pre-enriched values (Layer 2) — use when available
+        perf_store = safe_int(r.get("VISITORS"))
+        perf_web = safe_int(r.get("WEB_VISITORS"))
+
+        # HH attribution fallback for IOs where PERF_BY enrichment = 0
         sv = sv_by_io.get(io_id, {})
         wv = wv_by_io.get(io_id, {})
-        store_panel = safe_int(sv.get("visits"))
-        web_panel = safe_int(wv.get("visits"))
 
         # Campaign-grain multiplier with fallback to advertiser
         cov = get_coverage_multiplier(advertiser_id, grain="CAMPAIGN", grain_id=io_id)
         multiplier = cov["multiplier"]
-        store_visits = int(store_panel * multiplier)
-        web_visits = int(web_panel * multiplier)
+
+        # Store visits: prefer PERF_BY, fallback to HH attribution
+        if perf_store > 0:
+            store_panel = perf_store
+            store_visits = int(perf_store * multiplier)
+        else:
+            store_panel = safe_int(sv.get("visits"))
+            store_visits = int(store_panel * multiplier)
+
+        # Web visits: prefer PERF_BY, fallback to HH attribution
+        # No multiplier for web visits (pixel captures the visit directly)
+        if perf_web > 0:
+            web_panel = perf_web
+            web_visits = perf_web
+        else:
+            web_panel = safe_int(wv.get("visits"))
+            web_visits = web_panel
+
         svr = safe_visit_rate(store_visits, imps)
         wvr = safe_visit_rate(web_visits, imps)
 
@@ -1138,7 +1326,6 @@ def campaign_performance():
             "WEB_VISIT_RATE": wvr,
             "WEB_VR": wvr,
             "UNIQUE_HOUSEHOLDS": safe_int(sv.get("unique_hh")),
-            "PAGE_VIEWS": safe_int(r.get("PAGE_VIEWS")),
             "VISIT_RATE": svr,
             "MULTIPLIER": multiplier,
             "MULTIPLIER_SIGNIFICANT": cov["is_significant"],
@@ -1171,45 +1358,66 @@ def lineitem_performance():
         io_clause = "AND IO_ID = %(io_id)s"
         params["io_id"] = io_id_filter
 
+    # GROUP BY IO_ID + LI_ID only — name fields have encoding variants
     imp_rows = execute_query(
         f"""
         SELECT
-            IO_ID, IO_NAME, LI_ID, LI_NAME, PLATFORM_NAME,
+            IO_ID, MAX(IO_NAME) AS IO_NAME,
+            LI_ID, MAX(LI_NAME) AS LI_NAME,
+            MAX(PLATFORM_NAME) AS PLATFORM_NAME,
             SUM(IMPRESSIONS) AS impressions,
             SUM(DEVICE_REACH) AS device_reach,
             SUM(HOUSEHOLD_REACH) AS hh_reach,
             SUM(VISITORS) AS visitors,
             SUM(WEB_VISITORS) AS web_visitors,
-            SUM(TOTAL_PAGE_VIEWS) AS page_views,
             MIN(LOG_DATE) AS first_date,
             MAX(LOG_DATE) AS last_date
         FROM {T['PERF_PUB']}
         WHERE ADVERTISER_ID = %(adv_id)s
           AND LOG_DATE BETWEEN %(start)s AND %(end)s
           {io_clause}
-        GROUP BY IO_ID, IO_NAME, LI_ID, LI_NAME, PLATFORM_NAME
+        GROUP BY IO_ID, LI_ID
         ORDER BY impressions DESC
         """,
         params,
     )
 
-    sv_by_li = get_store_visits_by_lineitem(advertiser_id, start_date, end_date)
-    wv_by_li = get_web_visits_by_lineitem(advertiser_id, start_date, end_date)
+    cfg = get_advertiser_config(advertiser_id)
+    sv_by_li = get_store_visits_by_lineitem(advertiser_id, start_date, end_date) if cfg["has_store"] else {}
+    wv_by_li = get_web_visits_by_lineitem(advertiser_id, start_date, end_date) if cfg["has_web"] else {}
 
     lineitems = []
     for r in imp_rows:
         li_id = str(r.get("LI_ID", ""))
         imps = safe_int(r.get("IMPRESSIONS"))
+
+        # PERF_BY pre-enriched values (Layer 2) — use when available
+        perf_store = safe_int(r.get("VISITORS"))
+        perf_web = safe_int(r.get("WEB_VISITORS"))
+
+        # HH attribution fallback
         sv = sv_by_li.get(li_id, {})
         wv = wv_by_li.get(li_id, {})
-        store_panel = safe_int(sv.get("visits"))
-        web_panel = safe_int(wv.get("visits"))
 
         # Line-item grain multiplier with fallback to campaign → advertiser
         cov = get_coverage_multiplier(advertiser_id, grain="LINE_ITEM", grain_id=li_id)
         multiplier = cov["multiplier"]
-        store_visits = int(store_panel * multiplier)
-        web_visits = int(web_panel * multiplier)
+
+        if perf_store > 0:
+            store_panel = perf_store
+            store_visits = int(perf_store * multiplier)
+        else:
+            store_panel = safe_int(sv.get("visits"))
+            store_visits = int(store_panel * multiplier)
+
+        # No multiplier for web visits (pixel captures the visit directly)
+        if perf_web > 0:
+            web_panel = perf_web
+            web_visits = perf_web
+        else:
+            web_panel = safe_int(wv.get("visits"))
+            web_visits = web_panel
+
         svr = safe_visit_rate(store_visits, imps)
         wvr = safe_visit_rate(web_visits, imps)
 
@@ -1234,7 +1442,6 @@ def lineitem_performance():
             "WEB_VISIT_RATE": wvr,
             "WEB_VR": wvr,
             "UNIQUE_HOUSEHOLDS": safe_int(sv.get("unique_hh")),
-            "PAGE_VIEWS": safe_int(r.get("PAGE_VIEWS")),
             "VISIT_RATE": svr,
             "MULTIPLIER": multiplier,
             "MULTIPLIER_SIGNIFICANT": cov["is_significant"],
@@ -1260,52 +1467,72 @@ def creative_performance():
     start_date, end_date = parse_date_range()
     params = {"adv_id": advertiser_id, "start": str(start_date), "end": str(end_date)}
 
+    # GROUP BY ID fields only — name fields have encoding variants
     rows = execute_query(
         f"""
         SELECT
-            CREATIVE_ID, CREATIVE_NAME, CREATIVE_SIZE,
-            IO_ID, IO_NAME, LI_ID, LI_NAME, PLATFORM_NAME,
+            CREATIVE_ID, MAX(CREATIVE_NAME) AS CREATIVE_NAME,
+            MAX(CREATIVE_SIZE) AS CREATIVE_SIZE,
+            IO_ID, MAX(IO_NAME) AS IO_NAME,
+            LI_ID, MAX(LI_NAME) AS LI_NAME,
+            MAX(PLATFORM_NAME) AS PLATFORM_NAME,
             SUM(IMPRESSIONS) AS impressions,
             SUM(DEVICE_REACH) AS device_reach,
             SUM(HOUSEHOLD_REACH) AS hh_reach,
             SUM(VISITORS) AS visitors,
-            SUM(WEB_VISITORS) AS web_visitors,
-            SUM(TOTAL_PAGE_VIEWS) AS page_views
+            SUM(WEB_VISITORS) AS web_visitors
         FROM {T['PERF_CREATIVE']}
         WHERE ADVERTISER_ID = %(adv_id)s
           AND LOG_DATE BETWEEN %(start)s AND %(end)s
-        GROUP BY CREATIVE_ID, CREATIVE_NAME, CREATIVE_SIZE,
-                 IO_ID, IO_NAME, LI_ID, LI_NAME, PLATFORM_NAME
+        GROUP BY CREATIVE_ID, IO_ID, LI_ID
         ORDER BY impressions DESC
         """,
         params,
     )
 
-    sv_by_cr = get_store_visits_by_creative(advertiser_id, start_date, end_date)
-    wv_by_cr = get_web_visits_by_creative(advertiser_id, start_date, end_date)
-    multiplier = get_coverage_multiplier(advertiser_id)
+    cfg = get_advertiser_config(advertiser_id)
+    sv_by_cr = get_store_visits_by_creative(advertiser_id, start_date, end_date) if cfg["has_store"] else {}
+    wv_by_cr = get_web_visits_by_creative(advertiser_id, start_date, end_date) if cfg["has_web"] else {}
+    cov = get_coverage_multiplier(advertiser_id)
+    multiplier = cov["multiplier"]
 
     creatives = []
     for r in rows:
         cr_id = str(r.get("CREATIVE_ID", ""))
         io_id = str(r.get("IO_ID", ""))
         imps = safe_int(r.get("IMPRESSIONS"))
+
+        # PERF_BY pre-enriched values — use when available
+        perf_store = safe_int(r.get("VISITORS"))
+        perf_web = safe_int(r.get("WEB_VISITORS"))
+
+        # HH attribution fallback
         sv = sv_by_cr.get((cr_id, io_id), {})
         wv = wv_by_cr.get((cr_id, io_id), {})
-        store_panel = safe_int(sv.get("visits"))
-        web_panel = safe_int(wv.get("visits"))
-        store_visits = int(store_panel * multiplier)
-        web_visits = int(web_panel * multiplier)
+
+        if perf_store > 0:
+            store_panel = perf_store
+            store_visits = int(perf_store * multiplier)
+        else:
+            store_panel = safe_int(sv.get("visits"))
+            store_visits = int(store_panel * multiplier)
+
+        # No multiplier for web visits (pixel captures the visit directly)
+        if perf_web > 0:
+            web_panel = perf_web
+            web_visits = perf_web
+        else:
+            web_panel = safe_int(wv.get("visits"))
+            web_visits = web_panel
+
         svr = safe_visit_rate(store_visits, imps)
 
-        page_views = safe_int(r.get("PAGE_VIEWS"))
         hh_reach = safe_int(r.get("HH_REACH"))
-        avg_pages = round(page_views / hh_reach, 2) if hh_reach > 0 else None
         creatives.append({
             "CREATIVE_ID": cr_id,
             "CREATIVE_NAME": r.get("CREATIVE_NAME") or f"Creative {cr_id}",
             "CREATIVE_SIZE": r.get("CREATIVE_SIZE"),
-            "IO_ID": str(r.get("IO_ID", "")),
+            "IO_ID": io_id,
             "IO_NAME": r.get("IO_NAME") or "",
             "LI_ID": str(r.get("LI_ID", "")),
             "LI_NAME": r.get("LI_NAME") or "",
@@ -1316,8 +1543,6 @@ def creative_performance():
             "STORE_VISITS": store_visits,
             "STORE_VISIT_RATE": svr,
             "WEB_VISITS": web_visits,
-            "PAGE_VIEWS": page_views,
-            "AVG_PAGES_PER_VISITOR": avg_pages,
             "VISIT_RATE": svr,
         })
 
@@ -1354,8 +1579,7 @@ def publisher_performance():
             SUM(DEVICE_REACH) AS device_reach,
             SUM(HOUSEHOLD_REACH) AS hh_reach,
             SUM(VISITORS) AS visitors,
-            SUM(WEB_VISITORS) AS web_visitors,
-            SUM(TOTAL_PAGE_VIEWS) AS page_views
+            SUM(WEB_VISITORS) AS web_visitors
         FROM {T['PERF_PUB']}
         WHERE ADVERTISER_ID = %(adv_id)s
           AND LOG_DATE BETWEEN %(start)s AND %(end)s
@@ -1366,7 +1590,8 @@ def publisher_performance():
         params,
     )
 
-    multiplier = get_coverage_multiplier(advertiser_id)
+    cov = get_coverage_multiplier(advertiser_id)
+    multiplier = cov["multiplier"]
 
     publishers = []
     for r in rows:
@@ -1383,7 +1608,6 @@ def publisher_performance():
             "STORE_VISITS": visitors,
             "STORE_VISIT_RATE": svr,
             "WEB_VISITS": web_v,
-            "PAGE_VIEWS": safe_int(r.get("PAGE_VIEWS")),
             "VISIT_RATE": svr,
         })
 
@@ -1414,8 +1638,7 @@ def zip_performance():
             SUM(DEVICE_REACH) AS device_reach,
             SUM(HOUSEHOLD_REACH) AS hh_reach,
             SUM(VISITORS) AS visitors,
-            SUM(WEB_VISITORS) AS web_visitors,
-            SUM(TOTAL_PAGE_VIEWS) AS page_views
+            SUM(WEB_VISITORS) AS web_visitors
         FROM {T['PERF_GEO']}
         WHERE ADVERTISER_ID = %(adv_id)s
           AND LOG_DATE BETWEEN %(start)s AND %(end)s
@@ -1427,7 +1650,8 @@ def zip_performance():
         params,
     )
 
-    multiplier = get_coverage_multiplier(advertiser_id)
+    cov = get_coverage_multiplier(advertiser_id)
+    multiplier = cov["multiplier"]
 
     zips = []
     for r in rows:
@@ -1445,7 +1669,6 @@ def zip_performance():
             "STORE_VISITS": visitors,
             "STORE_VISIT_RATE": svr,
             "WEB_VISITS": safe_int(r.get("WEB_VISITORS")),
-            "PAGE_VIEWS": safe_int(r.get("PAGE_VIEWS")),
             "VISIT_RATE": svr,
         })
 
@@ -1474,19 +1697,20 @@ def dma_performance():
             SUM(DEVICE_REACH) AS device_reach,
             SUM(HOUSEHOLD_REACH) AS hh_reach,
             SUM(VISITORS) AS visitors,
-            SUM(WEB_VISITORS) AS web_visitors,
-            SUM(TOTAL_PAGE_VIEWS) AS page_views
+            SUM(WEB_VISITORS) AS web_visitors
         FROM {T['PERF_GEO']}
         WHERE ADVERTISER_ID = %(adv_id)s
           AND LOG_DATE BETWEEN %(start)s AND %(end)s
           AND DMA != ''
+          AND DMA != '0'
         GROUP BY DMA
         ORDER BY impressions DESC
         """,
         params,
     )
 
-    multiplier = get_coverage_multiplier(advertiser_id)
+    cov = get_coverage_multiplier(advertiser_id)
+    multiplier = cov["multiplier"]
 
     dmas = []
     for r in rows:
@@ -1502,7 +1726,6 @@ def dma_performance():
             "STORE_VISITS": visitors,
             "STORE_VISIT_RATE": svr,
             "WEB_VISITS": safe_int(r.get("WEB_VISITORS")),
-            "PAGE_VIEWS": safe_int(r.get("PAGE_VIEWS")),
             "VISIT_RATE": svr,
         })
 
@@ -1669,7 +1892,6 @@ def traffic_sources():
             SUM(HOUSEHOLD_REACH) AS hh_reach,
             SUM(VISITORS) AS visitors,
             SUM(WEB_VISITORS) AS web_visitors,
-            SUM(TOTAL_PAGE_VIEWS) AS page_views,
             COUNT(DISTINCT URL) AS unique_urls
         FROM {T['PERF_TRAFFIC']}
         WHERE ADVERTISER_ID = %(adv_id)s
@@ -1680,7 +1902,8 @@ def traffic_sources():
         params,
     )
 
-    multiplier = get_coverage_multiplier(advertiser_id)
+    cov = get_coverage_multiplier(advertiser_id)
+    multiplier = cov["multiplier"]
 
     # Compute total unique HH across all rows for VISIT_SHARE calculation
     total_unique_hh = sum(safe_int(r.get("HH_REACH")) for r in rows)
@@ -1694,7 +1917,6 @@ def traffic_sources():
         visitors = safe_int(r.get("VISITORS"))
         web_v = safe_int(r.get("WEB_VISITORS"))
         hh_reach = safe_int(r.get("HH_REACH"))
-        page_views = safe_int(r.get("PAGE_VIEWS"))
         svr = safe_visit_rate(visitors, imps, multiplier)
         url_type = r.get("URL_TYPE") or "other"
 
@@ -1723,7 +1945,6 @@ def traffic_sources():
             "STORE_VISITS": visitors,
             "STORE_VISIT_RATE": svr,
             "WEB_VISITS": web_v,
-            "PAGE_VIEWS": page_views,
             "UNIQUE_URLS": safe_int(r.get("UNIQUE_URLS")),
             "VISIT_RATE": svr,
             "CONVERSIONS": 0,
@@ -1814,14 +2035,6 @@ def agency_timeseries():
     else:
         # All-agencies mode: return nested dict for stacked bar chart
         # Shape: { "data": { "2026-02-01": { "123": 500000, ... }, ... }, "agencies": { "123": "Causal", ... } }
-        AGENCY_NAMES = {
-            1202: "LotLinx",
-            1480: "Paramount",
-            1813: "Causal",
-            1445: "Lorem Tristique Aliquet",
-            1880: "UNIDENTIFIED (Adelphic + DCM/GAM)",
-            1697: "UNIDENTIFIED (Adelphic)",
-        }
         data = {}
         for r in rows:
             dt_str = str(r["LOG_DATE"])
@@ -1835,7 +2048,7 @@ def agency_timeseries():
         for date_map in data.values():
             for aid in date_map:
                 if aid not in agencies:
-                    agencies[aid] = AGENCY_NAMES.get(aid, f"Agency {aid}")
+                    agencies[aid] = resolve_agency_name(aid)
 
         return jsonify({"success": True, "data": data, "agencies": agencies})
 
@@ -1858,14 +2071,14 @@ def advertiser_timeseries():
         f"""
         SELECT
             p.ADVERTISER_ID,
-            COALESCE(aa.COMP_NAME, 'Advertiser ' || p.ADVERTISER_ID) AS adv_name,
+            COALESCE(REGEXP_REPLACE(aap.ADVERTISER_NAME, '^[^ ]+ - ', ''), 'Advertiser ' || p.ADVERTISER_ID) AS adv_name,
             p.LOG_DATE,
             SUM(p.IMPRESSIONS) AS impressions,
             SUM(p.VISITORS) AS visitors,
             SUM(p.WEB_VISITORS) AS web_visitors
         FROM {T['PERF_PUB']} p
-        LEFT JOIN {T['AGENCY_ADV']} aa
-            ON p.ADVERTISER_ID = aa.ADVERTISER_ID AND aa.EXTERNAL_ID = %(agency_id)s
+        LEFT JOIN {T['AAP']} aap
+            ON p.ADVERTISER_ID = aap.ADVERTISER_ID
         WHERE p.AGENCY_ID = %(agency_id)s
           AND p.LOG_DATE BETWEEN %(start)s AND %(end)s
         GROUP BY p.ADVERTISER_ID, adv_name, p.LOG_DATE
@@ -2036,7 +2249,7 @@ def optimize_geo():
             {vr_web} AS WEB_VR, {vr_store} AS STORE_VR
         FROM {T['PERF_GEO']}
         {geo_filter}
-          AND DMA IS NOT NULL AND DMA != ''
+          AND DMA IS NOT NULL AND DMA != '' AND DMA != '0'
         GROUP BY DMA
         HAVING SUM(IMPRESSIONS) >= 500
 
@@ -2080,43 +2293,55 @@ def pipeline_health():
     Returns status per table: last update timestamp, row count,
     and staleness flag (>24h = stale).
     """
+    # Per-table column map: (display_name, fqn, freshness_col, range_col)
+    # freshness_col = column to check for "when was this table last updated"
+    # range_col = column for min/max date range (None if not applicable)
     tables_to_check = [
-        ("PERF_BY_PUBLISHER", T["PERF_PUB"]),
-        ("PERF_BY_GEO", T["PERF_GEO"]),
-        ("PERF_BY_TRAFFIC", T["PERF_TRAFFIC"]),
-        ("PERF_BY_CREATIVE", T["PERF_CREATIVE"]),
-        ("PERF_BY_HOUSEHOLD", T["PERF_HH"]),
-        ("HH_STORE_VISIT_ATTRIBUTION", T["HH_STORE"]),
-        ("HH_WEB_VISIT_ATTRIBUTION", T["HH_WEB"]),
-        ("WEBPIXEL_EVENTS", T["WEBPIXEL"]),
-        ("AD_IMPRESSION_LOG_V2", T["IMP_LOG"]),
-        ("PIXEL_CAMPAIGN_MAPPING_V2", T["PCM"]),
-        ("COVERAGE_MULTIPLIER_STATS", T["COVERAGE"]),
+        ("PERF_BY_PUBLISHER",          T["PERF_PUB"],     "CREATED_AT",          "LOG_DATE"),
+        ("PERF_BY_GEO",                T["PERF_GEO"],     "CREATED_AT",          "LOG_DATE"),
+        ("PERF_BY_TRAFFIC",            T["PERF_TRAFFIC"],  "CREATED_AT",          "LOG_DATE"),
+        ("PERF_BY_CREATIVE",           T["PERF_CREATIVE"], "CREATED_AT",          "LOG_DATE"),
+        ("PERF_BY_HOUSEHOLD",          T["PERF_HH"],      "CREATED_AT",          "LOG_DATE"),
+        ("HH_STORE_VISIT_ATTRIBUTION", T["HH_STORE"],     "INSERTED_AT",         "STORE_VISIT_DATE"),
+        ("HH_WEB_VISIT_ATTRIBUTION",   T["HH_WEB"],       "INSERTED_AT",         "WEB_VISIT_DATE"),
+        ("WEBPIXEL_EVENTS",            T["WEBPIXEL"],      "EVENT_TIMESTAMP",     "EVENT_TIMESTAMP"),
+        ("AD_IMPRESSION_LOG_V2",       T["IMP_LOG"],       "INGESTION_TIMESTAMP", "INGESTION_TIMESTAMP"),
+        ("PIXEL_CAMPAIGN_MAPPING_V2",  T["PCM"],           "CREATED_AT",          "CREATED_AT"),
+        ("COVERAGE_MULTIPLIER_STATS",  T["COVERAGE"],      "COMPUTED_AT",         "COMPUTED_AT"),
     ]
 
     results = []
-    for name, fqn in tables_to_check:
+    for name, fqn, freshness_col, range_col in tables_to_check:
         try:
+            # Build query using the correct columns for each table
+            range_select = ""
+            if range_col and range_col != freshness_col:
+                range_select = f", MAX({range_col}) AS max_date, MIN({range_col}) AS min_date"
+            elif range_col:
+                range_select = f", MAX({range_col}) AS max_date, MIN({range_col}) AS min_date"
+
             row = execute_query(
                 f"""
                 SELECT
                     COUNT(*) AS row_count,
-                    MAX(CREATED_AT) AS last_created,
-                    MAX(LOG_DATE) AS max_date,
-                    MIN(LOG_DATE) AS min_date
+                    MAX({freshness_col}) AS last_created
+                    {range_select}
                 FROM {fqn}
                 """,
                 fetch="one",
             )
             if row:
+                date_range = {}
+                if range_col:
+                    date_range = {
+                        "min": str(row.get("MIN_DATE", "")),
+                        "max": str(row.get("MAX_DATE", "")),
+                    }
                 results.append({
                     "table": name,
                     "row_count": safe_int(row.get("ROW_COUNT")),
                     "last_created": str(row.get("LAST_CREATED", "")),
-                    "date_range": {
-                        "min": str(row.get("MIN_DATE", "")),
-                        "max": str(row.get("MAX_DATE", "")),
-                    },
+                    "date_range": date_range,
                     "status": "ok",
                 })
             else:
@@ -2186,6 +2411,17 @@ def store_visit_detail():
         return api_error("advertiser_id is required")
 
     start_date, end_date = parse_date_range()
+
+    # Config-driven: skip if store visit attribution not configured
+    cfg = get_advertiser_config(advertiser_id)
+    if not cfg["has_store"]:
+        return v6_response({
+            "ADVERTISER_ID": advertiser_id,
+            "TOTAL_VISITS": 0,
+            "UNIQUE_HOUSEHOLDS": 0,
+            "BRANDS": [],
+            "HAS_STORE_ATTRIBUTION": False,
+        })
 
     brands = get_store_visits_by_brand(advertiser_id, start_date, end_date)
     totals = get_store_visits_total(advertiser_id, start_date, end_date)
