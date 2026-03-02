@@ -1107,13 +1107,13 @@ def summary():
     multiplier = cov["multiplier"]
 
     # Store visits = panel_reach × multiplier (projected total)
-    # Web visits = raw count (multiplier NOT applied — web pixel captures
-    # the visit directly, so HH resolution gap doesn't cause undercounting
-    # the way it does for geofence-based store visits)
+    # Both store and web visits are HH-matched counts — multiplier scales
+    # them up to estimate total visits across all impressions (not just
+    # those we could resolve to households).
     store_panel = sv["total_visits"]
     web_panel = wv["total_visits"]
     store_visits = int(store_panel * multiplier)
-    web_visits = web_panel  # no multiplier for web visits
+    web_visits = int(web_panel * multiplier)
 
     # Visit rate = visits / impressions
     store_vr = safe_visit_rate(store_visits, impressions)
@@ -1207,7 +1207,7 @@ def timeseries():
         visitors = safe_int(sv_day.get("visits"))
         web_v = safe_int(wv_day.get("visits"))
         svr = safe_visit_rate(visitors, imps, multiplier)
-        wvr = safe_visit_rate(web_v, imps)  # no multiplier for web visits
+        wvr = safe_visit_rate(web_v, imps, multiplier)
 
         series.append({
             "LOG_DATE": d,
@@ -1299,13 +1299,13 @@ def campaign_performance():
             store_visits = int(store_panel * multiplier)
 
         # Web visits: prefer PERF_BY, fallback to HH attribution
-        # No multiplier for web visits (pixel captures the visit directly)
+        # Multiplier applied same as store visits (HH resolution scaling)
         if perf_web > 0:
             web_panel = perf_web
-            web_visits = perf_web
+            web_visits = int(perf_web * multiplier)
         else:
             web_panel = safe_int(wv.get("visits"))
-            web_visits = web_panel
+            web_visits = int(web_panel * multiplier)
 
         svr = safe_visit_rate(store_visits, imps)
         wvr = safe_visit_rate(web_visits, imps)
@@ -1410,13 +1410,13 @@ def lineitem_performance():
             store_panel = safe_int(sv.get("visits"))
             store_visits = int(store_panel * multiplier)
 
-        # No multiplier for web visits (pixel captures the visit directly)
+        # Multiplier applied same as store visits (HH resolution scaling)
         if perf_web > 0:
             web_panel = perf_web
-            web_visits = perf_web
+            web_visits = int(perf_web * multiplier)
         else:
             web_panel = safe_int(wv.get("visits"))
-            web_visits = web_panel
+            web_visits = int(web_panel * multiplier)
 
         svr = safe_visit_rate(store_visits, imps)
         wvr = safe_visit_rate(web_visits, imps)
