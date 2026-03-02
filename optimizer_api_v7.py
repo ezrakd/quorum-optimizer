@@ -1517,15 +1517,16 @@ def creative_performance():
             store_panel = safe_int(sv.get("visits"))
             store_visits = int(store_panel * multiplier)
 
-        # No multiplier for web visits (pixel captures the visit directly)
+        # Multiplier applied same as store visits (HH resolution scaling)
         if perf_web > 0:
             web_panel = perf_web
-            web_visits = perf_web
+            web_visits = int(perf_web * multiplier)
         else:
             web_panel = safe_int(wv.get("visits"))
-            web_visits = web_panel
+            web_visits = int(web_panel * multiplier)
 
         svr = safe_visit_rate(store_visits, imps)
+        wvr = safe_visit_rate(web_visits, imps)
 
         hh_reach = safe_int(r.get("HH_REACH"))
         creatives.append({
@@ -1542,8 +1543,12 @@ def creative_performance():
             "HOUSEHOLD_REACH": hh_reach,
             "STORE_VISITS": store_visits,
             "STORE_VISIT_RATE": svr,
+            "STORE_VR": svr,
             "WEB_VISITS": web_visits,
+            "WEB_VISIT_RATE": wvr,
+            "WEB_VR": wvr,
             "VISIT_RATE": svr,
+            "MULTIPLIER": multiplier,
         })
 
     return v6_response(creatives)
