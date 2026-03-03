@@ -2410,7 +2410,7 @@
         
         // Init
         // Check API version on startup
-        fetch(API + '/health').then(r => r.json()).then(h => {
+        fetch(API + '/api/v7/health').then(r => r.json()).then(h => {
             console.log('[API Health]', h);
             const el = document.querySelector('.version');
             if (el) el.textContent = `API: ${h.version || 'unknown'}`;
