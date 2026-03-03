@@ -141,12 +141,12 @@ def auth_me():
 # ---------------------------------------------------------------------------
 @app.route('/')
 def index():
-    return app.send_static_file('optimizer_v6.html')
+    return app.send_static_file('optimizer_v7.html')
 
 
 @app.route('/optimizer')
 def optimizer_page():
-    return app.send_static_file('optimizer_v6.html')
+    return app.send_static_file('optimizer_v7.html')
 
 
 @app.route('/v7')
