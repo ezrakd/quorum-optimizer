@@ -1206,6 +1206,9 @@ def timeseries():
         wv_day = wv_by_date.get(d, {})
         visitors = safe_int(sv_day.get("visits"))
         web_v = safe_int(wv_day.get("visits"))
+        # Apply coverage multiplier to visit counts (same as campaign-performance)
+        store_visits = int(visitors * multiplier) if visitors > 0 else 0
+        web_visits = int(web_v * multiplier) if web_v > 0 else 0
         svr = safe_visit_rate(visitors, imps, multiplier)
         wvr = safe_visit_rate(web_v, imps, multiplier)
 
@@ -1214,9 +1217,9 @@ def timeseries():
             "IMPRESSIONS": imps,
             "DEVICE_REACH": safe_int(r.get("DEVICE_REACH")),
             "HOUSEHOLD_REACH": safe_int(r.get("HH_REACH")),
-            "STORE_VISITS": visitors,
+            "STORE_VISITS": store_visits,
             "STORE_VISIT_RATE": svr,
-            "WEB_VISITS": web_v,
+            "WEB_VISITS": web_visits,
             "WEB_VISIT_RATE": wvr,
             "UNIQUE_HOUSEHOLDS": safe_int(sv_day.get("unique_hh")),
             "VISIT_RATE": svr,
@@ -1603,6 +1606,9 @@ def publisher_performance():
         imps = safe_int(r.get("IMPRESSIONS"))
         visitors = safe_int(r.get("VISITORS"))
         web_v = safe_int(r.get("WEB_VISITORS"))
+        # Apply coverage multiplier to visit counts (same as campaign-performance)
+        store_visits = int(visitors * multiplier) if visitors > 0 else 0
+        web_visits = int(web_v * multiplier) if web_v > 0 else 0
         svr = safe_visit_rate(visitors, imps, multiplier)
         publishers.append({
             "PUBLISHER": r.get("GROUP_VALUE") or "(unknown)",
@@ -1610,9 +1616,9 @@ def publisher_performance():
             "IMPRESSIONS": imps,
             "DEVICE_REACH": safe_int(r.get("DEVICE_REACH")),
             "HOUSEHOLD_REACH": safe_int(r.get("HH_REACH")),
-            "STORE_VISITS": visitors,
+            "STORE_VISITS": store_visits,
             "STORE_VISIT_RATE": svr,
-            "WEB_VISITS": web_v,
+            "WEB_VISITS": web_visits,
             "VISIT_RATE": svr,
         })
 
@@ -1662,6 +1668,10 @@ def zip_performance():
     for r in rows:
         imps = safe_int(r.get("IMPRESSIONS"))
         visitors = safe_int(r.get("VISITORS"))
+        web_v = safe_int(r.get("WEB_VISITORS"))
+        # Apply coverage multiplier to visit counts (same as campaign-performance)
+        store_visits = int(visitors * multiplier) if visitors > 0 else 0
+        web_visits = int(web_v * multiplier) if web_v > 0 else 0
         svr = safe_visit_rate(visitors, imps, multiplier)
         dma_val = r.get("DMA") or ""
         zips.append({
@@ -1671,9 +1681,9 @@ def zip_performance():
             "IMPRESSIONS": imps,
             "DEVICE_REACH": safe_int(r.get("DEVICE_REACH")),
             "HOUSEHOLD_REACH": safe_int(r.get("HH_REACH")),
-            "STORE_VISITS": visitors,
+            "STORE_VISITS": store_visits,
             "STORE_VISIT_RATE": svr,
-            "WEB_VISITS": safe_int(r.get("WEB_VISITORS")),
+            "WEB_VISITS": web_visits,
             "VISIT_RATE": svr,
         })
 
@@ -1721,6 +1731,10 @@ def dma_performance():
     for r in rows:
         imps = safe_int(r.get("IMPRESSIONS"))
         visitors = safe_int(r.get("VISITORS"))
+        web_v = safe_int(r.get("WEB_VISITORS"))
+        # Apply coverage multiplier to visit counts (same as campaign-performance)
+        store_visits = int(visitors * multiplier) if visitors > 0 else 0
+        web_visits = int(web_v * multiplier) if web_v > 0 else 0
         svr = safe_visit_rate(visitors, imps, multiplier)
         dmas.append({
             "DMA": r.get("DMA"),
@@ -1728,9 +1742,9 @@ def dma_performance():
             "IMPRESSIONS": imps,
             "DEVICE_REACH": safe_int(r.get("DEVICE_REACH")),
             "HOUSEHOLD_REACH": safe_int(r.get("HH_REACH")),
-            "STORE_VISITS": visitors,
+            "STORE_VISITS": store_visits,
             "STORE_VISIT_RATE": svr,
-            "WEB_VISITS": safe_int(r.get("WEB_VISITORS")),
+            "WEB_VISITS": web_visits,
             "VISIT_RATE": svr,
         })
 
@@ -1766,12 +1780,12 @@ def lift_analysis():
         f"""
         WITH exposed_hh AS (
             -- Households that were exposed to ads for this advertiser
-            SELECT DISTINCT HOUSEHOLD_ID_H3 AS hh_id
+            SELECT DISTINCT HOUSEHOLD_ID_CORE AS hh_id
             FROM {T['IMP_LOG']}
             WHERE ADVERTISER_ID = %(adv_id)s
               AND LOG_DATE BETWEEN %(start)s AND %(end)s
-              AND HOUSEHOLD_ID_H3 IS NOT NULL
-              AND HOUSEHOLD_ID_H3 > 0
+              AND HOUSEHOLD_ID_CORE IS NOT NULL
+              AND HOUSEHOLD_ID_CORE > 0
         ),
         store_visit_hh AS (
             -- Households that visited stores (HH-resolved, last-touch)
@@ -1926,7 +1940,10 @@ def traffic_sources():
         url_type = r.get("URL_TYPE") or "other"
 
         # Derived fields the HTML expects
-        unique_visits = visitors  # total visit events
+        # Apply coverage multiplier to visit counts (same as campaign-performance)
+        store_visits = int(visitors * multiplier) if visitors > 0 else 0
+        web_visits = int(web_v * multiplier) if web_v > 0 else 0
+        unique_visits = store_visits  # total visit events (multiplied)
         unique_hh = hh_reach     # unique households
         daily_visitors = round(unique_hh / date_span) if date_span > 0 else 0
         visits_per_hh = round(unique_visits / unique_hh, 1) if unique_hh > 0 else 0
@@ -1947,9 +1964,9 @@ def traffic_sources():
             "VISITS_PER_HH": visits_per_hh,
             "VISIT_SHARE": visit_share,
             "AVG_DAYS_TO_VISIT": avg_days_to_visit,
-            "STORE_VISITS": visitors,
+            "STORE_VISITS": store_visits,
             "STORE_VISIT_RATE": svr,
-            "WEB_VISITS": web_v,
+            "WEB_VISITS": web_visits,
             "UNIQUE_URLS": safe_int(r.get("UNIQUE_URLS")),
             "VISIT_RATE": svr,
             "CONVERSIONS": 0,
