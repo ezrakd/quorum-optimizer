@@ -45,7 +45,7 @@ app.register_blueprint(v7_bp)
 # Global before_request hook — enforces auth on all API routes
 # ---------------------------------------------------------------------------
 # Routes that do NOT require authentication
-PUBLIC_PATHS = {'/login', '/health', '/api/auth/config'}
+PUBLIC_PATHS = {'/login', '/health', '/api/v7/health', '/api/auth/config'}
 
 
 @app.before_request
