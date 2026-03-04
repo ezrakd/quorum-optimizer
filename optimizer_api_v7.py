@@ -61,6 +61,7 @@ import json
 import logging
 from datetime import datetime, timedelta
 from functools import wraps
+from urllib.parse import unquote
 
 from flask import Flask, Blueprint, request, jsonify, g, current_app
 import snowflake.connector
@@ -134,6 +135,7 @@ T = {
     "REF_COL_DEF":    "QUORUMDB.BASE_TABLES.REF_COLUMN_DEFINITIONS",
     "PCM":            "QUORUMDB.REF_DATA.PIXEL_CAMPAIGN_MAPPING_V2",
     "ZIP_DMA":        "QUORUMDB.REF_DATA.ZIP_DMA_MAPPING",
+    "DMA_REF":        "QUORUMDB.APP_DB.QUORUM_APP_NEXUS_DMA",
 
     # Household core
     "IP_HH":          "QUORUMDB.HOUSEHOLD_CORE.IP_HOUSEHOLD_LOOKUP",
@@ -410,14 +412,97 @@ def get_coverage_multiplier(advertiser_id, grain=None, grain_id=None):
     return default
 
 
-def safe_visit_rate(visitors, impressions, multiplier=1.0):
-    """Canonical visit rate formula.
+def get_io_multiplier(advertiser_id, io_id, io_impressions):
+    """Compute IO-level multiplier with hybrid grain logic.
+
+    Strategy: use advertiser-level multiplier by default. But if ≥90% of
+    this IO's impressions come from line items with statistically significant
+    multipliers, upgrade to an impression-weighted average of LI-level
+    multipliers. This preserves KPI consistency (advertiser grain) while
+    allowing finer precision when there's enough confidence.
+
+    Returns dict matching get_coverage_multiplier() shape.
+    """
+    adv_cov = get_coverage_multiplier(advertiser_id, grain="ADVERTISER")
+
+    if not io_id or io_impressions < 1:
+        return adv_cov
+
+    cache_key = f"io_hybrid_{advertiser_id}_{io_id}"
+    if cache_key in _coverage_cache:
+        return _coverage_cache[cache_key]
+
+    try:
+        # Get all LI-level multipliers for this IO, with their impression shares
+        li_rows = execute_query(
+            f"""
+            SELECT cm.LI_ID, cm.COVERAGE_MULTIPLIER, cm.IS_SIGNIFICANT,
+                   cm.SAMPLE_SIZE,
+                   COALESCE(p.li_imps, 0) AS li_imps
+            FROM {T['COVERAGE']} cm
+            LEFT JOIN (
+                SELECT LI_ID, SUM(IMPRESSIONS) AS li_imps
+                FROM {T['PERF_PUB']}
+                WHERE ADVERTISER_ID = %(adv_id)s AND IO_ID = %(io_id)s
+                GROUP BY LI_ID
+            ) p ON p.LI_ID = cm.LI_ID
+            WHERE cm.ADVERTISER_ID = %(adv_id)s
+              AND cm.GRAIN = 'LINE_ITEM'
+              AND cm.IO_ID = %(io_id)s
+            """,
+            {"adv_id": advertiser_id, "io_id": io_id},
+        )
+
+        if not li_rows:
+            _coverage_cache[cache_key] = adv_cov
+            return adv_cov
+
+        total_imps = sum(safe_int(r.get("LI_IMPS")) for r in li_rows)
+        sig_imps = sum(safe_int(r.get("LI_IMPS")) for r in li_rows if r.get("IS_SIGNIFICANT"))
+
+        # Check 90% significance threshold
+        if total_imps > 0 and sig_imps / total_imps >= 0.90:
+            # Impression-weighted average of LI multipliers (sig ones only)
+            weighted_sum = sum(
+                safe_float(r.get("COVERAGE_MULTIPLIER"), 1.0) * safe_int(r.get("LI_IMPS"))
+                for r in li_rows if r.get("IS_SIGNIFICANT")
+            )
+            weighted_mult = weighted_sum / sig_imps if sig_imps > 0 else adv_cov["multiplier"]
+            result = {
+                "multiplier": round(weighted_mult, 4),
+                "is_significant": True,
+                "ci_lower": adv_cov["ci_lower"],
+                "ci_upper": adv_cov["ci_upper"],
+                "sample_size": total_imps,
+                "grain": "LI_WEIGHTED",
+                "hh_resolution_rate": adv_cov["hh_resolution_rate"],
+            }
+        else:
+            result = adv_cov
+
+        _coverage_cache[cache_key] = result
+        return result
+
+    except Exception as e:
+        logger.warning("IO hybrid multiplier failed for %s/%s: %s", advertiser_id, io_id, e)
+        _coverage_cache[cache_key] = adv_cov
+        return adv_cov
+
+
+def safe_visit_rate(visitors, impressions, multiplier=1.0, min_impressions=0):
+    """Canonical visit rate formula with cap.
 
     visit_rate = (visitors * multiplier) / impressions
+    Capped at 1.0 (100%). Rates above 100% indicate attribution window
+    mismatch and are not meaningful as a displayable rate.
+    If min_impressions > 0 and impressions < threshold, returns 0.0.
     """
     if not impressions or impressions == 0:
         return 0.0
-    return round((visitors * (multiplier or 1.0)) / impressions, 8)
+    if min_impressions > 0 and impressions < min_impressions:
+        return 0.0
+    rate = (visitors * (multiplier or 1.0)) / impressions
+    return round(min(rate, 1.0), 8)
 
 
 def safe_float(val, default=0.0):
@@ -438,6 +523,44 @@ def safe_int(val, default=0):
         return int(val)
     except (ValueError, TypeError):
         return default
+
+
+def decode_name(val):
+    """URL-decode a campaign/creative/line-item name.
+
+    Handles double-encoding (%2520 → %20 → space) by decoding up to 2 times.
+    FreeWheel and MNTN send URL-encoded names; Magnite/Causal are usually clean.
+    """
+    if not val or not isinstance(val, str):
+        return val or ""
+    result = unquote(val)
+    # Handle double-encoding: if %25 was in original, first pass turns it to %,
+    # second pass decodes the resulting %XX sequences
+    if "%" in result:
+        result = unquote(result)
+    return result
+
+
+_dma_cache = {}
+
+def resolve_dma_name(dma_code):
+    """Resolve a DMA code to a friendly name (e.g., '524' → 'Atlanta GA').
+
+    Uses QUORUM_APP_NEXUS_DMA lookup table, cached in memory.
+    Returns the code itself if no mapping found (e.g., FreeWheel-specific codes).
+    """
+    if not dma_code or dma_code in ("0", ""):
+        return ""
+    if not _dma_cache:
+        try:
+            rows = execute_query(
+                f"SELECT ID, NAME FROM {T['DMA_REF']} WHERE NAME IS NOT NULL"
+            )
+            for r in rows:
+                _dma_cache[str(r["ID"])] = r["NAME"]
+        except Exception:
+            pass  # Graceful degradation — return raw code
+    return _dma_cache.get(str(dma_code), str(dma_code))
 
 
 def api_error(message, status_code=400):
@@ -1289,8 +1412,9 @@ def campaign_performance():
         sv = sv_by_io.get(io_id, {})
         wv = wv_by_io.get(io_id, {})
 
-        # Campaign-grain multiplier with fallback to advertiser
-        cov = get_coverage_multiplier(advertiser_id, grain="CAMPAIGN", grain_id=io_id)
+        # Hybrid multiplier: advertiser grain default, upgrades to
+        # impression-weighted LI average when ≥90% of LIs are significant
+        cov = get_io_multiplier(advertiser_id, io_id, imps)
         multiplier = cov["multiplier"]
 
         # Store visits: prefer PERF_BY, fallback to HH attribution
@@ -1315,7 +1439,7 @@ def campaign_performance():
 
         campaigns.append({
             "IO_ID": io_id,
-            "IO_NAME": r.get("IO_NAME") or f"IO {io_id}",
+            "IO_NAME": decode_name(r.get("IO_NAME")) or f"IO {io_id}",
             "PLATFORM": r.get("PLATFORM_NAME"),
             "IMPRESSIONS": imps,
             "DEVICE_REACH": safe_int(r.get("DEVICE_REACH")),
@@ -1424,8 +1548,8 @@ def lineitem_performance():
         svr = safe_visit_rate(store_visits, imps)
         wvr = safe_visit_rate(web_visits, imps)
 
-        io_name = r.get("IO_NAME") or ""
-        li_name = r.get("LI_NAME") or f"LI {li_id}"
+        io_name = decode_name(r.get("IO_NAME")) or ""
+        li_name = decode_name(r.get("LI_NAME")) or f"LI {li_id}"
         lineitems.append({
             "IO_ID": str(r.get("IO_ID", "")),
             "IO_NAME": io_name,
@@ -1534,12 +1658,12 @@ def creative_performance():
         hh_reach = safe_int(r.get("HH_REACH"))
         creatives.append({
             "CREATIVE_ID": cr_id,
-            "CREATIVE_NAME": r.get("CREATIVE_NAME") or f"Creative {cr_id}",
+            "CREATIVE_NAME": decode_name(r.get("CREATIVE_NAME")) or f"Creative {cr_id}",
             "CREATIVE_SIZE": r.get("CREATIVE_SIZE"),
             "IO_ID": io_id,
-            "IO_NAME": r.get("IO_NAME") or "",
+            "IO_NAME": decode_name(r.get("IO_NAME")) or "",
             "LI_ID": str(r.get("LI_ID", "")),
-            "LI_NAME": r.get("LI_NAME") or "",
+            "LI_NAME": decode_name(r.get("LI_NAME")) or "",
             "PLATFORM": r.get("PLATFORM_NAME"),
             "IMPRESSIONS": imps,
             "DEVICE_REACH": safe_int(r.get("DEVICE_REACH")),
@@ -1610,16 +1734,25 @@ def publisher_performance():
         store_visits = int(visitors * multiplier) if visitors > 0 else 0
         web_visits = int(web_v * multiplier) if web_v > 0 else 0
         svr = safe_visit_rate(visitors, imps, multiplier)
+        wvr = safe_visit_rate(web_v, imps, multiplier)
+        raw_pub = r.get("GROUP_VALUE") or ""
+        pub_name = "(All Publishers)" if raw_pub in ("0", "") else raw_pub
         publishers.append({
-            "PUBLISHER": r.get("GROUP_VALUE") or "(unknown)",
-            "NAME": r.get("GROUP_VALUE") or "(unknown)",
+            "PUBLISHER": pub_name,
+            "NAME": pub_name,
             "IMPRESSIONS": imps,
             "DEVICE_REACH": safe_int(r.get("DEVICE_REACH")),
             "HOUSEHOLD_REACH": safe_int(r.get("HH_REACH")),
+            "STORE_PANEL_REACH": visitors,
             "STORE_VISITS": store_visits,
             "STORE_VISIT_RATE": svr,
+            "STORE_VR": svr,
+            "WEB_PANEL_REACH": web_v,
             "WEB_VISITS": web_visits,
+            "WEB_VISIT_RATE": wvr,
+            "WEB_VR": wvr,
             "VISIT_RATE": svr,
+            "MULTIPLIER": multiplier,
         })
 
     return v6_response(publishers)
@@ -1673,18 +1806,25 @@ def zip_performance():
         store_visits = int(visitors * multiplier) if visitors > 0 else 0
         web_visits = int(web_v * multiplier) if web_v > 0 else 0
         svr = safe_visit_rate(visitors, imps, multiplier)
+        wvr = safe_visit_rate(web_v, imps, multiplier)
         dma_val = r.get("DMA") or ""
         zips.append({
             "ZIP_CODE": r.get("ZIP"),
             "DMA": dma_val,
-            "DMA_NAME": dma_val,
+            "DMA_NAME": resolve_dma_name(dma_val),
             "IMPRESSIONS": imps,
             "DEVICE_REACH": safe_int(r.get("DEVICE_REACH")),
             "HOUSEHOLD_REACH": safe_int(r.get("HH_REACH")),
+            "STORE_PANEL_REACH": visitors,
             "STORE_VISITS": store_visits,
             "STORE_VISIT_RATE": svr,
+            "STORE_VR": svr,
+            "WEB_PANEL_REACH": web_v,
             "WEB_VISITS": web_visits,
+            "WEB_VISIT_RATE": wvr,
+            "WEB_VR": wvr,
             "VISIT_RATE": svr,
+            "MULTIPLIER": multiplier,
         })
 
     return v6_response(zips)
@@ -1736,16 +1876,23 @@ def dma_performance():
         store_visits = int(visitors * multiplier) if visitors > 0 else 0
         web_visits = int(web_v * multiplier) if web_v > 0 else 0
         svr = safe_visit_rate(visitors, imps, multiplier)
+        wvr = safe_visit_rate(web_v, imps, multiplier)
         dmas.append({
             "DMA": r.get("DMA"),
-            "DMA_NAME": r.get("DMA") or "",
+            "DMA_NAME": resolve_dma_name(r.get("DMA")),
             "IMPRESSIONS": imps,
             "DEVICE_REACH": safe_int(r.get("DEVICE_REACH")),
             "HOUSEHOLD_REACH": safe_int(r.get("HH_REACH")),
+            "STORE_PANEL_REACH": visitors,
             "STORE_VISITS": store_visits,
             "STORE_VISIT_RATE": svr,
+            "STORE_VR": svr,
+            "WEB_PANEL_REACH": web_v,
             "WEB_VISITS": web_visits,
+            "WEB_VISIT_RATE": wvr,
+            "WEB_VR": wvr,
             "VISIT_RATE": svr,
+            "MULTIPLIER": multiplier,
         })
 
     return v6_response(dmas)
@@ -2226,7 +2373,7 @@ def optimize():
         results.append({
             "DIM_TYPE": r.get("DIM_TYPE"),
             "DIM_KEY": r.get("DIM_KEY"),
-            "DIM_NAME": r.get("DIM_NAME"),
+            "DIM_NAME": decode_name(r.get("DIM_NAME")),
             "IMPS": safe_int(r.get("IMPS")),
             "WEB_VISITS": safe_int(r.get("WEB_VISITS")),
             "STORE_VISITS": safe_int(r.get("STORE_VISITS")),
@@ -2293,10 +2440,17 @@ def optimize_geo():
 
     results = []
     for r in rows:
+        dim_type = r.get("DIM_TYPE")
+        dim_name = r.get("DIM_NAME")
+        # Resolve DMA codes to friendly names
+        if dim_type == "dma":
+            dim_name = resolve_dma_name(dim_name)
+        else:
+            dim_name = decode_name(dim_name)
         results.append({
-            "DIM_TYPE": r.get("DIM_TYPE"),
+            "DIM_TYPE": dim_type,
             "DIM_KEY": r.get("DIM_KEY"),
-            "DIM_NAME": r.get("DIM_NAME"),
+            "DIM_NAME": dim_name,
             "IMPS": safe_int(r.get("IMPS")),
             "WEB_VISITS": safe_int(r.get("WEB_VISITS")),
             "STORE_VISITS": safe_int(r.get("STORE_VISITS")),
