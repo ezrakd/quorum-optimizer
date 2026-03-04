@@ -528,16 +528,19 @@ def safe_int(val, default=0):
 def decode_name(val):
     """URL-decode a campaign/creative/line-item name.
 
-    Handles double-encoding (%2520 → %20 → space) by decoding up to 2 times.
-    FreeWheel and MNTN send URL-encoded names; Magnite/Causal are usually clean.
+    Handles multi-level encoding by decoding iteratively until stable.
+    FreeWheel data has triple-encoded names (%252520 → %2520 → %20 → space).
+    MNTN has double-encoding. Magnite/Causal are usually clean.
+    Max 5 passes to prevent infinite loops on malformed data.
     """
     if not val or not isinstance(val, str):
         return val or ""
-    result = unquote(val)
-    # Handle double-encoding: if %25 was in original, first pass turns it to %,
-    # second pass decodes the resulting %XX sequences
-    if "%" in result:
-        result = unquote(result)
+    result = val
+    for _ in range(5):
+        decoded = unquote(result)
+        if decoded == result:
+            break
+        result = decoded
     return result
 
 
@@ -1376,8 +1379,8 @@ def campaign_performance():
         f"""
         SELECT
             IO_ID,
-            MAX(IO_NAME) AS IO_NAME,
-            MAX(PLATFORM_NAME) AS PLATFORM_NAME,
+            MIN(IO_NAME) AS IO_NAME,
+            MIN(PLATFORM_NAME) AS PLATFORM_NAME,
             SUM(IMPRESSIONS) AS impressions,
             SUM(DEVICE_REACH) AS device_reach,
             SUM(HOUSEHOLD_REACH) AS hh_reach,
@@ -1489,9 +1492,9 @@ def lineitem_performance():
     imp_rows = execute_query(
         f"""
         SELECT
-            IO_ID, MAX(IO_NAME) AS IO_NAME,
-            LI_ID, MAX(LI_NAME) AS LI_NAME,
-            MAX(PLATFORM_NAME) AS PLATFORM_NAME,
+            IO_ID, MIN(IO_NAME) AS IO_NAME,
+            LI_ID, MIN(LI_NAME) AS LI_NAME,
+            MIN(PLATFORM_NAME) AS PLATFORM_NAME,
             SUM(IMPRESSIONS) AS impressions,
             SUM(DEVICE_REACH) AS device_reach,
             SUM(HOUSEHOLD_REACH) AS hh_reach,
@@ -1594,15 +1597,16 @@ def creative_performance():
     start_date, end_date = parse_date_range()
     params = {"adv_id": advertiser_id, "start": str(start_date), "end": str(end_date)}
 
-    # GROUP BY ID fields only — name fields have encoding variants
+    # GROUP BY ID fields only — MIN on names prefers clean (decoded) versions
+    # over encoded variants (space ASCII 32 < % ASCII 37)
     rows = execute_query(
         f"""
         SELECT
-            CREATIVE_ID, MAX(CREATIVE_NAME) AS CREATIVE_NAME,
-            MAX(CREATIVE_SIZE) AS CREATIVE_SIZE,
-            IO_ID, MAX(IO_NAME) AS IO_NAME,
-            LI_ID, MAX(LI_NAME) AS LI_NAME,
-            MAX(PLATFORM_NAME) AS PLATFORM_NAME,
+            CREATIVE_ID, MIN(CREATIVE_NAME) AS CREATIVE_NAME,
+            MIN(CREATIVE_SIZE) AS CREATIVE_SIZE,
+            IO_ID, MIN(IO_NAME) AS IO_NAME,
+            LI_ID, MIN(LI_NAME) AS LI_NAME,
+            MIN(PLATFORM_NAME) AS PLATFORM_NAME,
             SUM(IMPRESSIONS) AS impressions,
             SUM(DEVICE_REACH) AS device_reach,
             SUM(HOUSEHOLD_REACH) AS hh_reach,
@@ -2315,7 +2319,7 @@ def optimize():
 
         UNION ALL
 
-        SELECT 'campaign', IO_ID::VARCHAR, MAX(IO_NAME),
+        SELECT 'campaign', IO_ID::VARCHAR, MIN(IO_NAME),
             SUM(IMPRESSIONS), SUM(WEB_VISITORS), SUM(VISITORS),
             {vr_web}, {vr_store}
         FROM {T['PERF_PUB']}
@@ -2325,7 +2329,7 @@ def optimize():
 
         UNION ALL
 
-        SELECT 'lineitem', LI_ID::VARCHAR, MAX(LI_NAME),
+        SELECT 'lineitem', LI_ID::VARCHAR, MIN(LI_NAME),
             SUM(IMPRESSIONS), SUM(WEB_VISITORS), SUM(VISITORS),
             {vr_web}, {vr_store}
         FROM {T['PERF_PUB']}
