@@ -1698,15 +1698,22 @@ def publisher_performance():
     if advertiser_id is None:
         return api_error("advertiser_id is required")
 
-    group_by = request.args.get("group_by", "publisher")  # publisher|supply_vendor|site_id
+    group_by = request.args.get("group_by", "publisher")  # publisher|supply_vendor|site_id|publisher_code
     start_date, end_date = parse_date_range()
     params = {"adv_id": advertiser_id, "start": str(start_date), "end": str(end_date)}
 
+    # Default "publisher" uses COALESCE to pick best available name across DSPs:
+    # - Trade Desk → PUBLISHER (SITE_DOMAIN: mail.yahoo.com, foxnews.com, etc.)
+    # - MNTN → PUBLISHER_CODE (CTV networks: NBC, HBO Max, Tubi, etc.)
+    # - Adelphic → SITE_ID (most rows) or PUBLISHER (some rows)
+    # - FreeWheel → PUBLISHER (SITE_DOMAIN)
+    # Explicit group_by values still target a single column for debugging/drill-down.
     group_col = {
-        "publisher": "PUBLISHER",
+        "publisher": "COALESCE(NULLIF(PUBLISHER, '0'), NULLIF(PUBLISHER_CODE, '0'), NULLIF(SUPPLY_VENDOR, '0'), NULLIF(SITE_ID, '0'), '(Unknown)')",
         "supply_vendor": "SUPPLY_VENDOR",
         "site_id": "SITE_ID",
-    }.get(group_by, "PUBLISHER")
+        "publisher_code": "PUBLISHER_CODE",
+    }.get(group_by, "COALESCE(NULLIF(PUBLISHER, '0'), NULLIF(PUBLISHER_CODE, '0'), NULLIF(SUPPLY_VENDOR, '0'), NULLIF(SITE_ID, '0'), '(Unknown)')")
 
     rows = execute_query(
         f"""
@@ -1741,7 +1748,7 @@ def publisher_performance():
         svr = safe_visit_rate(visitors, imps, multiplier)
         wvr = safe_visit_rate(web_v, imps, multiplier)
         raw_pub = r.get("GROUP_VALUE") or ""
-        pub_name = "(All Publishers)" if raw_pub in ("0", "") else raw_pub
+        pub_name = "(All Publishers)" if raw_pub in ("0", "", "(Unknown)") else raw_pub
         publishers.append({
             "PUBLISHER": pub_name,
             "NAME": pub_name,
@@ -2359,13 +2366,15 @@ def optimize():
 
         UNION ALL
 
-        SELECT 'site', PUBLISHER, NULL,
+        SELECT 'site',
+            COALESCE(NULLIF(PUBLISHER, '0'), NULLIF(PUBLISHER_CODE, '0'), NULLIF(SUPPLY_VENDOR, '0'), NULLIF(SITE_ID, '0'), '(Unknown)'),
+            NULL,
             SUM(IMPRESSIONS), SUM(WEB_VISITORS), SUM(VISITORS),
             {vr_web}, {vr_store}
         FROM {T['PERF_PUB']}
         {pub_filter}
-          AND PUBLISHER IS NOT NULL AND PUBLISHER != ''
-        GROUP BY PUBLISHER
+          AND COALESCE(NULLIF(PUBLISHER, '0'), NULLIF(PUBLISHER_CODE, '0'), NULLIF(SUPPLY_VENDOR, '0'), NULLIF(SITE_ID, '0')) IS NOT NULL
+        GROUP BY COALESCE(NULLIF(PUBLISHER, '0'), NULLIF(PUBLISHER_CODE, '0'), NULLIF(SUPPLY_VENDOR, '0'), NULLIF(SITE_ID, '0'), '(Unknown)')
         HAVING SUM(IMPRESSIONS) >= 500
 
         ORDER BY 1, 4 DESC
