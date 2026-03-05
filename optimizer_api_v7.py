@@ -831,6 +831,7 @@ def get_web_visits_total(advertiser_id, start_date, end_date):
         FROM {T['HH_WEB']}
         WHERE AD_IMPRESSION_ADVERTISER_ID = %(adv_id)s
           AND WEB_VISIT_DATE BETWEEN %(start)s AND %(end)s
+          AND IS_LAST_TOUCH = TRUE
         """,
         {"adv_id": advertiser_id, "start": str(start_date), "end": str(end_date)},
         fetch="one",
