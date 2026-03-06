@@ -1,3 +1,6 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 """
 Quorum Optimizer Server — Unified Entry Point
 ===============================================
